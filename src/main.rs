@@ -229,12 +229,8 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
         let hash = hash_output(&output);
 
         if hash != last_hash {
-            let rule_matches = select_rules(
-                &output,
-                &config.rules,
-                &config.rule_eval,
-                active_rule.as_deref(),
-            )?;
+            let rule_matches =
+                evaluate_rules(&config, &mut logger, &output, active_rule.as_deref())?;
             if !rule_matches.is_empty() {
                 let mut stop_after = false;
                 for rule_match in rule_matches {
@@ -391,6 +387,19 @@ fn select_rules<'a>(
             }])
         }
     }
+}
+
+fn evaluate_rules<'a>(
+    config: &'a ResolvedConfig,
+    logger: &mut Logger,
+    output: &str,
+    active_rule: Option<&str>,
+) -> Result<Vec<RuleMatch<'a>>> {
+    let matches = select_rules(output, &config.rules, &config.rule_eval, active_rule)?;
+    for rule_match in &matches {
+        logger.log(LogEvent::matched(config, rule_match.rule.id.as_deref()))?;
+    }
+    Ok(matches)
 }
 
 fn matches_rule(rule: &Rule, output: &str) -> Result<bool> {
@@ -945,6 +954,17 @@ impl LogEvent {
             sends: Some(sends),
         }
     }
+
+    fn matched(config: &ResolvedConfig, rule_id: Option<&str>) -> Self {
+        Self {
+            event: "match".to_string(),
+            timestamp: String::new(),
+            target: config.target.clone(),
+            rule_id: rule_id.map(|value| value.to_string()),
+            detail: None,
+            sends: None,
+        }
+    }
 }
 
 struct Logger {
@@ -1052,9 +1072,12 @@ fn status_line(
         format!("{}/{}", send_count, max_sends)
     };
     let rule = rule_id.unwrap_or("<unnamed>");
+    let icon = ">";
+    let color = "\u{001B}[32m";
+    let reset = "\u{001B}[0m";
     format!(
-        "status: target={} progress={} rule={} elapsed={}",
-        config.target, progress, rule, elapsed
+        "{}{} status:{} target={} progress={} rule={} elapsed={}{}",
+        color, icon, reset, config.target, progress, rule, elapsed, reset
     )
 }
 
