@@ -157,12 +157,12 @@ cli:
     examples:
       - "loopmux run --config loop.yaml"
       - "loopmux run --config loop.yaml --dry-run"
-      - "loopmux run --target ai:5.0 --iterations 10"
+      - "loopmux run --config loop.yaml --target ai:5.0 --iterations 10"
 ```
 
 ## CLI / Help
 - `loopmux --help`: explain main commands and config layout.
-- `loopmux run --config loop.yaml`: execute loop.
+- `loopmux run --config loop.yaml`: execute loop (supports overrides like `--target`, `--iterations`).
 - `loopmux run --dry-run`: validate config, tmux target, and templates without sending.
 
 ## Homebrew Distribution (outline)
@@ -175,7 +175,6 @@ cli:
 - `loopmux run`: execute a loop (accepts `--config`, `--target`, `--iterations`, `--dry-run`).
 - `loopmux validate`: validate config only (alias of `run --dry-run`).
 - `loopmux init`: scaffold a YAML config template.
-```
 
 ## Notes on Current Script
 - The hash approach works but re-captures the same buffer.
@@ -192,40 +191,40 @@ cli:
 
 ## Execution Plan (Epics, Tasks, Subtasks)
 ### Epic 1: Repo + CLI Skeleton
-- [ ] Task 1.1: Initialize Rust project for `loopmux`.
-- [ ] Subtask 1.1.1: Add CLI with `run`, `validate`, `init`.
-- [ ] Subtask 1.1.2: `--help` content with config summary + examples.
-- [ ] Subtask 1.1.3: `--dry-run` validation path.
+- [x] Task 1.1: Initialize Rust project for `loopmux`.
+- [x] Subtask 1.1.1: Add CLI with `run`, `validate`, `init`.
+- [x] Subtask 1.1.2: `--help` content with config summary + examples.
+- [x] Subtask 1.1.3: `--dry-run` validation path.
 
 ### Epic 2: Config + Rule Engine
-- [ ] Task 2.1: YAML schema parsing (`default_action`, `rules`, `delay`).
-- [ ] Subtask 2.1.1: Match `include` and `exclude` semantics.
-- [ ] Subtask 2.1.2: `rule_eval` strategies (first_match default).
-- [ ] Subtask 2.1.3: Template variable expansion.
+- [x] Task 2.1: YAML schema parsing (`default_action`, `rules`, `delay`).
+- [x] Subtask 2.1.1: Match `include` and `exclude` semantics.
+- [x] Subtask 2.1.2: `rule_eval` strategies (first_match default).
+- [x] Subtask 2.1.3: Template variable expansion.
 
 ### Epic 3: tmux Integration
-- [ ] Task 3.1: Capture pane output with cursor tracking.
-- [ ] Subtask 3.1.1: Trigger detection on incremental output.
-- [ ] Subtask 3.1.2: Safe send-keys with delay strategies.
-- [ ] Subtask 3.1.3: Target validation and error handling.
+- [x] Task 3.1: Capture pane output with cursor tracking.
+- [x] Subtask 3.1.1: Trigger detection on incremental output.
+- [x] Subtask 3.1.2: Safe send-keys with delay strategies.
+- [x] Subtask 3.1.3: Target validation and error handling.
 
 ### Epic 4: UX/TUI
-- [ ] Task 4.1: Minimal TUI layout (status, output, footer).
-- [ ] Subtask 4.1.1: Progress bar + delay countdown.
-- [ ] Subtask 4.1.2: Icons + color states.
+- [x] Task 4.1: Minimal TUI layout (status, output, footer).
+- [x] Subtask 4.1.1: Progress bar + delay countdown.
+- [x] Subtask 4.1.2: Icons + color states.
 
 ### Epic 5: Logging + Observability
-- [ ] Task 5.1: Structured logging (text + JSONL).
-- [ ] Subtask 5.1.1: Event types (match, send, error, pause).
+- [x] Task 5.1: Structured logging (text + JSONL).
+- [x] Subtask 5.1.1: Event types (match, send, error, pause).
 
 ### Epic 6: Packaging
-- [ ] Task 6.1: Homebrew formula metadata.
-- [ ] Subtask 6.1.1: Release artifact naming.
+- [x] Task 6.1: Homebrew formula metadata.
+- [x] Subtask 6.1.1: Release artifact naming.
 
 ### Epic 7: Delivery Workflow
-- [ ] Task 7.1: Create a worktree branch.
-- [ ] Task 7.2: Implement in order of epics.
-- [ ] Task 7.3: Commit changes.
-- [ ] Task 7.4: Open PR.
-- [ ] Task 7.5: Review/fix x10.
+- [x] Task 7.1: Create a worktree branch.
+- [x] Task 7.2: Implement in order of epics.
+- [x] Task 7.3: Commit changes.
+- [x] Task 7.4: Open PR.
+- [x] Task 7.5: Review/fix x10.
 - [ ] Task 7.6: Merge to main.
