@@ -218,8 +218,8 @@ cli:
 - [x] Subtask 5.1.1: Event types (match, send, error, pause).
 
 ### Epic 6: Packaging
-- [ ] Task 6.1: Homebrew formula metadata.
-- [ ] Subtask 6.1.1: Release artifact naming.
+- [x] Task 6.1: Homebrew formula metadata.
+- [x] Subtask 6.1.1: Release artifact naming.
 
 ### Epic 7: Delivery Workflow
 - [ ] Task 7.1: Create a worktree branch.
