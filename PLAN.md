@@ -157,12 +157,12 @@ cli:
     examples:
       - "loopmux run --config loop.yaml"
       - "loopmux run --config loop.yaml --dry-run"
-      - "loopmux run --target ai:5.0 --iterations 10"
+      - "loopmux run --config loop.yaml --target ai:5.0 --iterations 10"
 ```
 
 ## CLI / Help
 - `loopmux --help`: explain main commands and config layout.
-- `loopmux run --config loop.yaml`: execute loop.
+- `loopmux run --config loop.yaml`: execute loop (supports overrides like `--target`, `--iterations`).
 - `loopmux run --dry-run`: validate config, tmux target, and templates without sending.
 
 ## Homebrew Distribution (outline)
@@ -175,7 +175,6 @@ cli:
 - `loopmux run`: execute a loop (accepts `--config`, `--target`, `--iterations`, `--dry-run`).
 - `loopmux validate`: validate config only (alias of `run --dry-run`).
 - `loopmux init`: scaffold a YAML config template.
-```
 
 ## Notes on Current Script
 - The hash approach works but re-captures the same buffer.
@@ -198,10 +197,10 @@ cli:
 - [x] Subtask 1.1.3: `--dry-run` validation path.
 
 ### Epic 2: Config + Rule Engine
-- [ ] Task 2.1: YAML schema parsing (`default_action`, `rules`, `delay`).
-- [ ] Subtask 2.1.1: Match `include` and `exclude` semantics.
-- [ ] Subtask 2.1.2: `rule_eval` strategies (first_match default).
-- [ ] Subtask 2.1.3: Template variable expansion.
+- [x] Task 2.1: YAML schema parsing (`default_action`, `rules`, `delay`).
+- [x] Subtask 2.1.1: Match `include` and `exclude` semantics.
+- [x] Subtask 2.1.2: `rule_eval` strategies (first_match default).
+- [x] Subtask 2.1.3: Template variable expansion.
 
 ### Epic 3: tmux Integration
 - [ ] Task 3.1: Capture pane output with cursor tracking.
