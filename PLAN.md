@@ -192,10 +192,10 @@ cli:
 
 ## Execution Plan (Epics, Tasks, Subtasks)
 ### Epic 1: Repo + CLI Skeleton
-- [ ] Task 1.1: Initialize Rust project for `loopmux`.
-- [ ] Subtask 1.1.1: Add CLI with `run`, `validate`, `init`.
-- [ ] Subtask 1.1.2: `--help` content with config summary + examples.
-- [ ] Subtask 1.1.3: `--dry-run` validation path.
+- [x] Task 1.1: Initialize Rust project for `loopmux`.
+- [x] Subtask 1.1.1: Add CLI with `run`, `validate`, `init`.
+- [x] Subtask 1.1.2: `--help` content with config summary + examples.
+- [x] Subtask 1.1.3: `--dry-run` validation path.
 
 ### Epic 2: Config + Rule Engine
 - [ ] Task 2.1: YAML schema parsing (`default_action`, `rules`, `delay`).
