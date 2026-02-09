@@ -225,7 +225,14 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
     logger.log(LogEvent::started(&config, start_timestamp.clone()))?;
 
     while config.infinite || send_count < max_sends {
-        let output = capture_pane(&config.target, 200)?;
+        let output = match capture_pane(&config.target, 200) {
+            Ok(output) => output,
+            Err(err) => {
+                let detail = err.to_string();
+                logger.log(LogEvent::error(&config, detail))?;
+                return Err(err);
+            }
+        };
         let hash = hash_output(&output);
 
         if hash != last_hash {
@@ -254,7 +261,11 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                             detail,
                         ))?;
                     }
-                    send_prompt(&config.target, &prompt)?;
+                    if let Err(err) = send_prompt(&config.target, &prompt) {
+                        let detail = err.to_string();
+                        logger.log(LogEvent::error(&config, detail))?;
+                        return Err(err);
+                    }
                     send_count = send_count.saturating_add(1);
                     last_hash = hash.clone();
                     active_rule = rule_match.rule.next.clone();
@@ -277,6 +288,7 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                         rule_match.rule.id.as_deref().unwrap_or("<unnamed>")
                     );
                     println!("{status}");
+                    logger.log(LogEvent::status(&config, status))?;
                     logger.log(LogEvent::sent(
                         &config,
                         rule_match.rule.id.as_deref(),
@@ -962,6 +974,28 @@ impl LogEvent {
             target: config.target.clone(),
             rule_id: rule_id.map(|value| value.to_string()),
             detail: None,
+            sends: None,
+        }
+    }
+
+    fn error(config: &ResolvedConfig, detail: String) -> Self {
+        Self {
+            event: "error".to_string(),
+            timestamp: String::new(),
+            target: config.target.clone(),
+            rule_id: None,
+            detail: Some(detail),
+            sends: None,
+        }
+    }
+
+    fn status(config: &ResolvedConfig, detail: String) -> Self {
+        Self {
+            event: "status".to_string(),
+            timestamp: String::new(),
+            target: config.target.clone(),
+            rule_id: None,
+            detail: Some(detail),
             sends: None,
         }
     }

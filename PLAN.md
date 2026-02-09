@@ -222,9 +222,9 @@ cli:
 - [x] Subtask 6.1.1: Release artifact naming.
 
 ### Epic 7: Delivery Workflow
-- [ ] Task 7.1: Create a worktree branch.
-- [ ] Task 7.2: Implement in order of epics.
-- [ ] Task 7.3: Commit changes.
-- [ ] Task 7.4: Open PR.
-- [ ] Task 7.5: Review/fix x10.
+- [x] Task 7.1: Create a worktree branch.
+- [x] Task 7.2: Implement in order of epics.
+- [x] Task 7.3: Commit changes.
+- [x] Task 7.4: Open PR.
+- [x] Task 7.5: Review/fix x10.
 - [ ] Task 7.6: Merge to main.
