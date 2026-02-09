@@ -203,10 +203,10 @@ cli:
 - [x] Subtask 2.1.3: Template variable expansion.
 
 ### Epic 3: tmux Integration
-- [ ] Task 3.1: Capture pane output with cursor tracking.
-- [ ] Subtask 3.1.1: Trigger detection on incremental output.
-- [ ] Subtask 3.1.2: Safe send-keys with delay strategies.
-- [ ] Subtask 3.1.3: Target validation and error handling.
+- [x] Task 3.1: Capture pane output with cursor tracking.
+- [x] Subtask 3.1.1: Trigger detection on incremental output.
+- [x] Subtask 3.1.2: Safe send-keys with delay strategies.
+- [x] Subtask 3.1.3: Target validation and error handling.
 
 ### Epic 4: UX/TUI
 - [ ] Task 4.1: Minimal TUI layout (status, output, footer).

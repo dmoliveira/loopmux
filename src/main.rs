@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use regex::Regex;
 use serde::Deserialize;
 use serde_yaml::Number;
 
@@ -52,6 +53,9 @@ struct ValidateArgs {
     /// Iterations to run, overrides config.
     #[arg(long, short = 'n')]
     iterations: Option<u32>,
+    /// Validate config without checking tmux target.
+    #[arg(long)]
+    skip_tmux: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -152,6 +156,12 @@ enum PromptBlock {
     Multi(Vec<String>),
 }
 
+#[derive(Debug)]
+struct RuleMatch<'a> {
+    rule: &'a Rule,
+    index: usize,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -164,21 +174,265 @@ fn main() -> Result<()> {
 
 fn run(args: RunArgs) -> Result<()> {
     let config = load_config(args.config.as_ref())?;
-    let resolved = resolve_config(config, args.target, args.iterations)?;
+    let resolved = resolve_config(config, args.target, args.iterations, false)?;
 
     if args.dry_run {
         print_validation(&resolved);
         return Ok(());
     }
 
-    println!("loopmux: run is not implemented yet (dry-run only).");
-    print_validation(&resolved);
+    run_loop(resolved)
+}
+
+fn run_loop(config: ResolvedConfig) -> Result<()> {
+    let mut send_count: u32 = 0;
+    let max_sends = config.iterations.unwrap_or(u32::MAX);
+    let mut last_hash = String::new();
+    let mut active_rule: Option<String> = None;
+
+    println!("loopmux: running on {}", config.target);
+    if config.infinite {
+        println!("loopmux: iterations = infinite");
+    } else {
+        println!("loopmux: iterations = {max_sends}");
+    }
+
+    while config.infinite || send_count < max_sends {
+        let output = capture_pane(&config.target, 200)?;
+        let hash = hash_output(&output);
+
+        if hash != last_hash {
+            let rule_match = select_rule(
+                &output,
+                &config.rules,
+                &config.rule_eval,
+                active_rule.as_deref(),
+            )?;
+            if let Some(rule_match) = rule_match {
+                if rule_match.rule.next.as_deref() == Some("stop") {
+                    println!(
+                        "loopmux: stopping on rule {}",
+                        rule_match.rule.id.as_deref().unwrap_or("<unnamed>")
+                    );
+                    break;
+                }
+                let action = rule_match
+                    .rule
+                    .action
+                    .as_ref()
+                    .unwrap_or(&config.default_action);
+                let prompt = build_prompt(action);
+                let delay = rule_match.rule.delay.as_ref().or(config.delay.as_ref());
+                if let Some(delay) = delay {
+                    sleep_for_delay(delay)?;
+                }
+                send_prompt(&config.target, &prompt)?;
+                send_count = send_count.saturating_add(1);
+                last_hash = hash;
+                if matches!(config.rule_eval, RuleEval::MultiMatch) {
+                    active_rule = None;
+                } else {
+                    active_rule = rule_match.rule.next.clone();
+                }
+                println!(
+                    "[{}/{}] sent via rule {}",
+                    send_count,
+                    if config.infinite { 0 } else { max_sends },
+                    rule_match.rule.id.as_deref().unwrap_or("<unnamed>")
+                );
+            }
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+    }
+
+    println!("loopmux: stopped after {send_count} sends");
     Ok(())
+}
+
+fn capture_pane(target: &str, lines: usize) -> Result<String> {
+    let output = std::process::Command::new("tmux")
+        .args(["capture-pane", "-p", "-S"])
+        .arg(format!("-{lines}"))
+        .args(["-t", target])
+        .output()
+        .context("failed to capture tmux pane")?;
+    if !output.status.success() {
+        bail!("tmux capture-pane failed");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn send_prompt(target: &str, prompt: &str) -> Result<()> {
+    let output = std::process::Command::new("tmux")
+        .args(["send-keys", "-t", target, prompt, "Enter"])
+        .output()
+        .context("failed to send tmux keys")?;
+    if !output.status.success() {
+        bail!("tmux send-keys failed");
+    }
+    Ok(())
+}
+
+fn hash_output(output: &str) -> String {
+    let mut hash: u64 = 14695981039346656037;
+    for byte in output.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    format!("{hash:x}")
+}
+
+fn select_rule<'a>(
+    output: &str,
+    rules: &'a [Rule],
+    rule_eval: &RuleEval,
+    active_rule: Option<&str>,
+) -> Result<Option<RuleMatch<'a>>> {
+    let mut candidates = Vec::new();
+    for (index, rule) in rules.iter().enumerate() {
+        if let Some(active) = active_rule {
+            if rule.id.as_deref() != Some(active) {
+                continue;
+            }
+        }
+        if !matches_rule(rule, output)? {
+            continue;
+        }
+        candidates.push(RuleMatch { rule, index });
+        if matches!(rule_eval, RuleEval::FirstMatch) {
+            break;
+        }
+    }
+
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+
+    match rule_eval {
+        RuleEval::FirstMatch | RuleEval::MultiMatch => Ok(Some(candidates.remove(0))),
+        RuleEval::Priority => {
+            let mut best = &candidates[0];
+            for candidate in &candidates[1..] {
+                let priority = candidate.rule.priority.unwrap_or(0);
+                let best_priority = best.rule.priority.unwrap_or(0);
+                if priority > best_priority {
+                    best = candidate;
+                } else if priority == best_priority && candidate.index < best.index {
+                    best = candidate;
+                }
+            }
+            Ok(Some(RuleMatch {
+                rule: best.rule,
+                index: best.index,
+            }))
+        }
+    }
+}
+
+fn matches_rule(rule: &Rule, output: &str) -> Result<bool> {
+    let match_defined = rule.match_.as_ref().map(has_match).unwrap_or(false);
+    let matches = if match_defined {
+        rule.match_
+            .as_ref()
+            .map(|criteria| matches_criteria(criteria, output))
+            .unwrap_or(Ok(false))?
+    } else {
+        true
+    };
+    if !matches {
+        return Ok(false);
+    }
+    if let Some(exclude) = &rule.exclude {
+        if matches_criteria(exclude, output)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn matches_criteria(criteria: &MatchCriteria, output: &str) -> Result<bool> {
+    if let Some(regex) = &criteria.regex {
+        let re = Regex::new(regex).context("invalid regex")?;
+        if re.is_match(output) {
+            return Ok(true);
+        }
+    }
+    if let Some(contains) = &criteria.contains {
+        if output.contains(contains) {
+            return Ok(true);
+        }
+    }
+    if let Some(prefix) = &criteria.starts_with {
+        if output.starts_with(prefix) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn build_prompt(action: &Action) -> String {
+    let mut parts = Vec::new();
+    push_block(&mut parts, action.pre.as_ref());
+    push_block(&mut parts, action.prompt.as_ref());
+    push_block(&mut parts, action.post.as_ref());
+    parts.join("\n")
+}
+
+fn push_block(parts: &mut Vec<String>, block: Option<&PromptBlock>) {
+    let Some(block) = block else {
+        return;
+    };
+    match block {
+        PromptBlock::Single(text) => parts.push(text.clone()),
+        PromptBlock::Multi(items) => parts.extend(items.iter().cloned()),
+    }
+}
+
+fn sleep_for_delay(delay: &DelayConfig) -> Result<()> {
+    let seconds = compute_delay_seconds(delay)?;
+    if seconds > 0 {
+        std::thread::sleep(std::time::Duration::from_secs(seconds));
+    }
+    Ok(())
+}
+
+fn compute_delay_seconds(delay: &DelayConfig) -> Result<u64> {
+    match delay.mode {
+        DelayMode::Fixed => Ok(delay.value.unwrap_or(0)),
+        DelayMode::Range => random_between(delay.min.unwrap_or(0), delay.max.unwrap_or(0)),
+        DelayMode::Jitter => {
+            let base = random_between(delay.min.unwrap_or(0), delay.max.unwrap_or(0))? as f64;
+            let jitter = delay.jitter.unwrap_or(0.0);
+            let scale = 1.0 + jitter;
+            Ok((base * scale) as u64)
+        }
+        DelayMode::Backoff => delay
+            .backoff
+            .as_ref()
+            .map(|backoff| backoff.base)
+            .ok_or_else(|| anyhow::anyhow!("delay.mode=backoff requires backoff")),
+    }
+}
+
+fn random_between(min: u64, max: u64) -> Result<u64> {
+    if min == 0 || max == 0 || min > max {
+        bail!("invalid delay range: {min}-{max}");
+    }
+    if min == max {
+        return Ok(min);
+    }
+    let span = max - min + 1;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("system time error")?
+        .subsec_nanos() as u64;
+    Ok(min + (nanos % span))
 }
 
 fn validate(args: ValidateArgs) -> Result<()> {
     let config = load_config(args.config.as_ref())?;
-    let resolved = resolve_config(config, args.target, args.iterations)?;
+    let resolved = resolve_config(config, args.target, args.iterations, args.skip_tmux)?;
     print_validation(&resolved);
     Ok(())
 }
@@ -217,12 +471,14 @@ struct ResolvedConfig {
     delay: Option<DelayConfig>,
     prompt_placeholders: Vec<String>,
     template_vars: Vec<String>,
+    default_action: Action,
 }
 
 fn resolve_config(
     mut config: Config,
     target_override: Option<String>,
     iterations_override: Option<u32>,
+    skip_tmux: bool,
 ) -> Result<ResolvedConfig> {
     if let Some(target) = target_override {
         config.target = Some(target);
@@ -247,16 +503,15 @@ fn resolve_config(
         bail!("iterations must be > 0 unless infinite is true");
     }
 
-    let has_prompt = config
-        .default_action
-        .as_ref()
-        .and_then(|action| action.prompt.as_ref())
-        .is_some();
+    let Some(default_action) = config.default_action else {
+        bail!("default_action.prompt is required");
+    };
+    let has_prompt = default_action.prompt.as_ref().is_some();
     if !has_prompt {
         bail!("default_action.prompt is required");
     }
 
-    let prompt_placeholders = collect_template_placeholders(&config);
+    let prompt_placeholders = collect_template_placeholders(&default_action, &config.rules);
     let template_vars = config.template_vars.unwrap_or_default();
     let template_var_keys = template_vars.keys().cloned().collect::<Vec<_>>();
     let missing_template_vars = find_missing_vars(&prompt_placeholders, &template_vars);
@@ -276,7 +531,10 @@ fn resolve_config(
         validate_delay(delay)?;
     }
 
-    validate_target(&target)?;
+    if !skip_tmux {
+        validate_target(&target)?;
+        validate_tmux_target(&target)?;
+    }
 
     Ok(ResolvedConfig {
         target,
@@ -288,6 +546,7 @@ fn resolve_config(
         delay,
         prompt_placeholders,
         template_vars: template_var_keys,
+        default_action,
     })
 }
 
@@ -408,6 +667,36 @@ fn validate_target(target: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_tmux_target(target: &str) -> Result<()> {
+    let output = std::process::Command::new("tmux")
+        .arg("-V")
+        .output()
+        .context("failed to run tmux -V")?;
+    if !output.status.success() {
+        bail!("tmux not available on PATH");
+    }
+    let output = std::process::Command::new("tmux")
+        .args([
+            "list-panes",
+            "-a",
+            "-F",
+            "#{session_name}:#{window_index}.#{pane_index}",
+        ])
+        .output()
+        .context("failed to run tmux list-panes")?;
+    if !output.status.success() {
+        bail!("tmux list-panes failed");
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if line.trim() == target {
+            return Ok(());
+        }
+    }
+    bail!("tmux target not found: {target}");
+}
+
 fn validate_delay(delay: &DelayConfig) -> Result<()> {
     match delay.mode {
         DelayMode::Fixed => {
@@ -444,12 +733,13 @@ fn validate_delay(delay: &DelayConfig) -> Result<()> {
     Ok(())
 }
 
-fn collect_template_placeholders(config: &Config) -> Vec<String> {
+fn collect_template_placeholders(
+    default_action: &Action,
+    rules: &Option<Vec<Rule>>,
+) -> Vec<String> {
     let mut vars = HashSet::new();
-    if let Some(action) = &config.default_action {
-        collect_action_placeholders(action, &mut vars);
-    }
-    if let Some(rules) = &config.rules {
+    collect_action_placeholders(default_action, &mut vars);
+    if let Some(rules) = rules {
         for rule in rules {
             if let Some(action) = &rule.action {
                 collect_action_placeholders(action, &mut vars);
