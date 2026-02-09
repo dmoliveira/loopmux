@@ -210,11 +210,11 @@ cli:
 
 ### Epic 4: UX/TUI
 - [x] Task 4.1: Minimal TUI layout (status, output, footer).
-- [ ] Subtask 4.1.1: Progress bar + delay countdown.
+- [x] Subtask 4.1.1: Progress bar + delay countdown.
 - [ ] Subtask 4.1.2: Icons + color states.
 
 ### Epic 5: Logging + Observability
-- [ ] Task 5.1: Structured logging (text + JSONL).
+- [x] Task 5.1: Structured logging (text + JSONL).
 - [ ] Subtask 5.1.1: Event types (match, send, error, pause).
 
 ### Epic 6: Packaging

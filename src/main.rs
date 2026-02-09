@@ -1,10 +1,13 @@
 use std::collections::{BTreeMap, HashSet};
+use std::io::Write;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use regex::Regex;
 use serde::Deserialize;
+use serde::Serialize;
+use serde_json::json;
 use serde_yaml::Number;
 use time::OffsetDateTime;
 
@@ -75,6 +78,7 @@ struct Config {
     default_action: Option<Action>,
     delay: Option<DelayConfig>,
     rules: Option<Vec<Rule>>,
+    logging: Option<LoggingConfig>,
     template_vars: Option<TemplateVars>,
 }
 
@@ -151,6 +155,19 @@ struct BackoffConfig {
 }
 
 #[derive(Debug, Deserialize)]
+struct LoggingConfig {
+    path: Option<PathBuf>,
+    format: Option<LogFormat>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum LogFormat {
+    Text,
+    Jsonl,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum PromptBlock {
     Single(String),
@@ -192,6 +209,7 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
     let mut active_rule: Option<String> = None;
     let mut backoff_state: std::collections::HashMap<String, BackoffState> =
         std::collections::HashMap::new();
+    let mut logger = Logger::new(config.logging.clone())?;
 
     let start = OffsetDateTime::now_utc();
     let start_timestamp = start
@@ -204,6 +222,7 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
         println!("loopmux: iterations = {max_sends}");
     }
     println!("loopmux: started at {start_timestamp}");
+    logger.log(LogEvent::started(&config, start_timestamp.clone()))?;
 
     while config.infinite || send_count < max_sends {
         let output = capture_pane(&config.target, 200)?;
@@ -230,7 +249,14 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                     let prompt = build_prompt(action);
                     let delay = rule_match.rule.delay.as_ref().or(config.delay.as_ref());
                     if let Some(delay) = delay {
-                        sleep_for_delay(delay, &rule_match, &mut backoff_state)?;
+                        let delay_seconds =
+                            sleep_for_delay(delay, &rule_match, &mut backoff_state)?;
+                        let detail = format!("delay {}s", delay_seconds);
+                        logger.log(LogEvent::delay_scheduled(
+                            &config,
+                            rule_match.rule.id.as_deref(),
+                            detail,
+                        ))?;
                     }
                     send_prompt(&config.target, &prompt)?;
                     send_count = send_count.saturating_add(1);
@@ -240,18 +266,34 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                     let timestamp = now
                         .format(&time::format_description::well_known::Rfc3339)
                         .unwrap_or_else(|_| "unknown".into());
+                    let elapsed = format_duration(start, now);
+                    let status = status_line(
+                        &config,
+                        send_count,
+                        max_sends,
+                        rule_match.rule.id.as_deref(),
+                        &elapsed,
+                    );
                     println!(
-                        "[{}/{}] sent via rule {} at {timestamp}",
+                        "[{}/{}] sent via rule {} at {timestamp} (elapsed {elapsed})",
                         send_count,
                         if config.infinite { 0 } else { max_sends },
                         rule_match.rule.id.as_deref().unwrap_or("<unnamed>")
                     );
+                    println!("{status}");
+                    logger.log(LogEvent::sent(
+                        &config,
+                        rule_match.rule.id.as_deref(),
+                        timestamp,
+                        &prompt,
+                    ))?;
                     if !config.infinite && send_count >= max_sends {
                         break;
                     }
                 }
                 if stop_after {
                     println!("loopmux: stopping due to stop rule");
+                    logger.log(LogEvent::stopped(&config, "stop rule matched", send_count))?;
                     break;
                 }
                 if matches!(config.rule_eval, RuleEval::MultiMatch) {
@@ -263,7 +305,10 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
         }
     }
 
-    println!("loopmux: stopped after {send_count} sends");
+    let end = OffsetDateTime::now_utc();
+    let elapsed = format_duration(start, end);
+    println!("loopmux: stopped after {send_count} sends (elapsed {elapsed})");
+    logger.log(LogEvent::stopped(&config, "completed", send_count))?;
     Ok(())
 }
 
@@ -411,12 +456,12 @@ fn sleep_for_delay(
     delay: &DelayConfig,
     rule_match: &RuleMatch<'_>,
     backoff_state: &mut std::collections::HashMap<String, BackoffState>,
-) -> Result<()> {
+) -> Result<u64> {
     let seconds = compute_delay_seconds(delay, rule_match, backoff_state)?;
     if seconds > 0 {
         std::thread::sleep(std::time::Duration::from_secs(seconds));
     }
-    Ok(())
+    Ok(seconds)
 }
 
 fn compute_delay_seconds(
@@ -430,8 +475,11 @@ fn compute_delay_seconds(
         DelayMode::Jitter => {
             let base = random_between(delay.min.unwrap_or(0), delay.max.unwrap_or(0))? as f64;
             let jitter = delay.jitter.unwrap_or(0.0);
-            let scale = 1.0 + jitter;
-            Ok((base * scale) as u64)
+            let spread = base * jitter;
+            let min = (base - spread).max(0.0);
+            let max = base + spread;
+            let jittered = random_between(min as u64, max as u64)? as f64;
+            Ok(jittered as u64)
         }
         DelayMode::Backoff => delay
             .backoff
@@ -461,7 +509,7 @@ fn compute_delay_seconds(
 }
 
 fn random_between(min: u64, max: u64) -> Result<u64> {
-    if min == 0 || max == 0 || min > max {
+    if min > max {
         bail!("invalid delay range: {min}-{max}");
     }
     if min == max {
@@ -517,6 +565,19 @@ struct ResolvedConfig {
     prompt_placeholders: Vec<String>,
     template_vars: Vec<String>,
     default_action: Action,
+    logging: LoggingConfigResolved,
+}
+
+#[derive(Debug, Clone)]
+struct LoggingConfigResolved {
+    path: Option<PathBuf>,
+    format: LogFormatResolved,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LogFormatResolved {
+    Text,
+    Jsonl,
 }
 
 #[derive(Debug)]
@@ -576,6 +637,7 @@ fn resolve_config(
     let rule_eval = config.rule_eval.unwrap_or(RuleEval::FirstMatch);
     let rules = config.rules.unwrap_or_default();
     validate_rules(&rules)?;
+    let logging = resolve_logging(config.logging);
 
     let delay = config.delay;
     if let Some(ref delay) = delay {
@@ -598,6 +660,7 @@ fn resolve_config(
         prompt_placeholders,
         template_vars: template_var_keys,
         default_action,
+        logging,
     })
 }
 
@@ -621,6 +684,18 @@ fn print_validation(config: &ResolvedConfig) {
     if !config.template_vars.is_empty() {
         println!("- template_vars: {}", config.template_vars.join(", "));
     }
+    if let Some(path) = &config.logging.path {
+        println!(
+            "- logging: {} ({})",
+            path.display(),
+            log_format_label(config.logging.format)
+        );
+    } else {
+        println!(
+            "- logging: stdout ({})",
+            log_format_label(config.logging.format)
+        );
+    }
     println!("- note: dry-run only, no tmux commands sent");
 }
 
@@ -629,6 +704,13 @@ fn rule_eval_label(rule_eval: &RuleEval) -> &'static str {
         RuleEval::FirstMatch => "first_match",
         RuleEval::MultiMatch => "multi_match",
         RuleEval::Priority => "priority",
+    }
+}
+
+fn log_format_label(format: LogFormatResolved) -> &'static str {
+    match format {
+        LogFormatResolved::Text => "text",
+        LogFormatResolved::Jsonl => "jsonl",
     }
 }
 
@@ -654,6 +736,21 @@ fn delay_summary(delay: &DelayConfig) -> String {
                 "backoff".to_string()
             }
         }
+    }
+}
+
+fn resolve_logging(config: Option<LoggingConfig>) -> LoggingConfigResolved {
+    let config = config.unwrap_or(LoggingConfig {
+        path: None,
+        format: None,
+    });
+    let format = match config.format.unwrap_or(LogFormat::Text) {
+        LogFormat::Text => LogFormatResolved::Text,
+        LogFormat::Jsonl => LogFormatResolved::Jsonl,
+    };
+    LoggingConfigResolved {
+        path: config.path,
+        format,
     }
 }
 
@@ -787,6 +884,178 @@ fn validate_delay(delay: &DelayConfig) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct LogEvent {
+    event: String,
+    timestamp: String,
+    target: String,
+    rule_id: Option<String>,
+    detail: Option<String>,
+    sends: Option<u32>,
+}
+
+impl LogEvent {
+    fn started(config: &ResolvedConfig, timestamp: String) -> Self {
+        Self {
+            event: "started".to_string(),
+            timestamp,
+            target: config.target.clone(),
+            rule_id: None,
+            detail: None,
+            sends: None,
+        }
+    }
+
+    fn sent(
+        config: &ResolvedConfig,
+        rule_id: Option<&str>,
+        timestamp: String,
+        prompt: &str,
+    ) -> Self {
+        Self {
+            event: "sent".to_string(),
+            timestamp,
+            target: config.target.clone(),
+            rule_id: rule_id.map(|value| value.to_string()),
+            detail: Some(prompt.to_string()),
+            sends: None,
+        }
+    }
+
+    fn delay_scheduled(config: &ResolvedConfig, rule_id: Option<&str>, detail: String) -> Self {
+        Self {
+            event: "delay".to_string(),
+            timestamp: String::new(),
+            target: config.target.clone(),
+            rule_id: rule_id.map(|value| value.to_string()),
+            detail: Some(detail),
+            sends: None,
+        }
+    }
+
+    fn stopped(config: &ResolvedConfig, detail: &str, sends: u32) -> Self {
+        Self {
+            event: "stopped".to_string(),
+            timestamp: String::new(),
+            target: config.target.clone(),
+            rule_id: None,
+            detail: Some(detail.to_string()),
+            sends: Some(sends),
+        }
+    }
+}
+
+struct Logger {
+    config: LoggingConfigResolved,
+    file: Option<std::fs::File>,
+}
+
+impl Logger {
+    fn new(config: LoggingConfigResolved) -> Result<Self> {
+        let file = if let Some(path) = &config.path {
+            Some(
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .with_context(|| format!("failed to open log file {}", path.display()))?,
+            )
+        } else {
+            None
+        };
+        Ok(Self { config, file })
+    }
+
+    fn log(&mut self, mut event: LogEvent) -> Result<()> {
+        let timestamp = OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_else(|_| "unknown".into());
+        if event.timestamp.is_empty() {
+            event.timestamp = timestamp;
+        }
+        match self.config.format {
+            LogFormatResolved::Text => self.log_text(&event),
+            LogFormatResolved::Jsonl => self.log_json(&event),
+        }
+    }
+
+    fn log_text(&mut self, event: &LogEvent) -> Result<()> {
+        let mut line = format!(
+            "[{}] {} target={}",
+            event.timestamp, event.event, event.target
+        );
+        if let Some(rule_id) = event.rule_id.as_ref() {
+            line.push_str(&format!(" rule={rule_id}"));
+        }
+        if let Some(detail) = event.detail.as_ref() {
+            let sanitized = detail.replace('"', "'");
+            line.push_str(&format!(" detail=\"{}\"", sanitized));
+        }
+        if let Some(sends) = event.sends {
+            line.push_str(&format!(" sends={sends}"));
+        }
+        line.push('\n');
+        self.write_line(&line)
+    }
+
+    fn log_json(&mut self, event: &LogEvent) -> Result<()> {
+        let value = json!({
+            "event": event.event,
+            "timestamp": event.timestamp,
+            "target": event.target,
+            "rule_id": event.rule_id,
+            "detail": event.detail,
+            "sends": event.sends,
+        });
+        let mut line = serde_json::to_string(&value).context("failed to serialize log JSON")?;
+        line.push('\n');
+        self.write_line(&line)
+    }
+
+    fn write_line(&mut self, line: &str) -> Result<()> {
+        if let Some(file) = &mut self.file {
+            file.write_all(line.as_bytes())?;
+        } else {
+            print!("{line}");
+        }
+        Ok(())
+    }
+}
+
+fn format_duration(start: OffsetDateTime, end: OffsetDateTime) -> String {
+    let duration = end - start;
+    let total_seconds = duration.whole_seconds().max(0) as u64;
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+    if hours > 0 {
+        format!("{hours}h{minutes}m{seconds}s")
+    } else if minutes > 0 {
+        format!("{minutes}m{seconds}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+fn status_line(
+    config: &ResolvedConfig,
+    send_count: u32,
+    max_sends: u32,
+    rule_id: Option<&str>,
+    elapsed: &str,
+) -> String {
+    let progress = if config.infinite {
+        String::from("infinite")
+    } else {
+        format!("{}/{}", send_count, max_sends)
+    };
+    let rule = rule_id.unwrap_or("<unnamed>");
+    format!(
+        "status: target={} progress={} rule={} elapsed={}",
+        config.target, progress, rule, elapsed
+    )
 }
 
 fn collect_template_placeholders(
