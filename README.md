@@ -15,8 +15,9 @@ loopmux watches tmux output and injects prompts when a trigger matches. You can 
 
 ## Install
 
-### Homebrew (planned)
+### Homebrew
 ```bash
+brew tap dmoliveira/tap
 brew install loopmux
 ```
 
