@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand};
 use regex::Regex;
 use serde::Deserialize;
 use serde_yaml::Number;
+use time::OffsetDateTime;
 
 #[derive(Debug, Parser)]
 #[command(name = "loopmux")]
@@ -189,57 +190,73 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
     let max_sends = config.iterations.unwrap_or(u32::MAX);
     let mut last_hash = String::new();
     let mut active_rule: Option<String> = None;
+    let mut backoff_state: std::collections::HashMap<String, BackoffState> =
+        std::collections::HashMap::new();
 
+    let start = OffsetDateTime::now_utc();
+    let start_timestamp = start
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "unknown".into());
     println!("loopmux: running on {}", config.target);
     if config.infinite {
         println!("loopmux: iterations = infinite");
     } else {
         println!("loopmux: iterations = {max_sends}");
     }
+    println!("loopmux: started at {start_timestamp}");
 
     while config.infinite || send_count < max_sends {
         let output = capture_pane(&config.target, 200)?;
         let hash = hash_output(&output);
 
         if hash != last_hash {
-            let rule_match = select_rule(
+            let rule_matches = select_rules(
                 &output,
                 &config.rules,
                 &config.rule_eval,
                 active_rule.as_deref(),
             )?;
-            if let Some(rule_match) = rule_match {
-                if rule_match.rule.next.as_deref() == Some("stop") {
+            if !rule_matches.is_empty() {
+                let mut stop_after = false;
+                for rule_match in rule_matches {
+                    if rule_match.rule.next.as_deref() == Some("stop") {
+                        stop_after = true;
+                    }
+                    let action = rule_match
+                        .rule
+                        .action
+                        .as_ref()
+                        .unwrap_or(&config.default_action);
+                    let prompt = build_prompt(action);
+                    let delay = rule_match.rule.delay.as_ref().or(config.delay.as_ref());
+                    if let Some(delay) = delay {
+                        sleep_for_delay(delay, &rule_match, &mut backoff_state)?;
+                    }
+                    send_prompt(&config.target, &prompt)?;
+                    send_count = send_count.saturating_add(1);
+                    last_hash = hash.clone();
+                    active_rule = rule_match.rule.next.clone();
+                    let now = OffsetDateTime::now_utc();
+                    let timestamp = now
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .unwrap_or_else(|_| "unknown".into());
                     println!(
-                        "loopmux: stopping on rule {}",
+                        "[{}/{}] sent via rule {} at {timestamp}",
+                        send_count,
+                        if config.infinite { 0 } else { max_sends },
                         rule_match.rule.id.as_deref().unwrap_or("<unnamed>")
                     );
+                    if !config.infinite && send_count >= max_sends {
+                        break;
+                    }
+                }
+                if stop_after {
+                    println!("loopmux: stopping due to stop rule");
                     break;
                 }
-                let action = rule_match
-                    .rule
-                    .action
-                    .as_ref()
-                    .unwrap_or(&config.default_action);
-                let prompt = build_prompt(action);
-                let delay = rule_match.rule.delay.as_ref().or(config.delay.as_ref());
-                if let Some(delay) = delay {
-                    sleep_for_delay(delay)?;
-                }
-                send_prompt(&config.target, &prompt)?;
-                send_count = send_count.saturating_add(1);
-                last_hash = hash;
                 if matches!(config.rule_eval, RuleEval::MultiMatch) {
                     active_rule = None;
-                } else {
-                    active_rule = rule_match.rule.next.clone();
                 }
-                println!(
-                    "[{}/{}] sent via rule {}",
-                    send_count,
-                    if config.infinite { 0 } else { max_sends },
-                    rule_match.rule.id.as_deref().unwrap_or("<unnamed>")
-                );
             }
         } else {
             std::thread::sleep(std::time::Duration::from_millis(300));
@@ -283,12 +300,12 @@ fn hash_output(output: &str) -> String {
     format!("{hash:x}")
 }
 
-fn select_rule<'a>(
+fn select_rules<'a>(
     output: &str,
     rules: &'a [Rule],
     rule_eval: &RuleEval,
     active_rule: Option<&str>,
-) -> Result<Option<RuleMatch<'a>>> {
+) -> Result<Vec<RuleMatch<'a>>> {
     let mut candidates = Vec::new();
     for (index, rule) in rules.iter().enumerate() {
         if let Some(active) = active_rule {
@@ -306,11 +323,12 @@ fn select_rule<'a>(
     }
 
     if candidates.is_empty() {
-        return Ok(None);
+        return Ok(Vec::new());
     }
 
     match rule_eval {
-        RuleEval::FirstMatch | RuleEval::MultiMatch => Ok(Some(candidates.remove(0))),
+        RuleEval::FirstMatch => Ok(vec![candidates.remove(0)]),
+        RuleEval::MultiMatch => Ok(candidates),
         RuleEval::Priority => {
             let mut best = &candidates[0];
             for candidate in &candidates[1..] {
@@ -322,10 +340,10 @@ fn select_rule<'a>(
                     best = candidate;
                 }
             }
-            Ok(Some(RuleMatch {
+            Ok(vec![RuleMatch {
                 rule: best.rule,
                 index: best.index,
-            }))
+            }])
         }
     }
 }
@@ -389,15 +407,23 @@ fn push_block(parts: &mut Vec<String>, block: Option<&PromptBlock>) {
     }
 }
 
-fn sleep_for_delay(delay: &DelayConfig) -> Result<()> {
-    let seconds = compute_delay_seconds(delay)?;
+fn sleep_for_delay(
+    delay: &DelayConfig,
+    rule_match: &RuleMatch<'_>,
+    backoff_state: &mut std::collections::HashMap<String, BackoffState>,
+) -> Result<()> {
+    let seconds = compute_delay_seconds(delay, rule_match, backoff_state)?;
     if seconds > 0 {
         std::thread::sleep(std::time::Duration::from_secs(seconds));
     }
     Ok(())
 }
 
-fn compute_delay_seconds(delay: &DelayConfig) -> Result<u64> {
+fn compute_delay_seconds(
+    delay: &DelayConfig,
+    rule_match: &RuleMatch<'_>,
+    backoff_state: &mut std::collections::HashMap<String, BackoffState>,
+) -> Result<u64> {
     match delay.mode {
         DelayMode::Fixed => Ok(delay.value.unwrap_or(0)),
         DelayMode::Range => random_between(delay.min.unwrap_or(0), delay.max.unwrap_or(0)),
@@ -410,7 +436,26 @@ fn compute_delay_seconds(delay: &DelayConfig) -> Result<u64> {
         DelayMode::Backoff => delay
             .backoff
             .as_ref()
-            .map(|backoff| backoff.base)
+            .map(|backoff| {
+                let key = rule_match
+                    .rule
+                    .id
+                    .clone()
+                    .unwrap_or_else(|| format!("rule-{}", rule_match.index));
+                let state = backoff_state.entry(key).or_insert(BackoffState {
+                    attempts: 0,
+                    last_sent: None,
+                });
+                state.attempts = state.attempts.saturating_add(1);
+                state.last_sent = Some(OffsetDateTime::now_utc());
+                let factor = backoff.factor;
+                let exponent = (state.attempts.saturating_sub(1)) as i32;
+                let mut delay = (backoff.base as f64) * factor.powi(exponent);
+                if let Some(max) = backoff.max {
+                    delay = delay.min(max as f64);
+                }
+                delay as u64
+            })
             .ok_or_else(|| anyhow::anyhow!("delay.mode=backoff requires backoff")),
     }
 }
@@ -472,6 +517,12 @@ struct ResolvedConfig {
     prompt_placeholders: Vec<String>,
     template_vars: Vec<String>,
     default_action: Action,
+}
+
+#[derive(Debug)]
+struct BackoffState {
+    attempts: u32,
+    last_sent: Option<OffsetDateTime>,
 }
 
 fn resolve_config(
@@ -727,6 +778,11 @@ fn validate_delay(delay: &DelayConfig) -> Result<()> {
             }
             if backoff.factor < 1.0 {
                 bail!("delay.backoff.factor must be >= 1.0");
+            }
+            if let Some(max) = backoff.max {
+                if max < backoff.base {
+                    bail!("delay.backoff.max must be >= base");
+                }
             }
         }
     }

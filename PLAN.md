@@ -209,7 +209,7 @@ cli:
 - [x] Subtask 3.1.3: Target validation and error handling.
 
 ### Epic 4: UX/TUI
-- [ ] Task 4.1: Minimal TUI layout (status, output, footer).
+- [x] Task 4.1: Minimal TUI layout (status, output, footer).
 - [ ] Subtask 4.1.1: Progress bar + delay countdown.
 - [ ] Subtask 4.1.2: Icons + color states.
 
