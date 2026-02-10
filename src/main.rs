@@ -32,7 +32,7 @@ enum Command {
 
 #[derive(Debug, Parser)]
 #[command(
-    after_help = "Lean mode (no YAML):\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n\nLean flags:\n  --prompt     Required prompt body\n  --trigger    Required regex to match tmux output\n  --exclude    Optional regex to skip matches\n  --pre        Optional pre block\n  --post       Optional post block\n  --once       Send a single prompt and exit\n  --tail N     Capture-pane lines (default 200)\n\nCommon flags:\n  -t, --target       tmux target session:window.pane\n  -n, --iterations   number of iterations\n"
+    after_help = "Lean mode (no YAML):\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n\nLean flags:\n  --prompt       Required prompt body\n  --trigger      Required regex to match tmux output\n  --exclude      Optional regex to skip matches\n  --pre          Optional pre block\n  --post         Optional post block\n  --once         Send a single prompt and exit\n  --tail N       Capture-pane lines (default 200)\n  --single-line  Update status output on one line\n\nCommon flags:\n  -t, --target       tmux target session:window.pane\n  -n, --iterations   number of iterations\n"
 )]
 struct RunArgs {
     /// Path to the YAML config file.
@@ -68,6 +68,9 @@ struct RunArgs {
     /// Validate config and tmux target without sending.
     #[arg(long)]
     dry_run: bool,
+    /// Update status output on a single line.
+    #[arg(long)]
+    single_line: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -223,6 +226,7 @@ fn run(args: RunArgs) -> Result<()> {
         false,
         args.tail,
         args.once,
+        args.single_line,
     )?;
 
     if args.dry_run {
@@ -312,13 +316,18 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                         rule_match.rule.id.as_deref(),
                         &elapsed,
                     );
-                    println!(
-                        "[{}/{}] sent via rule {} at {timestamp} (elapsed {elapsed})",
-                        send_count,
-                        if config.infinite { 0 } else { max_sends },
-                        rule_match.rule.id.as_deref().unwrap_or("<unnamed>")
-                    );
-                    println!("{status}");
+                    if config.single_line {
+                        print!("\r{status}");
+                        let _ = std::io::stdout().flush();
+                    } else {
+                        println!(
+                            "[{}/{}] sent via rule {} at {timestamp} (elapsed {elapsed})",
+                            send_count,
+                            if config.infinite { 0 } else { max_sends },
+                            rule_match.rule.id.as_deref().unwrap_or("<unnamed>")
+                        );
+                        println!("{status}");
+                    }
                     logger.log(LogEvent::status(&config, status))?;
                     logger.log(LogEvent::sent(
                         &config,
@@ -351,6 +360,9 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
 
     let end = OffsetDateTime::now_utc();
     let elapsed = format_duration(start, end);
+    if config.single_line {
+        println!();
+    }
     println!("loopmux: stopped after {send_count} sends (elapsed {elapsed})");
     logger.log(LogEvent::stopped(&config, "completed", send_count))?;
     Ok(())
@@ -589,6 +601,7 @@ fn validate(args: ValidateArgs) -> Result<()> {
         args.skip_tmux,
         None,
         false,
+        false,
     )?;
     print_validation(&resolved);
     Ok(())
@@ -686,6 +699,7 @@ struct ResolvedConfig {
     logging: LoggingConfigResolved,
     tail: usize,
     once: bool,
+    single_line: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -713,6 +727,7 @@ fn resolve_config(
     skip_tmux: bool,
     tail_override: Option<usize>,
     once: bool,
+    single_line: bool,
 ) -> Result<ResolvedConfig> {
     if let Some(target) = target_override {
         config.target = Some(target);
@@ -727,7 +742,11 @@ fn resolve_config(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("target is required"))?
         .to_string();
-    let target = resolve_target(&target)?;
+    let target = if skip_tmux {
+        resolve_target_offline(&target)?
+    } else {
+        resolve_target(&target)?
+    };
 
     let infinite = config.infinite.unwrap_or(false);
     let iterations = config.iterations;
@@ -787,6 +806,7 @@ fn resolve_config(
         logging,
         tail,
         once,
+        single_line,
     })
 }
 
@@ -824,6 +844,10 @@ fn print_validation(config: &ResolvedConfig) {
     }
     println!("- tail: {}", config.tail);
     println!("- once: {}", if config.once { "yes" } else { "no" });
+    println!(
+        "- single_line: {}",
+        if config.single_line { "yes" } else { "no" }
+    );
     println!("- note: dry-run only, no tmux commands sent");
 }
 
@@ -962,6 +986,13 @@ fn validate_tmux_target(target: &str) -> Result<()> {
 
 fn resolve_target(target: &str) -> Result<String> {
     resolve_target_with_current(target, tmux_current_target)
+}
+
+fn resolve_target_offline(target: &str) -> Result<String> {
+    if target.contains(':') {
+        return Ok(target.to_string());
+    }
+    bail!("target shorthand requires tmux; use session:window.pane")
 }
 
 fn resolve_target_with_current(target: &str, current_fn: fn() -> Result<String>) -> Result<String> {
@@ -1363,6 +1394,7 @@ mod tests {
             tail: None,
             once: false,
             dry_run: false,
+            single_line: false,
         };
         assert!(resolve_run_config(&args).is_err());
     }
@@ -1381,9 +1413,11 @@ mod tests {
             tail: Some(123),
             once: true,
             dry_run: false,
+            single_line: false,
         };
         let config = resolve_run_config(&args).unwrap();
-        let resolved = resolve_config(config, None, None, true, args.tail, args.once).unwrap();
+        let resolved =
+            resolve_config(config, None, None, true, args.tail, args.once, false).unwrap();
         assert_eq!(resolved.tail, 123);
         assert!(resolved.once);
         assert_eq!(resolved.rules.len(), 1);
