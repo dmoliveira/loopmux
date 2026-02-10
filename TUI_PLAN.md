@@ -1,10 +1,10 @@
 # loopmux TUI Plan
 
 ## Goals
-- Provide a concise, always-visible status bar with progress and state.
-- Keep updates readable without spamming the terminal.
-- Support runtime controls (pause, resume, stop, next, edit).
-- Preserve non-TTY fallback to plain logs.
+- [ ] Provide a concise, always-visible status bar with progress and state.
+- [ ] Keep updates readable without spamming the terminal.
+- [ ] Support runtime controls (pause, resume, stop, next, edit).
+- [ ] Preserve non-TTY fallback to plain logs.
 
 ## Layout (Initial)
 - **Top status bar** (single line)
@@ -15,6 +15,27 @@
   - Each entry: timestamp, rule id, prompt preview (trimmed).
 - **Footer** (shortcuts)
   - `p:pause r:resume s:stop n:next e:edit i:iters t:trigger c:reload q:quit`
+
+## Visual Design
+- Nerd Font icons for state and actions.
+- Use a small, consistent color palette that works in common terminal themes.
+- Prefer bold for labels and normal weight for values.
+- Use separators and padding for clarity without wasting columns.
+
+### Responsive Status Bar
+- **Compact** (<= 80 cols)
+  - `▶ RUN 5/10 [===..] 50% | trg: Concluded… | ai:5.0`
+- **Standard** (81-120 cols)
+  - `▶ RUNNING 5/10 [=====.....] 50% | trigger: Concluded… | last: 08:28:11 | ai:5.0`
+- **Wide** (> 120 cols)
+  - `▶ RUNNING | iter 5/10 [=====.....] 50% | trigger: Concluded… | last: 08:28:11 | start: 08:10:02 | target: ai:5.0`
+
+### Icon + Color Guide (Nerd Font)
+- Running: `󰐊` green
+- Paused: `󰏤` yellow
+- Waiting/Delay: `󰔟` blue
+- Error: `󰅚` red
+- Stopped: `󰩈` gray
 
 ## Interaction Model
 - `p`: pause (no sends, still updating status)
@@ -52,12 +73,20 @@
 - More dependencies, but standard for Rust TUIs.
 
 ## Suggested MVP Scope
-- TTY detection + ANSI layout (Option A)
-- Minimal input handling (`p`, `r`, `s`, `q`)
-- Status bar + body log + footer
-- No config editing yet (stub commands)
+- [ ] TTY detection + ANSI layout (Option A)
+- [ ] Minimal input handling (`p`, `r`, `s`, `q`)
+- [ ] Status bar + body log + footer
+- [ ] No config editing yet (stub commands)
+- [ ] Responsive bar sizing for compact/standard/wide
+- [ ] Nerd Font icons with safe fallback
+
+## Tests and Validation
+- [ ] Snapshot tests for rendered bars (compact/standard/wide).
+- [ ] Terminal capability detection tests (color + unicode).
+- [ ] Fallback tests when Nerd Font icons are unavailable.
+- [ ] Optional: use `vhs` or `asciinema` scripts for E2E captures.
 
 ## Next Iterations
-- Edit prompt/trigger at runtime
-- Progress bar gradient and color states
-- Expand to ratatui if needed
+- [ ] Edit prompt/trigger at runtime
+- [ ] Progress bar gradient and color states
+- [ ] Expand to ratatui if needed
