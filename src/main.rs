@@ -1,9 +1,12 @@
 use std::collections::{BTreeMap, HashSet};
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use crossterm::event::{self, Event, KeyCode, KeyEvent};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use regex::Regex;
 use serde::Deserialize;
 use serde::Serialize;
@@ -71,6 +74,9 @@ struct RunArgs {
     /// Update status output on a single line.
     #[arg(long)]
     single_line: bool,
+    /// Enable TUI mode (status bar + log + shortcuts).
+    #[arg(long)]
+    tui: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -227,6 +233,7 @@ fn run(args: RunArgs) -> Result<()> {
         args.tail,
         args.once,
         args.single_line,
+        args.tui,
     )?;
 
     if args.dry_run {
@@ -245,18 +252,41 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
     let mut backoff_state: std::collections::HashMap<String, BackoffState> =
         std::collections::HashMap::new();
     let mut logger = Logger::new(config.logging.clone())?;
+    let tui_enabled = config.tui && std::io::stdout().is_terminal();
+    let ui_mode = if tui_enabled {
+        UiMode::Tui
+    } else if config.single_line {
+        UiMode::SingleLine
+    } else {
+        UiMode::Plain
+    };
+    let mut loop_state = LoopState::Running;
+    let mut tui = if ui_mode == UiMode::Tui {
+        Some(TuiState::new(&config)?)
+    } else {
+        None
+    };
 
     let start = OffsetDateTime::now_utc();
     let start_timestamp = start
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| "unknown".into());
-    println!("loopmux: running on {}", config.target);
-    if config.infinite {
-        println!("loopmux: iterations = infinite");
-    } else {
-        println!("loopmux: iterations = {max_sends}");
+    if ui_mode == UiMode::Plain {
+        println!("loopmux: running on {}", config.target);
+        if config.infinite {
+            println!("loopmux: iterations = infinite");
+        } else {
+            println!("loopmux: iterations = {max_sends}");
+        }
+        println!("loopmux: started at {start_timestamp}");
+    } else if ui_mode == UiMode::Tui {
+        if let Some(tui_state) = tui.as_mut() {
+            tui_state.push_log(format!(
+                "[{}] started target={}",
+                start_timestamp, config.target
+            ));
+        }
     }
-    println!("loopmux: started at {start_timestamp}");
     logger.log(LogEvent::started(&config, start_timestamp.clone()))?;
 
     while config.infinite || send_count < max_sends {
@@ -276,6 +306,10 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
             if !rule_matches.is_empty() {
                 let mut stop_after = false;
                 for rule_match in rule_matches {
+                    if loop_state == LoopState::Paused {
+                        loop_state = LoopState::Paused;
+                        break;
+                    }
                     if rule_match.rule.next.as_deref() == Some("stop") {
                         stop_after = true;
                     }
@@ -287,6 +321,9 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                     let prompt = build_prompt(action);
                     let delay = rule_match.rule.delay.as_ref().or(config.delay.as_ref());
                     if let Some(delay) = delay {
+                        if ui_mode == UiMode::Tui {
+                            loop_state = LoopState::Delay;
+                        }
                         let delay_seconds =
                             sleep_for_delay(delay, &rule_match, &mut backoff_state)?;
                         let detail = format!("delay {}s", delay_seconds);
@@ -295,11 +332,53 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                             rule_match.rule.id.as_deref(),
                             detail,
                         ))?;
+                        if let Some(tui_state) = tui.as_mut() {
+                            tui_state.push_log(format!(
+                                "[{}] delay rule={} detail=\"delay {}s\"",
+                                timestamp_now(),
+                                rule_match.rule.id.as_deref().unwrap_or("<unnamed>"),
+                                delay_seconds
+                            ));
+                            tui_state.update(
+                                loop_state,
+                                &config,
+                                send_count,
+                                max_sends,
+                                rule_match.rule.id.as_deref(),
+                                &format_duration(start, OffsetDateTime::now_utc()),
+                                "",
+                            )?;
+                        }
+                    }
+                    if ui_mode == UiMode::Tui {
+                        loop_state = LoopState::Sending;
                     }
                     if let Err(err) = send_prompt(&config.target, &prompt) {
                         let detail = err.to_string();
-                        logger.log(LogEvent::error(&config, detail))?;
+                        logger.log(LogEvent::error(&config, detail.clone()))?;
+                        if ui_mode == UiMode::Tui {
+                            loop_state = LoopState::Error;
+                            if let Some(tui_state) = tui.as_mut() {
+                                tui_state.push_log(format!(
+                                    "[{}] error detail=\"{}\"",
+                                    timestamp_now(),
+                                    truncate_text(&detail, 120)
+                                ));
+                                tui_state.update(
+                                    loop_state,
+                                    &config,
+                                    send_count,
+                                    max_sends,
+                                    rule_match.rule.id.as_deref(),
+                                    &format_duration(start, OffsetDateTime::now_utc()),
+                                    "",
+                                )?;
+                            }
+                        }
                         return Err(err);
+                    }
+                    if ui_mode == UiMode::Tui {
+                        loop_state = LoopState::Running;
                     }
                     send_count = send_count.saturating_add(1);
                     last_hash = hash.clone();
@@ -316,9 +395,26 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                         rule_match.rule.id.as_deref(),
                         &elapsed,
                     );
-                    if config.single_line {
+                    if ui_mode == UiMode::SingleLine {
                         print!("\r{status}");
                         let _ = std::io::stdout().flush();
+                    } else if ui_mode == UiMode::Tui {
+                        if let Some(tui_state) = tui.as_mut() {
+                            tui_state.push_log(format!(
+                                "[{timestamp}] sent rule={} prompt=\"{}\"",
+                                rule_match.rule.id.as_deref().unwrap_or("<unnamed>"),
+                                truncate_text(&prompt, 80)
+                            ));
+                            tui_state.update(
+                                loop_state,
+                                &config,
+                                send_count,
+                                max_sends,
+                                rule_match.rule.id.as_deref(),
+                                &elapsed,
+                                &status,
+                            )?;
+                        }
                     } else {
                         println!(
                             "[{}/{}] sent via rule {} at {timestamp} (elapsed {elapsed})",
@@ -340,12 +436,48 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                     }
                 }
                 if stop_after {
-                    println!("loopmux: stopping due to stop rule");
+                    if ui_mode == UiMode::Tui {
+                        if let Some(tui_state) = tui.as_mut() {
+                            tui_state.push_log(format!(
+                                "[{}] stopped reason=stop_rule",
+                                timestamp_now()
+                            ));
+                            tui_state.update(
+                                LoopState::Stopped,
+                                &config,
+                                send_count,
+                                max_sends,
+                                active_rule.as_deref(),
+                                &format_duration(start, OffsetDateTime::now_utc()),
+                                "",
+                            )?;
+                        }
+                    }
+                    if ui_mode == UiMode::Plain {
+                        println!("loopmux: stopping due to stop rule");
+                    }
                     logger.log(LogEvent::stopped(&config, "stop rule matched", send_count))?;
                     break;
                 }
                 if config.once {
-                    println!("loopmux: stopping after single send");
+                    if ui_mode == UiMode::Tui {
+                        if let Some(tui_state) = tui.as_mut() {
+                            tui_state
+                                .push_log(format!("[{}] stopped reason=once", timestamp_now()));
+                            tui_state.update(
+                                LoopState::Stopped,
+                                &config,
+                                send_count,
+                                max_sends,
+                                active_rule.as_deref(),
+                                &format_duration(start, OffsetDateTime::now_utc()),
+                                "",
+                            )?;
+                        }
+                    }
+                    if ui_mode == UiMode::Plain {
+                        println!("loopmux: stopping after single send");
+                    }
                     logger.log(LogEvent::stopped(&config, "once", send_count))?;
                     break;
                 }
@@ -354,17 +486,66 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                 }
             }
         } else {
+            if ui_mode == UiMode::Tui {
+                loop_state = LoopState::Waiting;
+            }
             std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+
+        if ui_mode == UiMode::Tui {
+            if let Some(tui_state) = tui.as_mut() {
+                if let Some(action) = tui_state.poll_input()? {
+                    match action {
+                        TuiAction::Pause => loop_state = LoopState::Paused,
+                        TuiAction::Resume => loop_state = LoopState::Running,
+                        TuiAction::Stop => {
+                            if let Some(tui_state) = tui.as_mut() {
+                                tui_state.push_log(format!(
+                                    "[{}] stopped reason=manual",
+                                    timestamp_now()
+                                ));
+                                tui_state.update(
+                                    LoopState::Stopped,
+                                    &config,
+                                    send_count,
+                                    max_sends,
+                                    active_rule.as_deref(),
+                                    &format_duration(start, OffsetDateTime::now_utc()),
+                                    "",
+                                )?;
+                            }
+                            break;
+                        }
+                        TuiAction::Next => {
+                            last_hash.clear();
+                        }
+                        TuiAction::Quit => break,
+                    }
+                }
+                let elapsed = format_duration(start, OffsetDateTime::now_utc());
+                tui_state.update(
+                    loop_state,
+                    &config,
+                    send_count,
+                    max_sends,
+                    active_rule.as_deref(),
+                    &elapsed,
+                    "",
+                )?;
+            }
         }
     }
 
     let end = OffsetDateTime::now_utc();
     let elapsed = format_duration(start, end);
-    if config.single_line {
+    if ui_mode == UiMode::SingleLine {
         println!();
     }
     println!("loopmux: stopped after {send_count} sends (elapsed {elapsed})");
     logger.log(LogEvent::stopped(&config, "completed", send_count))?;
+    if let Some(mut tui_state) = tui {
+        tui_state.shutdown()?;
+    }
     Ok(())
 }
 
@@ -602,6 +783,7 @@ fn validate(args: ValidateArgs) -> Result<()> {
         None,
         false,
         false,
+        false,
     )?;
     print_validation(&resolved);
     Ok(())
@@ -700,6 +882,253 @@ struct ResolvedConfig {
     tail: usize,
     once: bool,
     single_line: bool,
+    tui: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UiMode {
+    Plain,
+    SingleLine,
+    Tui,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopState {
+    Running,
+    Paused,
+    Waiting,
+    Delay,
+    Sending,
+    Error,
+    Stopped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LayoutMode {
+    Compact,
+    Standard,
+    Wide,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IconMode {
+    Nerd,
+    Ascii,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuiAction {
+    Pause,
+    Resume,
+    Stop,
+    Next,
+    Quit,
+}
+
+struct TuiState {
+    width: u16,
+    height: u16,
+    icon_mode: IconMode,
+    logs: Vec<String>,
+    max_logs: usize,
+}
+
+impl TuiState {
+    fn new(_config: &ResolvedConfig) -> Result<Self> {
+        enable_raw_mode().context("failed to enable raw mode")?;
+        let (width, height) = crossterm::terminal::size().unwrap_or((80, 24));
+        Ok(Self {
+            width,
+            height,
+            icon_mode: detect_icon_mode(),
+            logs: Vec::new(),
+            max_logs: height.saturating_sub(3) as usize,
+        })
+    }
+
+    fn update(
+        &mut self,
+        state: LoopState,
+        config: &ResolvedConfig,
+        current: u32,
+        total: u32,
+        rule_id: Option<&str>,
+        elapsed: &str,
+        last_status: &str,
+    ) -> Result<()> {
+        let (width, height) = crossterm::terminal::size().unwrap_or((80, 24));
+        self.width = width;
+        self.height = height;
+        self.max_logs = height.saturating_sub(3) as usize;
+
+        let layout = layout_mode(width);
+        let bar = render_status_bar(
+            state,
+            layout,
+            self.icon_mode,
+            config,
+            current,
+            total,
+            rule_id,
+            elapsed,
+        );
+        let footer = render_footer();
+
+        print!("\x1B[2J\x1B[H");
+        println!("{bar}");
+        if !last_status.is_empty() && matches!(layout, LayoutMode::Compact) {
+            println!("{last_status}");
+        }
+        for line in self.logs.iter().rev().take(self.max_logs).rev() {
+            println!("{line}");
+        }
+        println!("{footer}");
+        let _ = std::io::stdout().flush();
+        Ok(())
+    }
+
+    fn push_log(&mut self, line: String) {
+        self.logs.push(line);
+        if self.logs.len() > 500 {
+            self.logs.drain(0..self.logs.len().saturating_sub(500));
+        }
+    }
+
+    fn poll_input(&self) -> Result<Option<TuiAction>> {
+        if event::poll(Duration::from_millis(10)).context("poll input failed")? {
+            if let Event::Key(KeyEvent { code, .. }) = event::read()? {
+                return Ok(match code {
+                    KeyCode::Char('p') => Some(TuiAction::Pause),
+                    KeyCode::Char('r') => Some(TuiAction::Resume),
+                    KeyCode::Char('s') => Some(TuiAction::Stop),
+                    KeyCode::Char('n') => Some(TuiAction::Next),
+                    KeyCode::Char('q') => Some(TuiAction::Quit),
+                    _ => None,
+                });
+            }
+        }
+        Ok(None)
+    }
+
+    fn shutdown(&mut self) -> Result<()> {
+        disable_raw_mode().context("failed to disable raw mode")?;
+        Ok(())
+    }
+}
+
+fn layout_mode(width: u16) -> LayoutMode {
+    if width <= 80 {
+        LayoutMode::Compact
+    } else if width <= 120 {
+        LayoutMode::Standard
+    } else {
+        LayoutMode::Wide
+    }
+}
+
+fn detect_icon_mode() -> IconMode {
+    if std::env::var("LOOPMUX_NO_NERD_FONT").is_ok() {
+        return IconMode::Ascii;
+    }
+    IconMode::Nerd
+}
+
+fn render_footer() -> String {
+    "p:pause r:resume s:stop n:next q:quit".to_string()
+}
+
+fn render_status_bar(
+    state: LoopState,
+    layout: LayoutMode,
+    icon_mode: IconMode,
+    config: &ResolvedConfig,
+    current: u32,
+    total: u32,
+    rule_id: Option<&str>,
+    elapsed: &str,
+) -> String {
+    let (icon, label) = state_label(state, icon_mode);
+    let progress = if config.infinite {
+        "inf".to_string()
+    } else {
+        format!("{}/{}", current, total)
+    };
+    let percent = if config.infinite || total == 0 {
+        "--".to_string()
+    } else {
+        format!("{}%", (current * 100 / total))
+    };
+    let bar = render_progress_bar(current, total, layout);
+    let trigger = rule_id.unwrap_or("-");
+
+    match layout {
+        LayoutMode::Compact => format!(
+            "{icon} {label} {progress} {bar} {percent} | trg: {} | {}",
+            truncate_text(trigger, 24),
+            config.target
+        ),
+        LayoutMode::Standard => format!(
+            "{icon} {label} {progress} {bar} {percent} | trigger: {} | last: {} | {}",
+            truncate_text(trigger, 40),
+            elapsed,
+            config.target
+        ),
+        LayoutMode::Wide => format!(
+            "{icon} {label} | iter {progress} {bar} {percent} | trigger: {} | last: {} | target: {}",
+            truncate_text(trigger, 60),
+            elapsed,
+            config.target
+        ),
+    }
+}
+
+fn state_label(state: LoopState, icon_mode: IconMode) -> (&'static str, &'static str) {
+    match (state, icon_mode) {
+        (LoopState::Running, IconMode::Nerd) => ("󰐊", "RUN"),
+        (LoopState::Paused, IconMode::Nerd) => ("󰏤", "PAUSE"),
+        (LoopState::Delay, IconMode::Nerd) => ("󰔟", "DELAY"),
+        (LoopState::Error, IconMode::Nerd) => ("󰅚", "ERROR"),
+        (LoopState::Stopped, IconMode::Nerd) => ("󰩈", "STOP"),
+        (LoopState::Waiting, IconMode::Nerd) => ("󰔟", "WAIT"),
+        (LoopState::Sending, IconMode::Nerd) => ("󰐊", "SEND"),
+        (LoopState::Running, IconMode::Ascii) => (">", "RUN"),
+        (LoopState::Paused, IconMode::Ascii) => ("||", "PAUSE"),
+        (LoopState::Delay, IconMode::Ascii) => ("...", "DELAY"),
+        (LoopState::Error, IconMode::Ascii) => ("!", "ERROR"),
+        (LoopState::Stopped, IconMode::Ascii) => ("x", "STOP"),
+        (LoopState::Waiting, IconMode::Ascii) => ("...", "WAIT"),
+        (LoopState::Sending, IconMode::Ascii) => (">", "SEND"),
+    }
+}
+
+fn render_progress_bar(current: u32, total: u32, layout: LayoutMode) -> String {
+    let width = match layout {
+        LayoutMode::Compact => 6,
+        LayoutMode::Standard => 10,
+        LayoutMode::Wide => 14,
+    };
+    if total == 0 {
+        return format!("[{}]", ".".repeat(width));
+    }
+    let filled = ((current as f64 / total as f64) * width as f64).round() as usize;
+    let filled = filled.min(width);
+    let bar = format!("[{}{}]", "=".repeat(filled), ".".repeat(width - filled));
+    bar
+}
+
+fn truncate_text(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut s = text.chars().take(max.saturating_sub(1)).collect::<String>();
+    s.push('…');
+    s
+}
+
+fn timestamp_now() -> String {
+    OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "unknown".into())
 }
 
 #[derive(Debug, Clone)]
@@ -728,6 +1157,7 @@ fn resolve_config(
     tail_override: Option<usize>,
     once: bool,
     single_line: bool,
+    tui: bool,
 ) -> Result<ResolvedConfig> {
     if let Some(target) = target_override {
         config.target = Some(target);
@@ -807,6 +1237,7 @@ fn resolve_config(
         tail,
         once,
         single_line,
+        tui,
     })
 }
 
@@ -848,6 +1279,7 @@ fn print_validation(config: &ResolvedConfig) {
         "- single_line: {}",
         if config.single_line { "yes" } else { "no" }
     );
+    println!("- tui: {}", if config.tui { "yes" } else { "no" });
     println!("- note: dry-run only, no tmux commands sent");
 }
 
@@ -1395,6 +1827,7 @@ mod tests {
             once: false,
             dry_run: false,
             single_line: false,
+            tui: false,
         };
         assert!(resolve_run_config(&args).is_err());
     }
@@ -1414,10 +1847,11 @@ mod tests {
             once: true,
             dry_run: false,
             single_line: false,
+            tui: false,
         };
         let config = resolve_run_config(&args).unwrap();
         let resolved =
-            resolve_config(config, None, None, true, args.tail, args.once, false).unwrap();
+            resolve_config(config, None, None, true, args.tail, args.once, false, false).unwrap();
         assert_eq!(resolved.tail, 123);
         assert!(resolved.once);
         assert_eq!(resolved.rules.len(), 1);
@@ -1456,6 +1890,87 @@ mod tests {
     fn resolve_target_shorthand_window_pane() {
         let resolved = resolve_target_with_current("2.1", || Ok("ai:5.2".to_string())).unwrap();
         assert_eq!(resolved, "ai:2.1");
+    }
+
+    #[test]
+    fn render_status_bar_compact() {
+        let config = ResolvedConfig {
+            target: "ai:5.0".to_string(),
+            iterations: Some(10),
+            infinite: false,
+            has_prompt: true,
+            rule_eval: RuleEval::FirstMatch,
+            rules: Vec::new(),
+            delay: None,
+            prompt_placeholders: Vec::new(),
+            template_vars: Vec::new(),
+            default_action: Action {
+                pre: None,
+                prompt: Some(PromptBlock::Single("hi".to_string())),
+                post: None,
+            },
+            logging: LoggingConfigResolved {
+                path: None,
+                format: LogFormatResolved::Text,
+            },
+            tail: 200,
+            once: false,
+            single_line: false,
+            tui: false,
+        };
+        let bar = render_status_bar(
+            LoopState::Running,
+            LayoutMode::Compact,
+            IconMode::Ascii,
+            &config,
+            5,
+            10,
+            Some("Concluded"),
+            "00:10",
+        );
+        assert!(bar.contains("RUN"));
+        assert!(bar.contains("5/10"));
+        assert!(bar.contains("ai:5.0"));
+    }
+
+    #[test]
+    fn render_status_bar_standard_truncates_trigger() {
+        let config = ResolvedConfig {
+            target: "ai:5.0".to_string(),
+            iterations: Some(10),
+            infinite: false,
+            has_prompt: true,
+            rule_eval: RuleEval::FirstMatch,
+            rules: Vec::new(),
+            delay: None,
+            prompt_placeholders: Vec::new(),
+            template_vars: Vec::new(),
+            default_action: Action {
+                pre: None,
+                prompt: Some(PromptBlock::Single("hi".to_string())),
+                post: None,
+            },
+            logging: LoggingConfigResolved {
+                path: None,
+                format: LogFormatResolved::Text,
+            },
+            tail: 200,
+            once: false,
+            single_line: false,
+            tui: false,
+        };
+        let bar = render_status_bar(
+            LoopState::Running,
+            LayoutMode::Standard,
+            IconMode::Ascii,
+            &config,
+            1,
+            10,
+            Some("This is a very long trigger string that should truncate"),
+            "00:10",
+        );
+        assert!(bar.contains("trigger:"));
+        assert!(bar.contains("…"));
     }
 }
 
