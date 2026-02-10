@@ -153,11 +153,15 @@ loopmux run --config loop.yaml [--target ai:5.0] [--iterations 10]
 loopmux run --config loop.yaml --dry-run
 loopmux validate --config loop.yaml [--skip-tmux]
 loopmux init --output loop.yaml
+loopmux run --config loop.yaml --poll 5
+loopmux simulate --line "Concluded" [--sleep 5] [--repeat N]
 ```
 
 ## Lean Mode (no YAML)
 
 Use inline flags to run a quick loop without a config file.
+
+Defaults: `tail=1` (last non-blank line only) and `poll=5s` between checks.
 
 ```bash
 loopmux run -t ai:5.0 -n 5 \
@@ -173,17 +177,46 @@ loopmux run -t ai:5.0 -n 5 \
 - `--exclude`: regex to skip matches (optional).
 - `--pre` / `--post`: optional prompt blocks.
 - `--once`: send a single prompt and exit.
-- `--tail N`: number of capture-pane lines (default 200).
+- `--tail N`: number of capture-pane lines (default 1).
+- `--poll N`: polling interval in seconds (default 5).
 - `--single-line`: update status output on a single line.
 
 ### Common flags
 - `-t, --target`: tmux target in `session:window.pane` format.
 - `-n, --iterations`: number of iterations (omit for infinite when using config).
 
+### Config
+```yaml
+poll: 5
+```
+
 ### Target shorthand (inside tmux)
 - `-t 0` expands to `current_session:current_window.0`
 - `-t 2.1` expands to `current_session:2.1`
  - Shorthand requires tmux; otherwise provide full `session:window.pane`.
+
+## Simulation
+
+Use `simulate` to print a line after a delay in the pane loopmux is watching.
+
+```bash
+# One-shot trigger (sleeps once, prints once)
+loopmux simulate --line "Concluded" --sleep 5 --repeat 1
+
+# One-shot non-trigger after 8 seconds
+loopmux simulate --line "Still working..." --sleep 8 --repeat 1
+
+# Repeat line forever (Ctrl+C to stop)
+loopmux simulate --line "Concluded" --sleep 5
+
+# Repeat line N times (sleep before each line)
+loopmux simulate --line "Concluded" --sleep 5 --repeat 3
+
+Output format (timestamp prefixed):
+```text
+[2026-02-11T18:24:01-05:00] Concluded
+```
+```
 
 ## Troubleshooting
 

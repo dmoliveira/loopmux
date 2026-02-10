@@ -3,12 +3,12 @@ use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use crossterm::QueueableCommand;
 use crossterm::cursor::MoveTo;
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
-use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType};
+use crossterm::QueueableCommand;
 use regex::Regex;
 use serde::Deserialize;
 use serde::Serialize;
@@ -33,11 +33,13 @@ enum Command {
     Validate(ValidateArgs),
     /// Print a starter YAML config to stdout.
     Init(InitArgs),
+    /// Simulate pane output for trigger testing.
+    Simulate(SimulateArgs),
 }
 
 #[derive(Debug, Parser)]
 #[command(
-    after_help = "Lean mode (no YAML):\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n\nLean flags:\n  --prompt       Required prompt body\n  --trigger      Required regex to match tmux output\n  --exclude      Optional regex to skip matches\n  --pre          Optional pre block\n  --post         Optional post block\n  --once         Send a single prompt and exit\n  --tail N       Capture-pane lines (default 200)\n  --single-line  Update status output on one line\n\nCommon flags:\n  -t, --target       tmux target session:window.pane\n  -n, --iterations   number of iterations\n"
+    after_help = "Lean mode (no YAML):\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n\nLean flags:\n  --prompt       Required prompt body\n  --trigger      Required regex to match tmux output\n  --exclude      Optional regex to skip matches\n  --pre          Optional pre block\n  --post         Optional post block\n  --once         Send a single prompt and exit\n  --tail N       Capture-pane lines (default 1)\n  --poll N       Poll interval in seconds (default 5)\n  --single-line  Update status output on one line\n\nCommon flags:\n  -t, --target       tmux target session:window.pane\n  -n, --iterations   number of iterations\n"
 )]
 struct RunArgs {
     /// Path to the YAML config file.
@@ -64,7 +66,7 @@ struct RunArgs {
     /// Iterations to run, overrides config.
     #[arg(long, short = 'n')]
     iterations: Option<u32>,
-    /// Tail lines from tmux capture (default 200).
+    /// Tail lines from tmux capture (default 1).
     #[arg(long, requires = "prompt", conflicts_with = "config")]
     tail: Option<usize>,
     /// Run a single send and exit.
@@ -79,6 +81,9 @@ struct RunArgs {
     /// Enable TUI mode (status bar + log + shortcuts).
     #[arg(long)]
     tui: bool,
+    /// Poll interval in seconds when waiting for changes.
+    #[arg(long)]
+    poll: Option<u64>,
 }
 
 #[derive(Debug, Parser)]
@@ -104,11 +109,25 @@ struct InitArgs {
     output: Option<PathBuf>,
 }
 
+#[derive(Debug, Parser)]
+struct SimulateArgs {
+    /// Line to print after delay.
+    #[arg(long)]
+    line: String,
+    /// Seconds to sleep before printing (default 5).
+    #[arg(long, default_value_t = 5)]
+    sleep: u64,
+    /// Number of times to print the line (omit to repeat forever).
+    #[arg(long)]
+    repeat: Option<u32>,
+}
+
 #[derive(Debug, Deserialize)]
 struct Config {
     target: Option<String>,
     iterations: Option<u32>,
     infinite: Option<bool>,
+    poll: Option<u64>,
     rule_eval: Option<RuleEval>,
     default_action: Option<Action>,
     delay: Option<DelayConfig>,
@@ -222,7 +241,32 @@ fn main() -> Result<()> {
         Command::Run(args) => run(args),
         Command::Validate(args) => validate(args),
         Command::Init(args) => init(args),
+        Command::Simulate(args) => simulate(args),
     }
+}
+
+fn simulate(args: SimulateArgs) -> Result<()> {
+    let delay = std::time::Duration::from_secs(args.sleep);
+    match args.repeat {
+        Some(count) => {
+            let repeat = count.max(1);
+            for _ in 0..repeat {
+                if args.sleep > 0 {
+                    std::thread::sleep(delay);
+                }
+                println!("[{}] {}", timestamp_local_now(), args.line);
+                std::io::stdout().flush()?;
+            }
+        }
+        None => loop {
+            if args.sleep > 0 {
+                std::thread::sleep(delay);
+            }
+            println!("[{}] {}", timestamp_local_now(), args.line);
+            std::io::stdout().flush()?;
+        },
+    }
+    Ok(())
 }
 
 fn run(args: RunArgs) -> Result<()> {
@@ -299,6 +343,11 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                 logger.log(LogEvent::error(&config, detail))?;
                 return Err(err);
             }
+        };
+        let output = if config.tail == 1 {
+            last_non_empty_line(&output)
+        } else {
+            output
         };
         let hash = hash_output(&output);
 
@@ -491,7 +540,7 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
             if ui_mode == UiMode::Tui {
                 loop_state = LoopState::Waiting;
             }
-            std::thread::sleep(std::time::Duration::from_millis(300));
+            std::thread::sleep(std::time::Duration::from_secs(config.poll));
         }
 
         if ui_mode == UiMode::Tui {
@@ -540,14 +589,34 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
 
     let end = OffsetDateTime::now_utc();
     let elapsed = format_duration(start, end);
-    if ui_mode == UiMode::SingleLine {
-        println!();
+    if ui_mode == UiMode::Tui {
+        if let Some(tui_state) = tui.as_mut() {
+            tui_state.push_log(format!(
+                "[{}] stopped reason=completed sends={} elapsed={}",
+                timestamp_now(),
+                send_count,
+                elapsed
+            ));
+            tui_state.update(
+                LoopState::Stopped,
+                &config,
+                send_count,
+                max_sends,
+                active_rule.as_deref(),
+                &elapsed,
+                "",
+            )?;
+            std::thread::sleep(std::time::Duration::from_secs(3));
+        }
     }
-    println!("loopmux: stopped after {send_count} sends (elapsed {elapsed})");
     logger.log(LogEvent::stopped(&config, "completed", send_count))?;
     if let Some(mut tui_state) = tui {
         tui_state.shutdown()?;
     }
+    if ui_mode == UiMode::SingleLine {
+        println!();
+    }
+    println!("loopmux: stopped after {send_count} sends (elapsed {elapsed})");
     Ok(())
 }
 
@@ -562,6 +631,15 @@ fn capture_pane(target: &str, lines: usize) -> Result<String> {
         bail!("tmux capture-pane failed");
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn last_non_empty_line(output: &str) -> String {
+    output
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .to_string()
 }
 
 fn send_prompt(target: &str, prompt: &str) -> Result<()> {
@@ -859,6 +937,7 @@ fn resolve_run_config(args: &RunArgs) -> Result<Config> {
         target: args.target.clone(),
         iterations: args.iterations,
         infinite: None,
+        poll: args.poll,
         rule_eval: Some(RuleEval::FirstMatch),
         default_action: Some(default_action),
         delay: None,
@@ -874,6 +953,7 @@ struct ResolvedConfig {
     iterations: Option<u32>,
     infinite: bool,
     has_prompt: bool,
+    poll: u64,
     rule_eval: RuleEval,
     rules: Vec<Rule>,
     delay: Option<DelayConfig>,
@@ -922,8 +1002,8 @@ enum IconMode {
 struct StyleConfig {
     use_color: bool,
     use_bg: bool,
-    use_bold: bool,
     use_unicode_ellipsis: bool,
+    dim_logs: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -996,7 +1076,7 @@ impl TuiState {
         let _ = write!(out, "{bar}");
 
         for idx in 0..log_height {
-            let line = self
+            let mut line = self
                 .logs
                 .iter()
                 .rev()
@@ -1005,13 +1085,22 @@ impl TuiState {
                 .nth(idx)
                 .map(|value| fit_line(value, width as usize, self.style.use_unicode_ellipsis))
                 .unwrap_or_else(|| "".to_string());
+            if self.style.use_color && self.style.dim_logs && !line.is_empty() {
+                let log_prefix = style_prefix(Some(245), None, false);
+                line = format!("{log_prefix}{line}\x1B[0m");
+            }
             let _ = out.queue(MoveTo(0, (idx + 1) as u16));
             let _ = out.queue(Clear(ClearType::CurrentLine));
             let _ = write!(out, "{line}");
         }
 
         let footer_row = self.height.saturating_sub(1);
-        let footer = render_footer(self.style, width);
+        let footer_summary = if state == LoopState::Stopped {
+            Some(render_footer_summary(config, current, total, elapsed))
+        } else {
+            None
+        };
+        let footer = render_footer(self.style, width, footer_summary.as_deref());
         let _ = out.queue(MoveTo(0, footer_row));
         let _ = out.queue(Clear(ClearType::CurrentLine));
         let _ = write!(out, "{footer}");
@@ -1071,13 +1160,13 @@ fn detect_style() -> StyleConfig {
     let color_term = std::env::var("COLORTERM").unwrap_or_default();
     let use_color = !no_color && term != "dumb";
     let use_bg = use_color && (term.contains("256color") || !color_term.is_empty());
-    let use_bold = use_color;
     let use_unicode_ellipsis = supports_unicode();
+    let dim_logs = std::env::var("LOOPMUX_TUI_BRIGHT_LOGS").is_err();
     StyleConfig {
         use_color,
         use_bg,
-        use_bold,
         use_unicode_ellipsis,
+        dim_logs,
     }
 }
 
@@ -1090,14 +1179,36 @@ fn supports_unicode() -> bool {
     locale.contains("utf-8") || locale.contains("utf8")
 }
 
-fn render_footer(style: StyleConfig, width: u16) -> String {
-    let text = "p:pause r:resume s:stop n:next q:quit";
-    let line = pad_to_width(text, width as usize);
+fn render_footer(style: StyleConfig, width: u16, summary: Option<&str>) -> String {
+    let sep_text = if style.use_unicode_ellipsis {
+        " · "
+    } else {
+        " . "
+    };
+    let text = if let Some(summary) = summary {
+        format!("stopped{sep_text}{summary}{sep_text}q quit")
+    } else {
+        format!("p pause{sep_text}r resume{sep_text}s stop{sep_text}n next{sep_text}q quit")
+    };
+    let line = pad_to_width(&text, width as usize);
     if style.use_color {
-        let prefix = style_prefix(Some(244), style.use_bg.then_some(236), false);
+        let prefix = style_prefix(Some(240), style.use_bg.then_some(235), false);
         format!("{prefix}{line}\x1B[0m")
     } else {
         line
+    }
+}
+
+fn render_footer_summary(
+    config: &ResolvedConfig,
+    current: u32,
+    total: u32,
+    elapsed: &str,
+) -> String {
+    if config.infinite || total == 0 || total == u32::MAX {
+        format!("sends {current} elapsed {elapsed}")
+    } else {
+        format!("iter {current}/{total} elapsed {elapsed}")
     }
 }
 
@@ -1141,45 +1252,90 @@ fn render_status_bar(
     let trigger_text = truncate_text(
         trigger,
         match layout {
-            LayoutMode::Compact => 20,
-            LayoutMode::Standard => 32,
-            LayoutMode::Wide => 48,
+            LayoutMode::Compact => 16,
+            LayoutMode::Standard => 28,
+            LayoutMode::Wide => 44,
         },
         style.use_unicode_ellipsis,
     );
 
-    let mut parts = Vec::new();
-    parts.push(state_text.clone());
-    parts.push(iter_text);
-    parts.push(format!("{bar} {percent}"));
+    let sep_text = if style.use_unicode_ellipsis {
+        " · "
+    } else {
+        " . "
+    };
+
+    let mut left_parts = Vec::new();
+    left_parts.push(state_text.clone());
+    left_parts.push(iter_text);
+    left_parts.push(format!("{bar} {percent}"));
+
+    let mut right_parts = Vec::new();
     match layout {
         LayoutMode::Compact => {
-            parts.push(format!("trg: {trigger_text}"));
-            parts.push(config.target.clone());
+            right_parts.push(format!("trg {trigger_text}"));
+            right_parts.push(config.target.clone());
         }
         LayoutMode::Standard => {
-            parts.push(format!("trigger: {trigger_text}"));
-            parts.push(format!("last: {elapsed}"));
-            parts.push(config.target.clone());
+            right_parts.push(format!("trg {trigger_text}"));
+            right_parts.push(format!("last {elapsed}"));
+            right_parts.push(config.target.clone());
         }
         LayoutMode::Wide => {
-            parts.push(format!("trigger: {trigger_text}"));
-            parts.push(format!("last: {elapsed}"));
-            parts.push(format!("target: {}", config.target));
+            right_parts.push(format!("trg {trigger_text}"));
+            right_parts.push(format!("last {elapsed}"));
+            right_parts.push(format!("target {}", config.target));
         }
     }
 
-    let plain_text = parts.join(" | ");
-    let line = pad_to_width(&plain_text, width as usize);
+    let left_sep_text = if matches!(layout, LayoutMode::Compact) {
+        " "
+    } else {
+        sep_text
+    };
+    let left_text = left_parts.join(left_sep_text);
+    let right_sep_text = if matches!(layout, LayoutMode::Compact) {
+        " "
+    } else {
+        sep_text
+    };
+    let mut right_text = right_parts.join(right_sep_text);
+    let mut line = if right_text.is_empty() {
+        left_text.clone()
+    } else {
+        let width_usize = width as usize;
+        let left_len = left_text.chars().count();
+        let right_len = right_text.chars().count();
+        let gap = 1;
+        if left_len + gap + right_len > width_usize {
+            let available = width_usize.saturating_sub(left_len + gap);
+            if available > 0 {
+                right_text = truncate_text(&right_text, available, style.use_unicode_ellipsis);
+                format!("{left_text}{}{}", " ".repeat(gap), right_text)
+            } else {
+                left_text.clone()
+            }
+        } else {
+            let padding = width_usize.saturating_sub(left_len + gap + right_len);
+            format!(
+                "{left_text}{}{}{}",
+                " ".repeat(gap),
+                " ".repeat(padding),
+                right_text
+            )
+        }
+    };
+    line = pad_to_width(&line, width as usize);
 
     if style.use_color {
         let label_color = state_color(state);
-        let base_prefix = style_prefix(Some(250), style.use_bg.then_some(236), style.use_bold);
+        let base_prefix = style_prefix(Some(248), style.use_bg.then_some(236), false);
         let state_prefix = format!("\x1B[38;5;{label_color}m");
-        let sep_prefix = style_prefix(Some(244), style.use_bg.then_some(236), false);
+        let sep_prefix = style_prefix(Some(240), style.use_bg.then_some(236), false);
         let colored_state = format!("{state_prefix}{state_text}{base_prefix}");
         let mut colored_line = line.replacen(&state_text, &colored_state, 1);
-        colored_line = colored_line.replace(" | ", &format!("{sep_prefix} | {base_prefix}"));
+        colored_line =
+            colored_line.replace(sep_text, &format!("{sep_prefix}{sep_text}{base_prefix}"));
         format!("{base_prefix}{colored_line}\x1B[0m")
     } else {
         line
@@ -1212,25 +1368,21 @@ fn render_progress_bar(current: u32, total: u32, layout: LayoutMode, unicode: bo
         LayoutMode::Wide => 14,
     };
     if total == 0 {
-        return format!(
-            "[{}]",
-            if unicode {
-                "░".repeat(width)
-            } else {
-                ".".repeat(width)
-            }
-        );
+        return if unicode {
+            "░".repeat(width)
+        } else {
+            ".".repeat(width)
+        };
     }
     let filled = ((current as f64 / total as f64) * width as f64).round() as usize;
     let filled = filled.min(width);
-    let filled_char = if unicode { "█" } else { "=" };
-    let empty_char = if unicode { "░" } else { "." };
-    let bar = format!(
-        "[{}{}]",
+    let filled_char = if unicode { "▰" } else { "=" };
+    let empty_char = if unicode { "▱" } else { "." };
+    format!(
+        "{}{}",
         filled_char.repeat(filled),
         empty_char.repeat(width - filled)
-    );
-    bar
+    )
 }
 
 fn truncate_text(text: &str, max: usize, use_unicode: bool) -> String {
@@ -1269,11 +1421,11 @@ fn ascii_icon(icon: &str) -> &str {
 fn state_color(state: LoopState) -> u8 {
     match state {
         LoopState::Running => 71,
-        LoopState::Paused => 180,
-        LoopState::Waiting | LoopState::Delay => 75,
-        LoopState::Error => 203,
-        LoopState::Stopped => 244,
-        LoopState::Sending => 71,
+        LoopState::Paused => 179,
+        LoopState::Waiting | LoopState::Delay => 109,
+        LoopState::Error => 166,
+        LoopState::Stopped => 246,
+        LoopState::Sending => 109,
     }
 }
 
@@ -1300,6 +1452,13 @@ fn fit_line(text: &str, width: usize, use_unicode: bool) -> String {
 
 fn timestamp_now() -> String {
     OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "unknown".into())
+}
+
+fn timestamp_local_now() -> String {
+    OffsetDateTime::now_local()
+        .unwrap_or_else(|_| OffsetDateTime::now_utc())
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| "unknown".into())
 }
@@ -1389,17 +1548,20 @@ fn resolve_config(
         validate_delay(delay)?;
     }
 
+    let poll = config.poll.unwrap_or(5).max(1);
+
     if !skip_tmux {
         validate_target(&target)?;
         validate_tmux_target(&target)?;
     }
 
-    let tail = tail_override.unwrap_or(200);
+    let tail = tail_override.unwrap_or(1);
     Ok(ResolvedConfig {
         target,
         iterations,
         infinite,
         has_prompt,
+        poll,
         rule_eval,
         rules,
         delay,
@@ -1447,6 +1609,7 @@ fn print_validation(config: &ResolvedConfig) {
         );
     }
     println!("- tail: {}", config.tail);
+    println!("- poll: {}s", config.poll);
     println!("- once: {}", if config.once { "yes" } else { "no" });
     println!(
         "- single_line: {}",
@@ -2001,6 +2164,7 @@ mod tests {
             dry_run: false,
             single_line: false,
             tui: false,
+            poll: None,
         };
         assert!(resolve_run_config(&args).is_err());
     }
@@ -2021,6 +2185,7 @@ mod tests {
             dry_run: false,
             single_line: false,
             tui: false,
+            poll: None,
         };
         let config = resolve_run_config(&args).unwrap();
         let resolved =
@@ -2090,6 +2255,7 @@ mod tests {
             once: false,
             single_line: false,
             tui: false,
+            poll: 5,
         };
         let bar = render_status_bar(
             LoopState::Running,
@@ -2098,8 +2264,8 @@ mod tests {
             StyleConfig {
                 use_color: false,
                 use_bg: false,
-                use_bold: false,
                 use_unicode_ellipsis: false,
+                dim_logs: true,
             },
             80,
             &config,
@@ -2138,6 +2304,7 @@ mod tests {
             once: false,
             single_line: false,
             tui: false,
+            poll: 5,
         };
         let bar = render_status_bar(
             LoopState::Running,
@@ -2146,8 +2313,8 @@ mod tests {
             StyleConfig {
                 use_color: false,
                 use_bg: false,
-                use_bold: false,
                 use_unicode_ellipsis: true,
+                dim_logs: true,
             },
             120,
             &config,
@@ -2156,7 +2323,7 @@ mod tests {
             Some("This is a very long trigger string that should truncate"),
             "00:10",
         );
-        assert!(bar.contains("trigger:"));
+        assert!(bar.contains("trg"));
         assert!(bar.contains("…"));
     }
 }
@@ -2228,6 +2395,7 @@ fn find_missing_vars(required: &[String], available: &TemplateVars) -> Vec<Strin
 fn default_template() -> String {
     let template = r#"target: "ai:5.0"
 iterations: 10
+poll: 5
 
 template_vars:
   project: loopmux
