@@ -727,6 +727,7 @@ fn resolve_config(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("target is required"))?
         .to_string();
+    let target = resolve_target(&target)?;
 
     let infinite = config.infinite.unwrap_or(false);
     let iterations = config.iterations;
@@ -926,20 +927,7 @@ fn has_text(value: &Option<String>) -> bool {
 }
 
 fn validate_target(target: &str) -> Result<()> {
-    let mut parts = target.splitn(2, ':');
-    let session = parts.next().unwrap_or("");
-    let rest = parts.next().unwrap_or("");
-    if session.trim().is_empty() || rest.trim().is_empty() {
-        bail!("target must be in the format session:window.pane");
-    }
-
-    let mut rest_parts = rest.splitn(2, '.');
-    let window = rest_parts.next().unwrap_or("");
-    let pane = rest_parts.next().unwrap_or("");
-    if window.trim().is_empty() || pane.trim().is_empty() {
-        bail!("target must be in the format session:window.pane");
-    }
-    Ok(())
+    parse_target(target).map(|_| ())
 }
 
 fn validate_tmux_target(target: &str) -> Result<()> {
@@ -970,6 +958,59 @@ fn validate_tmux_target(target: &str) -> Result<()> {
         }
     }
     bail!("tmux target not found: {target}");
+}
+
+fn resolve_target(target: &str) -> Result<String> {
+    if target.contains(':') {
+        return Ok(target.to_string());
+    }
+
+    let current = tmux_current_target()
+        .map_err(|_| anyhow::anyhow!("target shorthand requires tmux; use session:window.pane"))?;
+    let (session, window, _pane) = parse_target(&current)?;
+
+    if target.contains('.') {
+        return Ok(format!("{session}:{target}"));
+    }
+
+    if target.chars().all(|c| c.is_ascii_digit()) {
+        return Ok(format!("{session}:{window}.{target}"));
+    }
+
+    bail!("invalid target format: {target}");
+}
+
+fn tmux_current_target() -> Result<String> {
+    let output = std::process::Command::new("tmux")
+        .args([
+            "display-message",
+            "-p",
+            "#{session_name}:#{window_index}.#{pane_index}",
+        ])
+        .output()
+        .context("failed to query current tmux target")?;
+    if !output.status.success() {
+        bail!("tmux not available for target shorthand");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn parse_target(target: &str) -> Result<(&str, &str, &str)> {
+    let mut parts = target.splitn(2, ':');
+    let session = parts.next().unwrap_or("");
+    let rest = parts.next().unwrap_or("");
+    if session.trim().is_empty() || rest.trim().is_empty() {
+        bail!("target must be in the format session:window.pane");
+    }
+
+    let mut rest_parts = rest.splitn(2, '.');
+    let window = rest_parts.next().unwrap_or("");
+    let pane = rest_parts.next().unwrap_or("");
+    if window.trim().is_empty() || pane.trim().is_empty() {
+        bail!("target must be in the format session:window.pane");
+    }
+
+    Ok((session, window, pane))
 }
 
 fn validate_delay(delay: &DelayConfig) -> Result<()> {
@@ -1350,6 +1391,21 @@ mod tests {
             resolved.rules[0].exclude.as_ref().unwrap().regex.as_deref(),
             Some("PROD")
         );
+    }
+
+    #[test]
+    fn parse_target_valid() {
+        let (session, window, pane) = parse_target("ai:5.0").unwrap();
+        assert_eq!(session, "ai");
+        assert_eq!(window, "5");
+        assert_eq!(pane, "0");
+    }
+
+    #[test]
+    fn parse_target_invalid() {
+        assert!(parse_target("ai").is_err());
+        assert!(parse_target("ai:5").is_err());
+        assert!(parse_target("ai:.0").is_err());
     }
 }
 
