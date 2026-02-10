@@ -27,6 +27,21 @@
 - Use ANSI 8-color palette with bright variants for contrast.
 - Provide a no-color fallback when `NO_COLOR` is set.
 
+### Visual Bar Styling (Reference)
+- Single status bar line with subtle background fill and brighter foreground text.
+- State color accent on label/icon (RUN green, PAUSE yellow, WAIT blue, ERROR red).
+- Bold labels, normal values.
+- Use Nerd Font state icon only; ASCII fallback.
+
+### Layout Refinements
+- Top bar is always a single line; body log starts immediately after.
+- Footer is a single line at bottom with dim shortcuts.
+- No extra spacer rows unless terminal height is large.
+
+### Bar Format (Preferred)
+- `󰐊 RUN | iter 5/10 [=====.....] 50% | trigger: Concluded… | last: 15s | target: ai:5.0`
+- Compact: `RUN 5/10 [===..] 50% | trg: Concl… | ai:5.0`
+
 ### Responsive Status Bar
 - **Compact** (<= 80 cols)
   - `▶ RUN 5/10 [===..] 50% | trg: Concluded… | ai:5.0`
@@ -50,6 +65,12 @@
 
 ### Icon Fallbacks
 - If Nerd Font not detected, use ASCII: `>` (run), `||` (pause), `...` (delay), `!` (error), `x` (stop).
+
+### Color Palette (256-color safe)
+- Background bar: `48;5;236`
+- Foreground text: `38;5;250`
+- Dim footer: `38;5;244`
+- State accents: green `38;5;71`, yellow `38;5;180`, red `38;5;203`, blue `38;5;75`
 
 ## Interaction Model
 - `p`: pause (no sends, still updating status)
