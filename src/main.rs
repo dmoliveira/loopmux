@@ -961,11 +961,15 @@ fn validate_tmux_target(target: &str) -> Result<()> {
 }
 
 fn resolve_target(target: &str) -> Result<String> {
+    resolve_target_with_current(target, tmux_current_target)
+}
+
+fn resolve_target_with_current(target: &str, current_fn: fn() -> Result<String>) -> Result<String> {
     if target.contains(':') {
         return Ok(target.to_string());
     }
 
-    let current = tmux_current_target()
+    let current = current_fn()
         .map_err(|_| anyhow::anyhow!("target shorthand requires tmux; use session:window.pane"))?;
     let (session, window, _pane) = parse_target(&current)?;
 
@@ -1406,6 +1410,18 @@ mod tests {
         assert!(parse_target("ai").is_err());
         assert!(parse_target("ai:5").is_err());
         assert!(parse_target("ai:.0").is_err());
+    }
+
+    #[test]
+    fn resolve_target_shorthand_pane_only() {
+        let resolved = resolve_target_with_current("0", || Ok("ai:5.2".to_string())).unwrap();
+        assert_eq!(resolved, "ai:5.0");
+    }
+
+    #[test]
+    fn resolve_target_shorthand_window_pane() {
+        let resolved = resolve_target_with_current("2.1", || Ok("ai:5.2".to_string())).unwrap();
+        assert_eq!(resolved, "ai:2.1");
     }
 }
 
