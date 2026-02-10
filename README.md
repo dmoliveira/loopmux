@@ -173,6 +173,11 @@ loopmux run -t ai:5.0 -n 5 \
 - `-t, --target`: tmux target in `session:window.pane` format.
 - `-n, --iterations`: number of iterations (omit for infinite when using config).
 
+### Target shorthand (inside tmux)
+- `-t 0` expands to `current_session:current_window.0`
+- `-t 2.1` expands to `current_session:2.1`
+ - Shorthand requires tmux; otherwise provide full `session:window.pane`.
+
 ## Troubleshooting
 
 ### tmux target not found
