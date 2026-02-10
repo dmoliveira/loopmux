@@ -15,7 +15,7 @@ loopmux watches tmux output and injects prompts when a trigger matches. You can 
 - Mid-flight loop runner (tmux capture + send)
 - Structured logging (text or JSONL)
 
-## Supported Assistants
+## Supported Code Assistants
 loopmux is tmux-first and backend-agnostic. If your assistant runs in a tmux pane, loopmux can target it.
 
 Examples:
