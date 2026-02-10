@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use regex::Regex;
 use serde::Deserialize;
@@ -32,7 +32,7 @@ enum Command {
 
 #[derive(Debug, Parser)]
 #[command(
-    after_help = "Lean mode:\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n"
+    after_help = "Lean mode (no YAML):\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n\nLean flags:\n  --prompt     Required prompt body\n  --trigger    Required regex to match tmux output\n  --exclude    Optional regex to skip matches\n  --pre        Optional pre block\n  --post       Optional post block\n  --once       Send a single prompt and exit\n  --tail N     Capture-pane lines (default 200)\n\nCommon flags:\n  -t, --target       tmux target session:window.pane\n  -n, --iterations   number of iterations\n"
 )]
 struct RunArgs {
     /// Path to the YAML config file.
