@@ -141,6 +141,30 @@ loopmux validate --config loop.yaml [--skip-tmux]
 loopmux init --output loop.yaml
 ```
 
+## Lean Mode (no YAML)
+
+Use inline flags to run a quick loop without a config file.
+
+```bash
+loopmux run -t ai:5.0 -n 5 \
+  --prompt "Do the next iteration." \
+  --trigger "Concluded|What is next" \
+  --exclude "PROD" \
+  --once
+```
+
+### Lean flags
+- `--prompt`: required prompt body.
+- `--trigger`: regex to match tmux output (required).
+- `--exclude`: regex to skip matches (optional).
+- `--pre` / `--post`: optional prompt blocks.
+- `--once`: send a single prompt and exit.
+- `--tail N`: number of capture-pane lines (default 200).
+
+### Common flags
+- `-t, --target`: tmux target in `session:window.pane` format.
+- `-n, --iterations`: number of iterations (omit for infinite when using config).
+
 ## Troubleshooting
 
 ### tmux target not found
