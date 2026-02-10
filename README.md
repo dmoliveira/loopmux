@@ -168,6 +168,7 @@ loopmux run -t ai:5.0 -n 5 \
 - `--pre` / `--post`: optional prompt blocks.
 - `--once`: send a single prompt and exit.
 - `--tail N`: number of capture-pane lines (default 200).
+- `--single-line`: update status output on a single line.
 
 ### Common flags
 - `-t, --target`: tmux target in `session:window.pane` format.
