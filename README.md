@@ -50,6 +50,13 @@ loopmux validate --config loop.yaml
 loopmux run --config loop.yaml
 ```
 
+### Quick Run (no YAML)
+```bash
+loopmux run -t ai:5.0 -n 5 \
+  --prompt "Do the next iteration." \
+  --trigger "Concluded|What is next"
+```
+
 ## Configuration
 
 ### Minimal example

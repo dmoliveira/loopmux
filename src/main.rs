@@ -35,12 +35,33 @@ struct RunArgs {
     /// Path to the YAML config file.
     #[arg(long, short = 'c')]
     config: Option<PathBuf>,
+    /// Inline prompt (mutually exclusive with --config).
+    #[arg(long)]
+    prompt: Option<String>,
+    /// Inline trigger regex (requires --prompt).
+    #[arg(long)]
+    trigger: Option<String>,
+    /// Inline exclude regex.
+    #[arg(long)]
+    exclude: Option<String>,
+    /// Optional pre block for inline prompt.
+    #[arg(long)]
+    pre: Option<String>,
+    /// Optional post block for inline prompt.
+    #[arg(long)]
+    post: Option<String>,
     /// tmux target (session:window.pane), overrides config.
     #[arg(long, short = 't')]
     target: Option<String>,
     /// Iterations to run, overrides config.
     #[arg(long, short = 'n')]
     iterations: Option<u32>,
+    /// Tail lines from tmux capture (default 200).
+    #[arg(long)]
+    tail: Option<usize>,
+    /// Run a single send and exit.
+    #[arg(long)]
+    once: bool,
     /// Validate config and tmux target without sending.
     #[arg(long)]
     dry_run: bool,
@@ -191,8 +212,15 @@ fn main() -> Result<()> {
 }
 
 fn run(args: RunArgs) -> Result<()> {
-    let config = load_config(args.config.as_ref())?;
-    let resolved = resolve_config(config, args.target, args.iterations, false)?;
+    let config = resolve_run_config(&args)?;
+    let resolved = resolve_config(
+        config,
+        args.target.clone(),
+        args.iterations,
+        false,
+        args.tail,
+        args.once,
+    )?;
 
     if args.dry_run {
         print_validation(&resolved);
@@ -225,7 +253,7 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
     logger.log(LogEvent::started(&config, start_timestamp.clone()))?;
 
     while config.infinite || send_count < max_sends {
-        let output = match capture_pane(&config.target, 200) {
+        let output = match capture_pane(&config.target, config.tail) {
             Ok(output) => output,
             Err(err) => {
                 let detail = err.to_string();
@@ -295,13 +323,18 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                         timestamp,
                         &prompt,
                     ))?;
-                    if !config.infinite && send_count >= max_sends {
+                    if config.once || (!config.infinite && send_count >= max_sends) {
                         break;
                     }
                 }
                 if stop_after {
                     println!("loopmux: stopping due to stop rule");
                     logger.log(LogEvent::stopped(&config, "stop rule matched", send_count))?;
+                    break;
+                }
+                if config.once {
+                    println!("loopmux: stopping after single send");
+                    logger.log(LogEvent::stopped(&config, "once", send_count))?;
                     break;
                 }
                 if matches!(config.rule_eval, RuleEval::MultiMatch) {
@@ -546,7 +579,14 @@ fn random_between(min: u64, max: u64) -> Result<u64> {
 
 fn validate(args: ValidateArgs) -> Result<()> {
     let config = load_config(args.config.as_ref())?;
-    let resolved = resolve_config(config, args.target, args.iterations, args.skip_tmux)?;
+    let resolved = resolve_config(
+        config,
+        args.target,
+        args.iterations,
+        args.skip_tmux,
+        None,
+        false,
+    )?;
     print_validation(&resolved);
     Ok(())
 }
@@ -574,6 +614,68 @@ fn load_config(path: Option<&PathBuf>) -> Result<Config> {
     Ok(config)
 }
 
+fn resolve_run_config(args: &RunArgs) -> Result<Config> {
+    if args.config.is_some() {
+        if args.prompt.is_some()
+            || args.trigger.is_some()
+            || args.exclude.is_some()
+            || args.pre.is_some()
+            || args.post.is_some()
+        {
+            bail!("--config cannot be combined with inline prompt flags");
+        }
+        return load_config(args.config.as_ref());
+    }
+
+    let Some(prompt) = args.prompt.as_ref() else {
+        bail!("--config or --prompt is required");
+    };
+    let Some(trigger) = args.trigger.as_ref() else {
+        bail!("--trigger is required when using --prompt");
+    };
+
+    let default_action = Action {
+        pre: args
+            .pre
+            .as_ref()
+            .map(|value| PromptBlock::Single(value.clone())),
+        prompt: Some(PromptBlock::Single(prompt.clone())),
+        post: args
+            .post
+            .as_ref()
+            .map(|value| PromptBlock::Single(value.clone())),
+    };
+    let rule = Rule {
+        id: Some("inline".to_string()),
+        match_: Some(MatchCriteria {
+            regex: Some(trigger.clone()),
+            contains: None,
+            starts_with: None,
+        }),
+        exclude: args.exclude.as_ref().map(|value| MatchCriteria {
+            regex: Some(value.clone()),
+            contains: None,
+            starts_with: None,
+        }),
+        action: None,
+        delay: None,
+        next: None,
+        priority: None,
+    };
+
+    Ok(Config {
+        target: args.target.clone(),
+        iterations: args.iterations,
+        infinite: None,
+        rule_eval: Some(RuleEval::FirstMatch),
+        default_action: Some(default_action),
+        delay: None,
+        rules: Some(vec![rule]),
+        logging: None,
+        template_vars: None,
+    })
+}
+
 #[derive(Debug)]
 struct ResolvedConfig {
     target: String,
@@ -587,6 +689,8 @@ struct ResolvedConfig {
     template_vars: Vec<String>,
     default_action: Action,
     logging: LoggingConfigResolved,
+    tail: usize,
+    once: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -612,6 +716,8 @@ fn resolve_config(
     target_override: Option<String>,
     iterations_override: Option<u32>,
     skip_tmux: bool,
+    tail_override: Option<usize>,
+    once: bool,
 ) -> Result<ResolvedConfig> {
     if let Some(target) = target_override {
         config.target = Some(target);
@@ -670,6 +776,7 @@ fn resolve_config(
         validate_tmux_target(&target)?;
     }
 
+    let tail = tail_override.unwrap_or(200);
     Ok(ResolvedConfig {
         target,
         iterations,
@@ -682,6 +789,8 @@ fn resolve_config(
         template_vars: template_var_keys,
         default_action,
         logging,
+        tail,
+        once,
     })
 }
 
@@ -717,6 +826,8 @@ fn print_validation(config: &ResolvedConfig) {
             log_format_label(config.logging.format)
         );
     }
+    println!("- tail: {}", config.tail);
+    println!("- once: {}", if config.once { "yes" } else { "no" });
     println!("- note: dry-run only, no tmux commands sent");
 }
 
