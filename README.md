@@ -18,7 +18,7 @@ loopmux watches tmux output and injects prompts when a trigger matches. You can 
 ## Supported Code Assistants
 loopmux is tmux-first and backend-agnostic. If your assistant runs in a tmux pane, loopmux can target it.
 
-Example targets:
+Example tmux targets:
 - OpenCode: `ai:5.0`
 - Codex: `codex:1.0`
 - Claude Code: `claude:2.0`
