@@ -985,16 +985,24 @@ impl TuiState {
             rule_id,
             elapsed,
         );
-        let footer = render_footer(self.style, width);
 
         print!("\x1B[2J\x1B[H");
         println!("{bar}");
+
         if width >= 60 {
+            let mut lines_printed = 0usize;
             for line in self.logs.iter().rev().take(self.max_logs).rev() {
                 println!("{line}");
+                lines_printed += 1;
             }
+            while lines_printed < self.max_logs {
+                println!();
+                lines_printed += 1;
+            }
+            let footer = render_footer(self.style, width);
+            println!("{footer}");
         }
-        println!("{footer}");
+
         let _ = std::io::stdout().flush();
         Ok(())
     }
