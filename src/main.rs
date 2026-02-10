@@ -57,10 +57,10 @@ struct RunArgs {
     #[arg(long, short = 'n')]
     iterations: Option<u32>,
     /// Tail lines from tmux capture (default 200).
-    #[arg(long)]
+    #[arg(long, requires = "prompt", conflicts_with = "config")]
     tail: Option<usize>,
     /// Run a single send and exit.
-    #[arg(long)]
+    #[arg(long, requires = "prompt", conflicts_with = "config")]
     once: bool,
     /// Validate config and tmux target without sending.
     #[arg(long)]
