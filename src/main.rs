@@ -36,19 +36,19 @@ struct RunArgs {
     #[arg(long, short = 'c')]
     config: Option<PathBuf>,
     /// Inline prompt (mutually exclusive with --config).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "config")]
     prompt: Option<String>,
     /// Inline trigger regex (requires --prompt).
-    #[arg(long)]
+    #[arg(long, requires = "prompt", conflicts_with = "config")]
     trigger: Option<String>,
     /// Inline exclude regex.
-    #[arg(long)]
+    #[arg(long, requires = "prompt", conflicts_with = "config")]
     exclude: Option<String>,
     /// Optional pre block for inline prompt.
-    #[arg(long)]
+    #[arg(long, requires = "prompt", conflicts_with = "config")]
     pre: Option<String>,
     /// Optional post block for inline prompt.
-    #[arg(long)]
+    #[arg(long, requires = "prompt", conflicts_with = "config")]
     post: Option<String>,
     /// tmux target (session:window.pane), overrides config.
     #[arg(long, short = 't')]
@@ -616,14 +616,6 @@ fn load_config(path: Option<&PathBuf>) -> Result<Config> {
 
 fn resolve_run_config(args: &RunArgs) -> Result<Config> {
     if args.config.is_some() {
-        if args.prompt.is_some()
-            || args.trigger.is_some()
-            || args.exclude.is_some()
-            || args.pre.is_some()
-            || args.post.is_some()
-        {
-            bail!("--config cannot be combined with inline prompt flags");
-        }
         return load_config(args.config.as_ref());
     }
 
