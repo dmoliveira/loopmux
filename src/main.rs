@@ -39,7 +39,7 @@ enum Command {
 
 #[derive(Debug, Parser)]
 #[command(
-    after_help = "Lean mode (no YAML):\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n\nLean flags:\n  --prompt       Required prompt body\n  --trigger      Required regex to match tmux output\n  --exclude      Optional regex to skip matches\n  --pre          Optional pre block\n  --post         Optional post block\n  --once         Send a single prompt and exit\n  --tail N       Capture-pane lines (default 1)\n  --poll N       Poll interval in seconds (default 5)\n  --single-line  Update status output on one line\n\nCommon flags:\n  -t, --target       tmux target session:window.pane\n  -n, --iterations   number of iterations\n"
+    after_help = "Lean mode (no YAML):\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n\nLean flags:\n  --prompt       Required prompt body\n  --trigger      Required regex to match tmux output\n  --exclude      Optional regex to skip matches\n  --pre          Optional pre block\n  --post         Optional post block\n  --once         Send a single prompt and exit\n  --tail N       Capture-pane lines (default 1)\n  --poll N       Poll interval in seconds (default 5)\n  --duration D  Run time limit (e.g. 5m, 2h)\n  --single-line  Update status output on one line\n\nDuration units: s, m, h, d, w, mon (30d), y (365d)\n\nCommon flags:\n  -t, --target       tmux target session:window.pane\n  -n, --iterations   number of iterations\n"
 )]
 struct RunArgs {
     /// Path to the YAML config file.
@@ -84,6 +84,9 @@ struct RunArgs {
     /// Poll interval in seconds when waiting for changes.
     #[arg(long)]
     poll: Option<u64>,
+    /// Stop after a duration (e.g. 5m, 2h, 1d, 1w, 1mon, 1y).
+    #[arg(long)]
+    duration: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -128,6 +131,7 @@ struct Config {
     iterations: Option<u32>,
     infinite: Option<bool>,
     poll: Option<u64>,
+    duration: Option<String>,
     rule_eval: Option<RuleEval>,
     default_action: Option<Action>,
     delay: Option<DelayConfig>,
@@ -335,7 +339,37 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
     }
     logger.log(LogEvent::started(&config, start_timestamp.clone()))?;
 
+    let deadline = config
+        .duration
+        .map(|duration| OffsetDateTime::now_utc() + duration);
+
     while config.infinite || send_count < max_sends {
+        if let Some(deadline) = deadline {
+            if OffsetDateTime::now_utc() >= deadline {
+                if ui_mode == UiMode::Tui {
+                    if let Some(tui_state) = tui.as_mut() {
+                        let elapsed = format_duration(start, OffsetDateTime::now_utc());
+                        tui_state.push_log(format!(
+                            "[{}] stopped reason=duration sends={} elapsed={}",
+                            timestamp_now(),
+                            send_count,
+                            elapsed
+                        ));
+                        tui_state.update(
+                            LoopState::Stopped,
+                            &config,
+                            send_count,
+                            max_sends,
+                            active_rule.as_deref(),
+                            &elapsed,
+                            "",
+                        )?;
+                    }
+                }
+                logger.log(LogEvent::stopped(&config, "duration", send_count))?;
+                break;
+            }
+        }
         let output = match capture_pane(&config.target, config.tail) {
             Ok(output) => output,
             Err(err) => {
@@ -938,6 +972,7 @@ fn resolve_run_config(args: &RunArgs) -> Result<Config> {
         iterations: args.iterations,
         infinite: None,
         poll: args.poll,
+        duration: args.duration.clone(),
         rule_eval: Some(RuleEval::FirstMatch),
         default_action: Some(default_action),
         delay: None,
@@ -954,6 +989,7 @@ struct ResolvedConfig {
     infinite: bool,
     has_prompt: bool,
     poll: u64,
+    duration: Option<Duration>,
     rule_eval: RuleEval,
     rules: Vec<Rule>,
     delay: Option<DelayConfig>,
@@ -1463,6 +1499,46 @@ fn timestamp_local_now() -> String {
         .unwrap_or_else(|_| "unknown".into())
 }
 
+fn parse_duration(value: &str) -> Result<Duration> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        bail!("duration is empty");
+    }
+    let mut number_part = String::new();
+    let mut unit_part = String::new();
+    for ch in trimmed.chars() {
+        if ch.is_ascii_digit() || ch == '.' {
+            if !unit_part.is_empty() {
+                bail!("invalid duration: {value}");
+            }
+            number_part.push(ch);
+        } else if !ch.is_whitespace() {
+            unit_part.push(ch);
+        }
+    }
+    if number_part.is_empty() || unit_part.is_empty() {
+        bail!("invalid duration: {value}");
+    }
+    let amount: f64 = number_part
+        .parse()
+        .with_context(|| format!("invalid duration number: {value}"))?;
+    if amount <= 0.0 {
+        bail!("duration must be > 0: {value}");
+    }
+    let unit = unit_part.to_lowercase();
+    let seconds = match unit.as_str() {
+        "s" | "sec" | "secs" | "second" | "seconds" => amount,
+        "m" | "min" | "mins" | "minute" | "minutes" => amount * 60.0,
+        "h" | "hr" | "hrs" | "hour" | "hours" => amount * 3600.0,
+        "d" | "day" | "days" => amount * 86_400.0,
+        "w" | "wk" | "wks" | "week" | "weeks" => amount * 604_800.0,
+        "mon" | "month" | "months" => amount * 2_592_000.0,
+        "y" | "yr" | "yrs" | "year" | "years" => amount * 31_536_000.0,
+        _ => bail!("invalid duration unit: {unit_part}"),
+    };
+    Ok(Duration::from_secs_f64(seconds))
+}
+
 #[derive(Debug, Clone)]
 struct LoggingConfigResolved {
     path: Option<PathBuf>,
@@ -1519,6 +1595,12 @@ fn resolve_config(
         bail!("iterations must be > 0 unless infinite is true");
     }
 
+    let duration = if let Some(ref value) = config.duration {
+        Some(parse_duration(value).with_context(|| "invalid duration")?)
+    } else {
+        None
+    };
+
     let Some(default_action) = config.default_action else {
         bail!("default_action.prompt is required");
     };
@@ -1562,6 +1644,7 @@ fn resolve_config(
         infinite,
         has_prompt,
         poll,
+        duration,
         rule_eval,
         rules,
         delay,
@@ -1610,6 +1693,9 @@ fn print_validation(config: &ResolvedConfig) {
     }
     println!("- tail: {}", config.tail);
     println!("- poll: {}s", config.poll);
+    if let Some(duration) = config.duration {
+        println!("- duration: {}s", duration.as_secs_f64());
+    }
     println!("- once: {}", if config.once { "yes" } else { "no" });
     println!(
         "- single_line: {}",
@@ -2165,6 +2251,7 @@ mod tests {
             single_line: false,
             tui: false,
             poll: None,
+            duration: None,
         };
         assert!(resolve_run_config(&args).is_err());
     }
@@ -2186,6 +2273,7 @@ mod tests {
             single_line: false,
             tui: false,
             poll: None,
+            duration: None,
         };
         let config = resolve_run_config(&args).unwrap();
         let resolved =
@@ -2231,6 +2319,25 @@ mod tests {
     }
 
     #[test]
+    fn parse_duration_units() {
+        assert_eq!(parse_duration("5s").unwrap().as_secs(), 5);
+        assert_eq!(parse_duration("2m").unwrap().as_secs(), 120);
+        assert_eq!(parse_duration("1h").unwrap().as_secs(), 3600);
+        assert_eq!(parse_duration("1d").unwrap().as_secs(), 86_400);
+        assert_eq!(parse_duration("1w").unwrap().as_secs(), 604_800);
+        assert_eq!(parse_duration("1mon").unwrap().as_secs(), 2_592_000);
+        assert_eq!(parse_duration("1y").unwrap().as_secs(), 31_536_000);
+    }
+
+    #[test]
+    fn parse_duration_rejects_invalid() {
+        assert!(parse_duration("0s").is_err());
+        assert!(parse_duration("5").is_err());
+        assert!(parse_duration("s").is_err());
+        assert!(parse_duration("5x").is_err());
+    }
+
+    #[test]
     fn render_status_bar_compact() {
         let config = ResolvedConfig {
             target: "ai:5.0".to_string(),
@@ -2256,6 +2363,7 @@ mod tests {
             single_line: false,
             tui: false,
             poll: 5,
+            duration: None,
         };
         let bar = render_status_bar(
             LoopState::Running,
@@ -2305,6 +2413,7 @@ mod tests {
             single_line: false,
             tui: false,
             poll: 5,
+            duration: None,
         };
         let bar = render_status_bar(
             LoopState::Running,
@@ -2396,6 +2505,7 @@ fn default_template() -> String {
     let template = r#"target: "ai:5.0"
 iterations: 10
 poll: 5
+duration: 2h
 
 template_vars:
   project: loopmux

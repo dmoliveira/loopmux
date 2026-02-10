@@ -1,6 +1,7 @@
 target: "ai:5.0"
 iterations: 20
 poll: 5
+duration: 2h
 
 rule_eval: first_match
 

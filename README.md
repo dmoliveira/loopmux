@@ -155,6 +155,7 @@ loopmux validate --config loop.yaml [--skip-tmux]
 loopmux init --output loop.yaml
 loopmux run --config loop.yaml --poll 5
 loopmux simulate --line "Concluded" [--sleep 5] [--repeat N]
+loopmux run --config loop.yaml --duration 2h
 ```
 
 ## Lean Mode (no YAML)
@@ -162,6 +163,7 @@ loopmux simulate --line "Concluded" [--sleep 5] [--repeat N]
 Use inline flags to run a quick loop without a config file.
 
 Defaults: `tail=1` (last non-blank line only) and `poll=5s` between checks.
+Duration units: `s`, `m`, `h`, `d`, `w`, `mon` (30d), `y` (365d).
 
 ```bash
 loopmux run -t ai:5.0 -n 5 \
@@ -179,6 +181,7 @@ loopmux run -t ai:5.0 -n 5 \
 - `--once`: send a single prompt and exit.
 - `--tail N`: number of capture-pane lines (default 1).
 - `--poll N`: polling interval in seconds (default 5).
+- `--duration D`: stop after a duration (e.g. `5m`, `2h`, `1d`, `1w`, `1mon`, `1y`).
 - `--single-line`: update status output on a single line.
 
 ### Common flags
@@ -188,6 +191,7 @@ loopmux run -t ai:5.0 -n 5 \
 ### Config
 ```yaml
 poll: 5
+duration: 2h
 ```
 
 ### Target shorthand (inside tmux)

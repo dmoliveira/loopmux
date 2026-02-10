@@ -1,6 +1,7 @@
 target: "ai:5.0"
 iterations: 5
 poll: 5
+duration: 2h
 
 default_action:
   prompt: "Do the next iteration."
