@@ -148,6 +148,14 @@ loopmux init --output loop.yaml
 - Adjust `delay` (fixed/range/jitter/backoff).
 - Increase `min`/`max` if output needs more time to settle.
 
+### Homebrew build fails with `rust-objcopy`
+- If you see `error: unable to run rust-objcopy`, ensure you have the latest tap:
+  ```bash
+  brew update
+  brew reinstall loopmux
+  ```
+- The formula disables cargo stripping to avoid this dependency on macOS.
+
 ## Contributing
 
 1) Fork the repo and create a feature branch.
