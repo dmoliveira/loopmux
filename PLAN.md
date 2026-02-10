@@ -189,6 +189,33 @@ cli:
 5. Add mid-flight controls.
 6. Add logging + YAML templating.
 
+## Backlog (Concise)
+
+### Docs
+- [ ] Add `CONFIG.md` with schema, examples, and rule_eval/delay matrix.
+- [ ] Add recipes section (CI loop, refactor loop, test/fix loop).
+- [ ] Add `CHANGELOG.md` starting at v0.1.0.
+
+### Code Improvements
+- [ ] Split `src/main.rs` into modules (`config`, `tmux`, `rules`, `logging`, `delay`).
+- [ ] Introduce structured error types for clearer CLI messages.
+- [ ] Deterministic RNG (seeded) for delay jitter in tests.
+
+### Tests
+- [ ] Unit tests for rule matching, exclude logic, priority selection.
+- [ ] Property tests for delay jitter bounds and backoff growth.
+- [ ] Golden tests for logging formats (text/jsonl).
+
+### Usability
+- [ ] Add `--once` to run a single send on match.
+- [ ] Add `--tail N` to control capture-pane lines.
+- [ ] Add `--log-format` CLI override.
+
+### High-Value Features
+- [ ] Real TUI (ratatui): status bar, progress, last match, next rule.
+- [ ] Hotkeys for pause/resume (stdin or signal handling).
+- [ ] Config reload on file change.
+
 ## Execution Plan (Epics, Tasks, Subtasks)
 ### Epic 1: Repo + CLI Skeleton
 - [x] Task 1.1: Initialize Rust project for `loopmux`.
