@@ -36,7 +36,7 @@ struct RunArgs {
     #[arg(long, short = 'c')]
     config: Option<PathBuf>,
     /// Inline prompt (mutually exclusive with --config).
-    #[arg(long, conflicts_with = "config")]
+    #[arg(long, conflicts_with = "config", requires = "target")]
     prompt: Option<String>,
     /// Inline trigger regex (requires --prompt).
     #[arg(long, requires = "prompt", conflicts_with = "config")]
