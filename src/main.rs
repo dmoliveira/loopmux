@@ -362,7 +362,7 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                                 tui_state.push_log(format!(
                                     "[{}] error detail=\"{}\"",
                                     timestamp_now(),
-                                    truncate_text(&detail, 120)
+                                    truncate_text(&detail, 120, true)
                                 ));
                                 tui_state.update(
                                     loop_state,
@@ -403,7 +403,7 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                             tui_state.push_log(format!(
                                 "[{timestamp}] sent rule={} prompt=\"{}\"",
                                 rule_match.rule.id.as_deref().unwrap_or("<unnamed>"),
-                                truncate_text(&prompt, 80)
+                                truncate_text(&prompt, 80, true)
                             ));
                             tui_state.update(
                                 loop_state,
@@ -916,6 +916,14 @@ enum IconMode {
     Ascii,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct StyleConfig {
+    use_color: bool,
+    use_bg: bool,
+    use_bold: bool,
+    use_unicode_ellipsis: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TuiAction {
     Pause,
@@ -929,6 +937,7 @@ struct TuiState {
     width: u16,
     height: u16,
     icon_mode: IconMode,
+    style: StyleConfig,
     logs: Vec<String>,
     max_logs: usize,
 }
@@ -937,10 +946,12 @@ impl TuiState {
     fn new(_config: &ResolvedConfig) -> Result<Self> {
         enable_raw_mode().context("failed to enable raw mode")?;
         let (width, height) = crossterm::terminal::size().unwrap_or((80, 24));
+        let style = detect_style();
         Ok(Self {
             width,
             height,
             icon_mode: detect_icon_mode(),
+            style,
             logs: Vec::new(),
             max_logs: height.saturating_sub(3) as usize,
         })
@@ -954,7 +965,7 @@ impl TuiState {
         total: u32,
         rule_id: Option<&str>,
         elapsed: &str,
-        last_status: &str,
+        _last_status: &str,
     ) -> Result<()> {
         let (width, height) = crossterm::terminal::size().unwrap_or((80, 24));
         self.width = width;
@@ -966,21 +977,22 @@ impl TuiState {
             state,
             layout,
             self.icon_mode,
+            self.style,
+            width,
             config,
             current,
             total,
             rule_id,
             elapsed,
         );
-        let footer = render_footer();
+        let footer = render_footer(self.style, width);
 
         print!("\x1B[2J\x1B[H");
         println!("{bar}");
-        if !last_status.is_empty() && matches!(layout, LayoutMode::Compact) {
-            println!("{last_status}");
-        }
-        for line in self.logs.iter().rev().take(self.max_logs).rev() {
-            println!("{line}");
+        if width >= 60 {
+            for line in self.logs.iter().rev().take(self.max_logs).rev() {
+                println!("{line}");
+            }
         }
         println!("{footer}");
         let _ = std::io::stdout().flush();
@@ -1033,14 +1045,47 @@ fn detect_icon_mode() -> IconMode {
     IconMode::Nerd
 }
 
-fn render_footer() -> String {
-    "p:pause r:resume s:stop n:next q:quit".to_string()
+fn detect_style() -> StyleConfig {
+    let no_color = std::env::var("NO_COLOR").is_ok();
+    let term = std::env::var("TERM").unwrap_or_default();
+    let color_term = std::env::var("COLORTERM").unwrap_or_default();
+    let use_color = !no_color && term != "dumb";
+    let use_bg = use_color && (term.contains("256color") || !color_term.is_empty());
+    let use_bold = use_color;
+    let use_unicode_ellipsis = supports_unicode();
+    StyleConfig {
+        use_color,
+        use_bg,
+        use_bold,
+        use_unicode_ellipsis,
+    }
+}
+
+fn supports_unicode() -> bool {
+    let locale = std::env::var("LC_ALL")
+        .or_else(|_| std::env::var("LC_CTYPE"))
+        .or_else(|_| std::env::var("LANG"))
+        .unwrap_or_default();
+    let locale = locale.to_lowercase();
+    locale.contains("utf-8") || locale.contains("utf8")
+}
+
+fn render_footer(style: StyleConfig, width: u16) -> String {
+    let text = "p:pause r:resume s:stop n:next q:quit";
+    let line = pad_to_width(text, width as usize);
+    if style.use_color {
+        wrap_style(&line, Some(244), style.use_bg.then_some(236), false)
+    } else {
+        line
+    }
 }
 
 fn render_status_bar(
     state: LoopState,
     layout: LayoutMode,
     icon_mode: IconMode,
+    style: StyleConfig,
+    width: u16,
     config: &ResolvedConfig,
     current: u32,
     total: u32,
@@ -1061,24 +1106,41 @@ fn render_status_bar(
     let bar = render_progress_bar(current, total, layout);
     let trigger = rule_id.unwrap_or("-");
 
-    match layout {
+    let text = match layout {
         LayoutMode::Compact => format!(
             "{icon} {label} {progress} {bar} {percent} | trg: {} | {}",
-            truncate_text(trigger, 24),
+            truncate_text(trigger, 24, style.use_unicode_ellipsis),
             config.target
         ),
         LayoutMode::Standard => format!(
             "{icon} {label} {progress} {bar} {percent} | trigger: {} | last: {} | {}",
-            truncate_text(trigger, 40),
+            truncate_text(trigger, 40, style.use_unicode_ellipsis),
             elapsed,
             config.target
         ),
         LayoutMode::Wide => format!(
             "{icon} {label} | iter {progress} {bar} {percent} | trigger: {} | last: {} | target: {}",
-            truncate_text(trigger, 60),
+            truncate_text(trigger, 60, style.use_unicode_ellipsis),
             elapsed,
             config.target
         ),
+    };
+    let line = pad_to_width(&text, width as usize);
+    if style.use_color {
+        let label_color = state_color(state);
+        let styled = if style.use_bold {
+            format!("\x1B[1m{line}\x1B[22m")
+        } else {
+            line
+        };
+        wrap_style(
+            &styled,
+            Some(label_color),
+            style.use_bg.then_some(236),
+            true,
+        )
+    } else {
+        line
     }
 }
 
@@ -1116,13 +1178,49 @@ fn render_progress_bar(current: u32, total: u32, layout: LayoutMode) -> String {
     bar
 }
 
-fn truncate_text(text: &str, max: usize) -> String {
+fn truncate_text(text: &str, max: usize, use_unicode: bool) -> String {
     if text.chars().count() <= max {
         return text.to_string();
     }
     let mut s = text.chars().take(max.saturating_sub(1)).collect::<String>();
-    s.push('…');
+    if use_unicode {
+        s.push('…');
+    } else {
+        s.push_str("...");
+    }
     s
+}
+
+fn pad_to_width(text: &str, width: usize) -> String {
+    let len = text.chars().count();
+    if len >= width {
+        return text.chars().take(width).collect();
+    }
+    let padding = width - len;
+    format!("{text}{}", " ".repeat(padding))
+}
+
+fn state_color(state: LoopState) -> u8 {
+    match state {
+        LoopState::Running => 71,
+        LoopState::Paused => 180,
+        LoopState::Waiting | LoopState::Delay => 75,
+        LoopState::Error => 203,
+        LoopState::Stopped => 244,
+        LoopState::Sending => 71,
+    }
+}
+
+fn wrap_style(text: &str, fg: Option<u8>, bg: Option<u8>, reset_all: bool) -> String {
+    let mut prefix = String::new();
+    if let Some(fg) = fg {
+        prefix.push_str(&format!("\x1B[38;5;{fg}m"));
+    }
+    if let Some(bg) = bg {
+        prefix.push_str(&format!("\x1B[48;5;{bg}m"));
+    }
+    let reset = if reset_all { "\x1B[0m" } else { "\x1B[39;49m" };
+    format!("{prefix}{text}{reset}")
 }
 
 fn timestamp_now() -> String {
@@ -1922,6 +2020,13 @@ mod tests {
             LoopState::Running,
             LayoutMode::Compact,
             IconMode::Ascii,
+            StyleConfig {
+                use_color: false,
+                use_bg: false,
+                use_bold: false,
+                use_unicode_ellipsis: false,
+            },
+            80,
             &config,
             5,
             10,
@@ -1963,6 +2068,13 @@ mod tests {
             LoopState::Running,
             LayoutMode::Standard,
             IconMode::Ascii,
+            StyleConfig {
+                use_color: false,
+                use_bg: false,
+                use_bold: false,
+                use_unicode_ellipsis: true,
+            },
+            120,
             &config,
             1,
             10,
