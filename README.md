@@ -1,5 +1,7 @@
 # loopmux
 
+[![Homebrew](https://img.shields.io/badge/homebrew-installable-2f9c5f)](https://github.com/dmoliveira/homebrew-tap)
+
 Loop prompts into tmux panes with triggers, delays, and branching rules. Built to automate iterative workflows in OpenCode or any tmux-driven LLM session.
 
 ## Why loopmux
