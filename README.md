@@ -54,7 +54,8 @@ loopmux run --config loop.yaml
 ```bash
 loopmux run -t ai:5.0 -n 5 \
   --prompt "Do the next iteration." \
-  --trigger "Concluded|What is next"
+  --trigger "Concluded|What is next" \
+  --once
 ```
 
 ## Configuration
