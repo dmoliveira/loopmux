@@ -1,0 +1,10 @@
+target: "ai:5.0"
+iterations: 5
+
+default_action:
+  prompt: "Do the next iteration."
+
+rules:
+  - id: inline-trigger
+    match:
+      regex: "Concluded|What is next"

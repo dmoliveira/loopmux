@@ -131,8 +131,9 @@ logging:
   format: "jsonl"
 ```
 
-### Example file
+### Example files
 - `examples/loopmux.example.yaml`
+- `examples/loopmux.lean.yaml`
 
 ### Rule evaluation
 - `first_match`: ordered rules; first match wins.
