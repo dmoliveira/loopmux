@@ -1,0 +1,50 @@
+target: "ai:5.0"
+iterations: 20
+
+rule_eval: first_match
+
+template_vars:
+  project: loopmux
+
+default_action:
+  pre: "Keep context on UX simplification."
+  prompt: "Do the next iteration for {{project}}."
+  post: "Run lint/tests; fix failures."
+
+delay:
+  mode: range
+  min: 5
+  max: 120
+
+rules:
+  - id: success-path
+    match:
+      regex: "(All tests passed|LGTM)"
+    exclude:
+      regex: "PROD"
+    action:
+      prompt: "Continue with next iteration."
+    next: review-path
+
+  - id: review-path
+    match:
+      regex: "(Ready for review|PR created)"
+    delay:
+      mode: fixed
+      value: 300
+    action:
+      prompt: "Audit UX for simplification."
+    next: success-path
+
+  - id: failure-path
+    match:
+      regex: "(FAIL|Error|Exception)"
+    action:
+      pre: "Fix the errors before proceeding."
+      prompt: "Repair and re-run tests."
+      post: "Summarize fixes."
+    next: success-path
+
+logging:
+  path: "loopmux.log"
+  format: "jsonl"

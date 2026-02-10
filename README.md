@@ -70,6 +70,7 @@ loopmux run -t ai:5.0 -n 5 \
 
 ### Minimal example
 ```yaml
+target: "ai:5.0"
 iterations: 10
 
 default_action:
@@ -78,6 +79,7 @@ default_action:
 
 ### Full example
 ```yaml
+target: "ai:5.0"
 iterations: 50
 
 rule_eval: first_match
@@ -128,6 +130,9 @@ logging:
   path: "loopmux.log"
   format: "jsonl"
 ```
+
+### Example file
+- `examples/loopmux.example.yaml`
 
 ### Rule evaluation
 - `first_match`: ordered rules; first match wins.
