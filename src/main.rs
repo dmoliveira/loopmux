@@ -5,8 +5,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use crossterm::QueueableCommand;
+use crossterm::cursor::MoveTo;
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode};
 use regex::Regex;
 use serde::Deserialize;
 use serde::Serialize;
@@ -986,24 +988,34 @@ impl TuiState {
             elapsed,
         );
 
-        print!("\x1B[2J\x1B[H");
-        println!("{bar}");
+        let log_height = if width < 60 { 0 } else { self.max_logs };
 
-        if width >= 60 {
-            let mut lines_printed = 0usize;
-            for line in self.logs.iter().rev().take(self.max_logs).rev() {
-                println!("{line}");
-                lines_printed += 1;
-            }
-            while lines_printed < self.max_logs {
-                println!();
-                lines_printed += 1;
-            }
-            let footer = render_footer(self.style, width);
-            println!("{footer}");
+        let mut out = std::io::stdout();
+        let _ = out.queue(MoveTo(0, 0));
+        let _ = out.queue(Clear(ClearType::All));
+        let _ = write!(out, "{bar}");
+
+        for idx in 0..log_height {
+            let line = self
+                .logs
+                .iter()
+                .rev()
+                .take(log_height)
+                .rev()
+                .nth(idx)
+                .map(|value| fit_line(value, width as usize, self.style.use_unicode_ellipsis))
+                .unwrap_or_else(|| "".to_string());
+            let _ = out.queue(MoveTo(0, (idx + 1) as u16));
+            let _ = out.queue(Clear(ClearType::CurrentLine));
+            let _ = write!(out, "{line}");
         }
 
-        let _ = std::io::stdout().flush();
+        let footer_row = self.height.saturating_sub(1);
+        let footer = render_footer(self.style, width);
+        let _ = out.queue(MoveTo(0, footer_row));
+        let _ = out.queue(Clear(ClearType::CurrentLine));
+        let _ = write!(out, "{footer}");
+        let _ = out.flush();
         Ok(())
     }
 
@@ -1082,7 +1094,8 @@ fn render_footer(style: StyleConfig, width: u16) -> String {
     let text = "p:pause r:resume s:stop n:next q:quit";
     let line = pad_to_width(text, width as usize);
     if style.use_color {
-        wrap_style(&line, Some(244), style.use_bg.then_some(236), false)
+        let prefix = style_prefix(Some(244), style.use_bg.then_some(236), false);
+        format!("{prefix}{line}\x1B[0m")
     } else {
         line
     }
@@ -1114,20 +1127,21 @@ fn render_status_bar(
     let bar = render_progress_bar(current, total, layout);
     let trigger = rule_id.unwrap_or("-");
 
+    let state_text = format!("{icon} {label}");
     let text = match layout {
         LayoutMode::Compact => format!(
-            "{icon} {label} {progress} {bar} {percent} | trg: {} | {}",
+            "{state_text} {progress} {bar} {percent} | trg: {} | {}",
             truncate_text(trigger, 24, style.use_unicode_ellipsis),
             config.target
         ),
         LayoutMode::Standard => format!(
-            "{icon} {label} {progress} {bar} {percent} | trigger: {} | last: {} | {}",
+            "{state_text} {progress} {bar} {percent} | trigger: {} | last: {} | {}",
             truncate_text(trigger, 40, style.use_unicode_ellipsis),
             elapsed,
             config.target
         ),
         LayoutMode::Wide => format!(
-            "{icon} {label} | iter {progress} {bar} {percent} | trigger: {} | last: {} | target: {}",
+            "{state_text} | iter {progress} {bar} {percent} | trigger: {} | last: {} | target: {}",
             truncate_text(trigger, 60, style.use_unicode_ellipsis),
             elapsed,
             config.target
@@ -1136,17 +1150,11 @@ fn render_status_bar(
     let line = pad_to_width(&text, width as usize);
     if style.use_color {
         let label_color = state_color(state);
-        let styled = if style.use_bold {
-            format!("\x1B[1m{line}\x1B[22m")
-        } else {
-            line
-        };
-        wrap_style(
-            &styled,
-            Some(label_color),
-            style.use_bg.then_some(236),
-            true,
-        )
+        let base_prefix = style_prefix(Some(250), style.use_bg.then_some(236), style.use_bold);
+        let state_prefix = format!("\x1B[38;5;{label_color}m");
+        let colored_state = format!("{state_prefix}{state_text}{base_prefix}");
+        let colored_line = line.replacen(&state_text, &colored_state, 1);
+        format!("{base_prefix}{colored_line}\x1B[0m")
     } else {
         line
     }
@@ -1219,16 +1227,25 @@ fn state_color(state: LoopState) -> u8 {
     }
 }
 
-fn wrap_style(text: &str, fg: Option<u8>, bg: Option<u8>, reset_all: bool) -> String {
+fn style_prefix(fg: Option<u8>, bg: Option<u8>, bold: bool) -> String {
     let mut prefix = String::new();
+    if bold {
+        prefix.push_str("\x1B[1m");
+    }
     if let Some(fg) = fg {
         prefix.push_str(&format!("\x1B[38;5;{fg}m"));
     }
     if let Some(bg) = bg {
         prefix.push_str(&format!("\x1B[48;5;{bg}m"));
     }
-    let reset = if reset_all { "\x1B[0m" } else { "\x1B[39;49m" };
-    format!("{prefix}{text}{reset}")
+    prefix
+}
+
+fn fit_line(text: &str, width: usize, use_unicode: bool) -> String {
+    if text.chars().count() <= width {
+        return pad_to_width(text, width);
+    }
+    truncate_text(text, width, use_unicode)
 }
 
 fn timestamp_now() -> String {
