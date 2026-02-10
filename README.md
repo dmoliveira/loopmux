@@ -2,7 +2,7 @@
 
 [![Homebrew](https://img.shields.io/badge/homebrew-installable-2f9c5f)](https://github.com/dmoliveira/homebrew-tap)
 
-Loop prompts into tmux panes with triggers, delays, and branching rules. Built to automate iterative workflows in OpenCode or any tmux-driven LLM session.
+Loop prompts into tmux panes with triggers, delays, and branching rules. Built to automate iterative workflows for code assistants running in tmux (OpenCode, Codex, Claude Code).
 
 ## Why loopmux
 loopmux watches tmux output and injects prompts when a trigger matches. You can chain flows, add pre/post blocks, and control delays so your iterations feel deliberate instead of spammy.
@@ -14,6 +14,14 @@ loopmux watches tmux output and injects prompts when a trigger matches. You can 
 - Delay strategies: fixed, range, jitter, backoff
 - Mid-flight loop runner (tmux capture + send)
 - Structured logging (text or JSONL)
+
+## Supported Code Assistants
+loopmux is tmux-first and backend-agnostic. If your assistant runs in a tmux pane, loopmux can target it.
+
+Example tmux targets:
+- OpenCode: `ai:5.0`
+- Codex: `codex:1.0`
+- Claude Code: `claude:2.0`
 
 ## Install
 
@@ -170,6 +178,7 @@ loopmux run -t ai:5.0 -n 5 \
 ### tmux target not found
 - Verify the target: `tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index}'`
 - Ensure the session/window/pane exists and is attached.
+- Confirm the assistant is running in the target pane.
 
 ### No triggers firing
 - Check your match regex/contains.
