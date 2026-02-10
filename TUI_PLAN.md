@@ -5,6 +5,7 @@
 - [ ] Keep updates readable without spamming the terminal.
 - [ ] Support runtime controls (pause, resume, stop, next, edit).
 - [ ] Preserve non-TTY fallback to plain logs.
+ - [ ] Maintain a clean single-bar layout across terminal sizes.
 
 ## Layout (Initial)
 - **Top status bar** (single line)
@@ -27,17 +28,20 @@
 - Use ANSI 8-color palette with bright variants for contrast.
 - Provide a no-color fallback when `NO_COLOR` is set.
 - Disable background fills when `TERM=dumb` or 256 colors are unavailable.
+ - Use bold only when ANSI bold is supported; otherwise plain text.
 
 ### Visual Bar Styling (Reference)
 - Single status bar line with subtle background fill (only when supported).
 - State color accent on label/icon (RUN green, PAUSE yellow, WAIT blue, ERROR red).
 - Bold labels, normal values.
 - Use Nerd Font state icon only; ASCII fallback.
+ - Ellipsis fallback: use `...` when Unicode ellipsis is not supported.
 
 ### Layout Refinements
 - Top bar is always a single line; body log starts immediately after.
 - Footer is a single line at bottom with dim shortcuts.
 - No extra spacer rows unless terminal height is large.
+ - Log area height = terminal height - 2 (bar + footer).
 
 ### Bar Format (Preferred)
 - `󰐊 RUN | iter 5/10 [=====.....] 50% | trigger: Concluded… | last: 15s | target: ai:5.0`
@@ -56,6 +60,7 @@
 - If space is limited, drop: start time, last time, then trigger.
 - Trigger text max length: 24 (compact), 40 (standard), 60 (wide).
 - Prompt preview max length: 80 chars in log.
+ - If width < 60, collapse to single-line mode and hide log body.
 
 ### Icon + Color Guide (Nerd Font)
 - Running: `󰐊` green
@@ -77,6 +82,7 @@
 - 256-color if `TERM` contains `256color` or `COLORTERM` is set.
 - Nerd Font icons if `LOOPMUX_NO_NERD_FONT` is not set.
 - No-color if `NO_COLOR` is set.
+ - Unicode ellipsis if locale is UTF-8; otherwise ASCII.
 
 ## Interaction Model
 - `p`: pause (no sends, still updating status)
@@ -127,6 +133,14 @@
 - [ ] Responsive bar sizing for compact/standard/wide
 - [ ] Nerd Font icons with safe fallback
 - [ ] Hide/show log body with `l`
+ - [ ] Single-line fallback when width < 60
+
+## Acceptance Criteria
+- [ ] Bar renders in a single line with background fill when supported.
+- [ ] Compact/standard/wide layouts switch correctly at 80/120 columns.
+- [ ] Colors degrade gracefully with `NO_COLOR` and non-256 terminals.
+- [ ] Logs never push footer off-screen.
+- [ ] Single-line fallback works in narrow terminals.
 
 ## Tests and Validation
 - [ ] Snapshot tests for rendered bars (compact/standard/wide).
