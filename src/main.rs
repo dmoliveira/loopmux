@@ -1124,30 +1124,59 @@ fn render_status_bar(
     } else {
         format!("{}%", (current * 100 / total))
     };
-    let bar = render_progress_bar(current, total, layout);
+    let bar = render_progress_bar(current, total, layout, style.use_unicode_ellipsis);
     let trigger = rule_id.unwrap_or("-");
 
-    let state_text = format!("{icon} {label}");
-    let text = match layout {
-        LayoutMode::Compact => format!(
-            "{state_text} {progress} {bar} {percent} | trg: {} | {}",
-            truncate_text(trigger, 24, style.use_unicode_ellipsis),
-            config.target
-        ),
-        LayoutMode::Standard => format!(
-            "{state_text} {progress} {bar} {percent} | trigger: {} | last: {} | {}",
-            truncate_text(trigger, 40, style.use_unicode_ellipsis),
-            elapsed,
-            config.target
-        ),
-        LayoutMode::Wide => format!(
-            "{state_text} | iter {progress} {bar} {percent} | trigger: {} | last: {} | target: {}",
-            truncate_text(trigger, 60, style.use_unicode_ellipsis),
-            elapsed,
-            config.target
-        ),
+    let icon_glyph = if style.use_unicode_ellipsis {
+        icon
+    } else {
+        ascii_icon(icon)
     };
+    let state_text = format!("{icon_glyph} {label}");
+    let iter_text = if config.infinite {
+        "iter ∞".to_string()
+    } else {
+        format!("iter {progress}")
+    };
+    let trigger_text = truncate_text(
+        trigger,
+        match layout {
+            LayoutMode::Compact => 20,
+            LayoutMode::Standard => 32,
+            LayoutMode::Wide => 48,
+        },
+        style.use_unicode_ellipsis,
+    );
+
+    let mut parts = Vec::new();
+    parts.push(state_text.clone());
+    parts.push(iter_text);
+    parts.push(format!("{bar} {percent}"));
+    match layout {
+        LayoutMode::Compact => {
+            parts.push(format!("trg: {trigger_text}"));
+            parts.push(format!("{}", config.target));
+        }
+        LayoutMode::Standard => {
+            parts.push(format!("trigger: {trigger_text}"));
+            parts.push(format!("last: {elapsed}"));
+            parts.push(format!("{}", config.target));
+        }
+        LayoutMode::Wide => {
+            parts.push(format!("trigger: {trigger_text}"));
+            parts.push(format!("last: {elapsed}"));
+            parts.push(format!("target: {}", config.target));
+        }
+    }
+
+    let sep = if style.use_color {
+        dim_text(" | ", style)
+    } else {
+        " | ".to_string()
+    };
+    let text = parts.join(&sep);
     let line = pad_to_width(&text, width as usize);
+
     if style.use_color {
         let label_color = state_color(state);
         let base_prefix = style_prefix(Some(250), style.use_bg.then_some(236), style.use_bold);
@@ -1179,18 +1208,31 @@ fn state_label(state: LoopState, icon_mode: IconMode) -> (&'static str, &'static
     }
 }
 
-fn render_progress_bar(current: u32, total: u32, layout: LayoutMode) -> String {
+fn render_progress_bar(current: u32, total: u32, layout: LayoutMode, unicode: bool) -> String {
     let width = match layout {
         LayoutMode::Compact => 6,
         LayoutMode::Standard => 10,
         LayoutMode::Wide => 14,
     };
     if total == 0 {
-        return format!("[{}]", ".".repeat(width));
+        return format!(
+            "[{}]",
+            if unicode {
+                "░".repeat(width)
+            } else {
+                ".".repeat(width)
+            }
+        );
     }
     let filled = ((current as f64 / total as f64) * width as f64).round() as usize;
     let filled = filled.min(width);
-    let bar = format!("[{}{}]", "=".repeat(filled), ".".repeat(width - filled));
+    let filled_char = if unicode { "█" } else { "=" };
+    let empty_char = if unicode { "░" } else { "." };
+    let bar = format!(
+        "[{}{}]",
+        filled_char.repeat(filled),
+        empty_char.repeat(width - filled)
+    );
     bar
 }
 
@@ -1214,6 +1256,26 @@ fn pad_to_width(text: &str, width: usize) -> String {
     }
     let padding = width - len;
     format!("{text}{}", " ".repeat(padding))
+}
+
+fn dim_text(text: &str, style: StyleConfig) -> String {
+    if style.use_color {
+        let prefix = style_prefix(Some(244), style.use_bg.then_some(236), false);
+        format!("{prefix}{text}\x1B[0m")
+    } else {
+        text.to_string()
+    }
+}
+
+fn ascii_icon(icon: &str) -> &str {
+    match icon {
+        "󰐊" => ">",
+        "󰏤" => "||",
+        "󰔟" => "...",
+        "󰅚" => "!",
+        "󰩈" => "x",
+        _ => ">",
+    }
 }
 
 fn state_color(state: LoopState) -> u8 {
