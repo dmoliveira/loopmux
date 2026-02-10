@@ -1155,12 +1155,12 @@ fn render_status_bar(
     match layout {
         LayoutMode::Compact => {
             parts.push(format!("trg: {trigger_text}"));
-            parts.push(format!("{}", config.target));
+            parts.push(config.target.clone());
         }
         LayoutMode::Standard => {
             parts.push(format!("trigger: {trigger_text}"));
             parts.push(format!("last: {elapsed}"));
-            parts.push(format!("{}", config.target));
+            parts.push(config.target.clone());
         }
         LayoutMode::Wide => {
             parts.push(format!("trigger: {trigger_text}"));
@@ -1169,20 +1169,17 @@ fn render_status_bar(
         }
     }
 
-    let sep = if style.use_color {
-        dim_text(" | ", style)
-    } else {
-        " | ".to_string()
-    };
-    let text = parts.join(&sep);
-    let line = pad_to_width(&text, width as usize);
+    let plain_text = parts.join(" | ");
+    let line = pad_to_width(&plain_text, width as usize);
 
     if style.use_color {
         let label_color = state_color(state);
         let base_prefix = style_prefix(Some(250), style.use_bg.then_some(236), style.use_bold);
         let state_prefix = format!("\x1B[38;5;{label_color}m");
+        let sep_prefix = style_prefix(Some(244), style.use_bg.then_some(236), false);
         let colored_state = format!("{state_prefix}{state_text}{base_prefix}");
-        let colored_line = line.replacen(&state_text, &colored_state, 1);
+        let mut colored_line = line.replacen(&state_text, &colored_state, 1);
+        colored_line = colored_line.replace(" | ", &format!("{sep_prefix} | {base_prefix}"));
         format!("{base_prefix}{colored_line}\x1B[0m")
     } else {
         line
@@ -1256,15 +1253,6 @@ fn pad_to_width(text: &str, width: usize) -> String {
     }
     let padding = width - len;
     format!("{text}{}", " ".repeat(padding))
-}
-
-fn dim_text(text: &str, style: StyleConfig) -> String {
-    if style.use_color {
-        let prefix = style_prefix(Some(244), style.use_bg.then_some(236), false);
-        format!("{prefix}{text}\x1B[0m")
-    } else {
-        text.to_string()
-    }
 }
 
 fn ascii_icon(icon: &str) -> &str {
