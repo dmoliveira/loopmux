@@ -23,12 +23,13 @@
 - Use separators and padding for clarity without wasting columns.
 
 ### Theme Compatibility
-- Avoid hardcoded background colors; use foreground colors only.
+- Prefer foreground-only styling unless 256-color support is detected.
 - Use ANSI 8-color palette with bright variants for contrast.
 - Provide a no-color fallback when `NO_COLOR` is set.
+- Disable background fills when `TERM=dumb` or 256 colors are unavailable.
 
 ### Visual Bar Styling (Reference)
-- Single status bar line with subtle background fill and brighter foreground text.
+- Single status bar line with subtle background fill (only when supported).
 - State color accent on label/icon (RUN green, PAUSE yellow, WAIT blue, ERROR red).
 - Bold labels, normal values.
 - Use Nerd Font state icon only; ASCII fallback.
@@ -71,6 +72,11 @@
 - Foreground text: `38;5;250`
 - Dim footer: `38;5;244`
 - State accents: green `38;5;71`, yellow `38;5;180`, red `38;5;203`, blue `38;5;75`
+ 
+### Capability Detection
+- 256-color if `TERM` contains `256color` or `COLORTERM` is set.
+- Nerd Font icons if `LOOPMUX_NO_NERD_FONT` is not set.
+- No-color if `NO_COLOR` is set.
 
 ## Interaction Model
 - `p`: pause (no sends, still updating status)
@@ -97,6 +103,7 @@
 - TTY: draw top bar + footer; body log scrolls.
 - Non-TTY: fall back to current log output.
 - Single-line mode remains available as a lightweight alternative.
+- If width is too small for the bar, fall back to single-line mode.
 
 ### Log Line Format
 - `[08:28:11] sent rule=success-path prompt="Continue with next iteration"`
