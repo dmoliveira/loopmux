@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use regex::Regex;
 use serde::Deserialize;
@@ -1219,6 +1219,138 @@ fn status_line(
         "{}{} status:{} target={} progress={} rule={} elapsed={}{}",
         color, icon, reset, config.target, progress, rule, elapsed, reset
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rule_with(match_: Option<MatchCriteria>, exclude: Option<MatchCriteria>) -> Rule {
+        Rule {
+            id: None,
+            match_,
+            exclude,
+            action: None,
+            delay: None,
+            next: None,
+            priority: None,
+        }
+    }
+
+    fn match_regex(pattern: &str) -> MatchCriteria {
+        MatchCriteria {
+            regex: Some(pattern.to_string()),
+            contains: None,
+            starts_with: None,
+        }
+    }
+
+    fn match_contains(value: &str) -> MatchCriteria {
+        MatchCriteria {
+            regex: None,
+            contains: Some(value.to_string()),
+            starts_with: None,
+        }
+    }
+
+    #[test]
+    fn matches_criteria_regex_and_contains() {
+        let output = "hello world";
+        assert!(matches_criteria(&match_regex("hello"), output).unwrap());
+        assert!(matches_criteria(&match_contains("world"), output).unwrap());
+        assert!(!matches_criteria(&match_contains("missing"), output).unwrap());
+    }
+
+    #[test]
+    fn matches_criteria_invalid_regex() {
+        let output = "hello";
+        assert!(matches_criteria(&match_regex("["), output).is_err());
+    }
+
+    #[test]
+    fn matches_rule_respects_exclude() {
+        let rule = rule_with(Some(match_regex("hello")), Some(match_regex("world")));
+        let output = "hello world";
+        assert!(!matches_rule(&rule, output).unwrap());
+    }
+
+    #[test]
+    fn matches_rule_exclude_only() {
+        let rule = rule_with(None, Some(match_regex("skip")));
+        assert!(matches_rule(&rule, "ok").unwrap());
+        assert!(!matches_rule(&rule, "skip this").unwrap());
+    }
+
+    #[test]
+    fn select_rules_priority() {
+        let mut rule_a = rule_with(Some(match_contains("hit")), None);
+        rule_a.priority = Some(1);
+        let mut rule_b = rule_with(Some(match_contains("hit")), None);
+        rule_b.priority = Some(2);
+        let rules = vec![rule_a, rule_b];
+        let matches = select_rules("hit", &rules, &RuleEval::Priority, None).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].index, 1);
+    }
+
+    #[test]
+    fn select_rules_multi_match() {
+        let rule_a = rule_with(Some(match_contains("hit")), None);
+        let rule_b = rule_with(Some(match_contains("hit")), None);
+        let rules = vec![rule_a, rule_b];
+        let matches = select_rules("hit", &rules, &RuleEval::MultiMatch, None).unwrap();
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].index, 0);
+        assert_eq!(matches[1].index, 1);
+    }
+
+    #[test]
+    fn resolve_run_config_requires_trigger() {
+        let args = RunArgs {
+            config: None,
+            prompt: Some("Do it".to_string()),
+            trigger: None,
+            exclude: None,
+            pre: None,
+            post: None,
+            target: Some("ai:5.0".to_string()),
+            iterations: Some(1),
+            tail: None,
+            once: false,
+            dry_run: false,
+        };
+        assert!(resolve_run_config(&args).is_err());
+    }
+
+    #[test]
+    fn resolve_run_config_inline_builds_rule() {
+        let args = RunArgs {
+            config: None,
+            prompt: Some("Do it".to_string()),
+            trigger: Some("Done".to_string()),
+            exclude: Some("PROD".to_string()),
+            pre: Some("pre".to_string()),
+            post: Some("post".to_string()),
+            target: Some("ai:5.0".to_string()),
+            iterations: Some(2),
+            tail: Some(123),
+            once: true,
+            dry_run: false,
+        };
+        let config = resolve_run_config(&args).unwrap();
+        let resolved = resolve_config(config, None, None, true, args.tail, args.once).unwrap();
+        assert_eq!(resolved.tail, 123);
+        assert!(resolved.once);
+        assert_eq!(resolved.rules.len(), 1);
+        assert_eq!(
+            resolved.rules[0].match_.as_ref().unwrap().regex.as_deref(),
+            Some("Done")
+        );
+        assert_eq!(
+            resolved.rules[0].exclude.as_ref().unwrap().regex.as_deref(),
+            Some("PROD")
+        );
+    }
 }
 
 fn collect_template_placeholders(
