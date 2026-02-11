@@ -39,7 +39,7 @@ enum Command {
 
 #[derive(Debug, Parser)]
 #[command(
-    after_help = "Lean mode (no YAML):\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n\nLean flags:\n  --prompt       Required prompt body\n  --trigger      Required regex to match tmux output\n  --exclude      Optional regex to skip matches\n  --pre          Optional pre block\n  --post         Optional post block\n  --once         Send a single prompt and exit\n  --tail N       Capture-pane lines (default 1)\n  --poll N       Poll interval in seconds (default 5)\n  --duration D  Run time limit (e.g. 5m, 2h)\n  --single-line  Update status output on one line\n\nDuration units: s, m, h, d, w, mon (30d), y (365d)\n\nCommon flags:\n  -t, --target       tmux target session:window.pane\n  -n, --iterations   number of iterations\n"
+    after_help = "Examples:\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n  loopmux run --config loop.yaml --duration 2h\n\nDefaults:\n  tail=1 (last non-blank line)\n  poll=5s\n\nDuration units: s, m, h, d, w, mon (30d), y (365d)\n"
 )]
 struct RunArgs {
     /// Path to the YAML config file.

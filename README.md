@@ -4,10 +4,10 @@
 
 Loop prompts into tmux panes with triggers, delays, and branching rules. Built to automate iterative workflows for code assistants running in tmux (OpenCode, Codex, Claude Code).
 
-## Why loopmux
+## ✨ Why loopmux
 loopmux watches tmux output and injects prompts when a trigger matches. You can chain flows, add pre/post blocks, and control delays so your iterations feel deliberate instead of spammy.
 
-## Features
+## ✨ Features
 - YAML config with `pre`, `prompt`, `post` blocks
 - Ordered rule evaluation with `first_match`, `priority`, or `multi_match`
 - Include/exclude match criteria (regex/contains/starts_with)
@@ -15,7 +15,7 @@ loopmux watches tmux output and injects prompts when a trigger matches. You can 
 - Mid-flight loop runner (tmux capture + send)
 - Structured logging (text or JSONL)
 
-## Supported Code Assistants
+## 🤝 Supported Code Assistants
 loopmux is tmux-first and backend-agnostic. If your assistant runs in a tmux pane, loopmux can target it.
 
 Example tmux targets:
@@ -23,7 +23,7 @@ Example tmux targets:
 - Codex: `codex:1.0`
 - Claude Code: `claude:2.0`
 
-## Install
+## 📦 Install
 
 ### Homebrew
 ```bash
@@ -39,26 +39,28 @@ cargo build --release
 ./target/release/loopmux --help
 ```
 
-## Quick Start
+## ⚡ Quick Start
 
-1) Create a config:
+If you just want to try it, this is the fastest path.
+
+1) 🧩 Create a config:
 ```bash
 loopmux init --output loop.yaml
 ```
 
-2) Update the tmux target and rules in `loop.yaml`.
+2) 🎯 Update the tmux target and rules in `loop.yaml`.
 
-3) Validate config:
+3) ✅ Validate config:
 ```bash
 loopmux validate --config loop.yaml
 ```
 
-4) Run the loop:
+4) ▶️ Run the loop:
 ```bash
 loopmux run --config loop.yaml
 ```
 
-### Quick Run (no YAML)
+### ⚡ Quick Run (no YAML)
 ```bash
 loopmux run -t ai:5.0 -n 5 \
   --prompt "Do the next iteration." \
@@ -66,7 +68,7 @@ loopmux run -t ai:5.0 -n 5 \
   --once
 ```
 
-## Configuration
+## 🧭 Configuration
 
 ### Minimal example
 ```yaml
@@ -146,7 +148,7 @@ logging:
 - `jitter`: range plus +/- jitter factor (0.0..1.0).
 - `backoff`: exponential backoff using `base`, `factor`, `max`.
 
-## CLI
+## 🧰 CLI
 
 ```text
 loopmux run --config loop.yaml [--target ai:5.0] [--iterations 10]
@@ -158,7 +160,7 @@ loopmux simulate --line "Concluded" [--sleep 5] [--repeat N]
 loopmux run --config loop.yaml --duration 2h
 ```
 
-## Lean Mode (no YAML)
+## ⚡ Lean Mode (no YAML)
 
 Use inline flags to run a quick loop without a config file.
 
@@ -199,7 +201,7 @@ duration: 2h
 - `-t 2.1` expands to `current_session:2.1`
  - Shorthand requires tmux; otherwise provide full `session:window.pane`.
 
-## Simulation
+## 🧪 Simulation
 
 Use `simulate` to print a line after a delay in the pane loopmux is watching.
 
@@ -222,7 +224,7 @@ Output format (timestamp prefixed):
 ```
 ```
 
-## Troubleshooting
+## 🛠️ Troubleshooting
 
 ### tmux target not found
 - Verify the target: `tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index}'`
