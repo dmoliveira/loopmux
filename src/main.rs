@@ -39,7 +39,7 @@ enum Command {
 
 #[derive(Debug, Parser)]
 #[command(
-    after_help = "Examples:\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n  loopmux run --config loop.yaml --duration 2h\n  loopmux run --tui\n\nDefaults:\n  tail=1 (last non-blank line)\n  poll=5s\n  history-limit=50\n\nDuration units: s, m, h, d, w, mon (30d), y (365d)\n"
+    after_help = "Examples:\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n  loopmux run --config loop.yaml --duration 2h\n  loopmux run --tui\n\nDefaults:\n  tail=1 (last non-blank line)\n  poll=5s\n  history-limit=50\n  trigger-edge=on\n\nDuration units: s, m, h, d, w, mon (30d), y (365d)\n"
 )]
 struct RunArgs {
     /// Path to the YAML config file.
@@ -84,6 +84,9 @@ struct RunArgs {
     /// Poll interval in seconds when waiting for changes.
     #[arg(long)]
     poll: Option<u64>,
+    /// Disable trigger edge-guard and allow repeated sends while trigger stays true.
+    #[arg(long)]
+    no_trigger_edge: bool,
     /// Fanout mode for matched panes.
     #[arg(long, default_value = "matched")]
     fanout: FanoutMode,
@@ -115,6 +118,7 @@ struct HistoryEntry {
     tail: Option<usize>,
     once: bool,
     poll: Option<u64>,
+    trigger_edge: Option<bool>,
     fanout: Option<FanoutMode>,
     duration: Option<String>,
 }
@@ -161,6 +165,7 @@ struct Config {
     iterations: Option<u32>,
     infinite: Option<bool>,
     poll: Option<u64>,
+    trigger_edge: Option<bool>,
     fanout: Option<FanoutMode>,
     duration: Option<String>,
     rule_eval: Option<RuleEval>,
@@ -296,6 +301,7 @@ struct SendPlan {
     source_target: String,
     rule_id: Option<String>,
     next_rule: Option<String>,
+    edge_key: String,
     prompt: String,
     stop_after: bool,
     delay_seconds: Option<u64>,
@@ -348,6 +354,7 @@ fn run(args: RunArgs) -> Result<()> {
         args.once,
         args.single_line,
         args.tui,
+        args.no_trigger_edge.then_some(false),
     )?;
 
     if args.dry_run {
@@ -387,6 +394,11 @@ fn hydrate_run_args_from_history(mut args: RunArgs) -> Result<RunArgs> {
     }
     if args.poll.is_none() {
         args.poll = entry.poll;
+    }
+    if !args.no_trigger_edge {
+        if let Some(trigger_edge) = entry.trigger_edge {
+            args.no_trigger_edge = !trigger_edge;
+        }
     }
     if args.fanout == FanoutMode::Matched {
         if let Some(fanout) = entry.fanout {
@@ -436,7 +448,7 @@ fn history_signature(args: &RunArgs) -> Option<String> {
     let prompt = args.prompt.as_ref()?;
     let trigger = args.trigger.as_ref()?;
     Some(format!(
-        "target={target}|prompt={prompt}|trigger={trigger}|exclude={}|pre={}|post={}|iterations={}|tail={}|once={}|poll={}|fanout={}|duration={}",
+        "target={target}|prompt={prompt}|trigger={trigger}|exclude={}|pre={}|post={}|iterations={}|tail={}|once={}|poll={}|trigger_edge={}|fanout={}|duration={}",
         args.exclude.as_deref().unwrap_or(""),
         args.pre.as_deref().unwrap_or(""),
         args.post.as_deref().unwrap_or(""),
@@ -444,6 +456,7 @@ fn history_signature(args: &RunArgs) -> Option<String> {
         args.tail.map(|v| v.to_string()).unwrap_or_default(),
         args.once,
         args.poll.map(|v| v.to_string()).unwrap_or_default(),
+        !args.no_trigger_edge,
         fanout_label(args.fanout),
         args.duration.as_deref().unwrap_or("")
     ))
@@ -476,6 +489,7 @@ fn store_run_history(args: &RunArgs) -> Result<()> {
             tail: args.tail,
             once: args.once,
             poll: args.poll,
+            trigger_edge: Some(!args.no_trigger_edge),
             fanout: Some(args.fanout),
             duration: args.duration.clone(),
         },
@@ -488,7 +502,7 @@ fn store_run_history(args: &RunArgs) -> Result<()> {
 
 fn history_entry_signature(entry: &HistoryEntry) -> Option<String> {
     Some(format!(
-        "target={}|prompt={}|trigger={}|exclude={}|pre={}|post={}|iterations={}|tail={}|once={}|poll={}|fanout={}|duration={}",
+        "target={}|prompt={}|trigger={}|exclude={}|pre={}|post={}|iterations={}|tail={}|once={}|poll={}|trigger_edge={}|fanout={}|duration={}",
         entry.target,
         entry.prompt,
         entry.trigger,
@@ -499,6 +513,7 @@ fn history_entry_signature(entry: &HistoryEntry) -> Option<String> {
         entry.tail.map(|v| v.to_string()).unwrap_or_default(),
         entry.once,
         entry.poll.map(|v| v.to_string()).unwrap_or_default(),
+        entry.trigger_edge.unwrap_or(true),
         fanout_label(entry.fanout.unwrap_or(FanoutMode::Matched)),
         entry.duration.as_deref().unwrap_or("")
     ))
@@ -556,6 +571,7 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
     let max_sends = config.iterations.unwrap_or(u32::MAX);
     let mut last_hash_by_target: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
+    let mut trigger_edge_active: HashSet<String> = HashSet::new();
     let mut active_rule_by_target: std::collections::HashMap<String, Option<String>> =
         std::collections::HashMap::new();
     let mut active_rule: Option<String> = None;
@@ -603,6 +619,7 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
     let mut hold_started: Option<std::time::Instant> = None;
 
     while config.infinite || send_count < max_sends {
+        let mut force_rescan = false;
         let active_elapsed = effective_elapsed(run_started, held_total, hold_started);
         if let Some(limit) = config.duration {
             if active_elapsed >= limit {
@@ -673,12 +690,20 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                         }
                         TuiAction::Next => {
                             last_hash_by_target.clear();
+                            trigger_edge_active.clear();
+                            active_rule = None;
+                            active_rule_by_target.clear();
+                            backoff_state.clear();
+                            loop_state = LoopState::Running;
+                            force_rescan = true;
                         }
                         TuiAction::Renew => {
                             send_count = 0;
                             last_hash_by_target.clear();
+                            trigger_edge_active.clear();
                             active_rule = None;
                             active_rule_by_target.clear();
+                            backoff_state.clear();
                             tui_state.push_log(format!(
                                 "[{}] renewed counter reason=manual",
                                 timestamp_now()
@@ -696,6 +721,9 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                     effective_elapsed(run_started, held_total, hold_started),
                     "",
                 )?;
+            }
+            if force_rescan {
+                continue;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
             continue;
@@ -732,7 +760,7 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                 };
                 let hash = hash_output(&output);
                 let last_hash = last_hash_by_target.get(target).cloned().unwrap_or_default();
-                if hash == last_hash {
+                if should_skip_scan_by_hash(config.trigger_edge, &hash, &last_hash) {
                     continue;
                 }
 
@@ -740,12 +768,29 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                     .get(target)
                     .and_then(|value| value.as_deref());
                 let rule_matches = evaluate_rules(&config, &mut logger, &output, active)?;
+
+                let matched_edge_keys = rule_matches
+                    .iter()
+                    .map(|rule_match| trigger_edge_key(target, rule_match))
+                    .collect::<HashSet<_>>();
+                refresh_trigger_edges_for_target(
+                    &mut trigger_edge_active,
+                    target,
+                    &matched_edge_keys,
+                    config.trigger_edge,
+                );
+
                 if rule_matches.is_empty() {
                     continue;
                 }
 
                 matched_sources.insert(target.clone());
                 for rule_match in rule_matches {
+                    let edge_key = trigger_edge_key(target, &rule_match);
+                    if !edge_guard_allows(&trigger_edge_active, &edge_key, config.trigger_edge) {
+                        continue;
+                    }
+
                     let action = rule_match
                         .rule
                         .action
@@ -776,12 +821,13 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                         source_target: target.clone(),
                         rule_id: rule_match.rule.id.clone(),
                         next_rule: rule_match.rule.next.clone(),
+                        edge_key,
                         prompt,
                         stop_after: rule_match.rule.next.as_deref() == Some("stop"),
                         delay_seconds,
                     });
                 }
-                if !plans.is_empty() {
+                if config.trigger_edge {
                     last_hash_by_target.insert(target.clone(), hash);
                 }
 
@@ -842,6 +888,7 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                     continue;
                 }
 
+                let mut sent_any_for_plan = false;
                 for target in recipients {
                     if ui_mode == UiMode::Tui {
                         loop_state = LoopState::Sending;
@@ -874,6 +921,7 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                         loop_state = LoopState::Running;
                     }
                     send_count = send_count.saturating_add(1);
+                    sent_any_for_plan = true;
                     active_rule = plan.next_rule.clone();
                     active_rule_by_target
                         .insert(plan.source_target.clone(), plan.next_rule.clone());
@@ -935,6 +983,9 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                     if !config.infinite && send_count >= max_sends {
                         break;
                     }
+                }
+                if config.trigger_edge && sent_any_for_plan {
+                    trigger_edge_active.insert(plan.edge_key.clone());
                 }
                 if plan.stop_after {
                     stop_after = true;
@@ -1034,12 +1085,20 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                         }
                         TuiAction::Next => {
                             last_hash_by_target.clear();
+                            trigger_edge_active.clear();
+                            active_rule = None;
+                            active_rule_by_target.clear();
+                            backoff_state.clear();
+                            loop_state = LoopState::Running;
+                            force_rescan = true;
                         }
                         TuiAction::Renew => {
                             send_count = 0;
                             last_hash_by_target.clear();
+                            trigger_edge_active.clear();
                             active_rule = None;
                             active_rule_by_target.clear();
+                            backoff_state.clear();
                             tui_state.push_log(format!(
                                 "[{}] renewed counter reason=manual",
                                 timestamp_now()
@@ -1063,6 +1122,9 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                     effective_elapsed(run_started, held_total, hold_started),
                     "",
                 )?;
+            }
+            if force_rescan {
+                continue;
             }
         }
 
@@ -1095,12 +1157,23 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                                     loop_state = LoopState::Holding;
                                 }
                             }
-                            TuiAction::Next => last_hash_by_target.clear(),
+                            TuiAction::Next => {
+                                last_hash_by_target.clear();
+                                trigger_edge_active.clear();
+                                active_rule = None;
+                                active_rule_by_target.clear();
+                                backoff_state.clear();
+                                loop_state = LoopState::Running;
+                                force_rescan = true;
+                                break;
+                            }
                             TuiAction::Renew => {
                                 send_count = 0;
                                 last_hash_by_target.clear();
+                                trigger_edge_active.clear();
                                 active_rule = None;
                                 active_rule_by_target.clear();
+                                backoff_state.clear();
                                 tui_state.push_log(format!(
                                     "[{}] renewed counter reason=manual",
                                     timestamp_now()
@@ -1148,6 +1221,9 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
             }
             if should_exit_loop {
                 break;
+            }
+            if force_rescan {
+                continue;
             }
         } else {
             std::thread::sleep(std::time::Duration::from_secs(config.poll));
@@ -1297,6 +1373,32 @@ fn evaluate_rules<'a>(
     Ok(matches)
 }
 
+fn trigger_edge_key(target: &str, rule_match: &RuleMatch<'_>) -> String {
+    let rule_id = rule_match.rule.id.as_deref().unwrap_or("<unnamed>");
+    format!("{target}|{rule_id}|{}", rule_match.index)
+}
+
+fn refresh_trigger_edges_for_target(
+    active_edges: &mut HashSet<String>,
+    target: &str,
+    matched_keys: &HashSet<String>,
+    enabled: bool,
+) {
+    if !enabled {
+        return;
+    }
+    let prefix = format!("{target}|");
+    active_edges.retain(|key| !key.starts_with(&prefix) || matched_keys.contains(key));
+}
+
+fn edge_guard_allows(active_edges: &HashSet<String>, edge_key: &str, enabled: bool) -> bool {
+    !enabled || !active_edges.contains(edge_key)
+}
+
+fn should_skip_scan_by_hash(trigger_edge_enabled: bool, hash: &str, last_hash: &str) -> bool {
+    trigger_edge_enabled && hash == last_hash
+}
+
 fn matches_rule(rule: &Rule, output: &str) -> Result<bool> {
     let match_defined = rule.match_.as_ref().map(has_match).unwrap_or(false);
     let matches = if match_defined {
@@ -1426,6 +1528,7 @@ fn validate(args: ValidateArgs) -> Result<()> {
         false,
         false,
         false,
+        None,
     )?;
     print_validation(&resolved);
     Ok(())
@@ -1500,6 +1603,7 @@ fn resolve_run_config(args: &RunArgs) -> Result<Config> {
         iterations: args.iterations,
         infinite: None,
         poll: args.poll,
+        trigger_edge: Some(!args.no_trigger_edge),
         fanout: Some(args.fanout),
         duration: args.duration.clone(),
         rule_eval: Some(RuleEval::FirstMatch),
@@ -1519,6 +1623,7 @@ struct ResolvedConfig {
     infinite: bool,
     has_prompt: bool,
     poll: u64,
+    trigger_edge: bool,
     fanout: FanoutMode,
     duration: Option<Duration>,
     rule_eval: RuleEval,
@@ -2127,6 +2232,7 @@ fn resolve_config(
     once: bool,
     single_line: bool,
     tui: bool,
+    trigger_edge_override: Option<bool>,
 ) -> Result<ResolvedConfig> {
     if let Some(target) = target_override {
         config.target = Some(target);
@@ -2187,6 +2293,7 @@ fn resolve_config(
     }
 
     let poll = config.poll.unwrap_or(5).max(1);
+    let trigger_edge = trigger_edge_override.unwrap_or(config.trigger_edge.unwrap_or(true));
 
     let fanout = config.fanout.unwrap_or(FanoutMode::Matched);
 
@@ -2202,6 +2309,7 @@ fn resolve_config(
         infinite,
         has_prompt,
         poll,
+        trigger_edge,
         fanout,
         duration,
         rule_eval,
@@ -2252,6 +2360,10 @@ fn print_validation(config: &ResolvedConfig) {
     }
     println!("- tail: {}", config.tail);
     println!("- poll: {}s", config.poll);
+    println!(
+        "- trigger_edge: {}",
+        if config.trigger_edge { "yes" } else { "no" }
+    );
     println!("- fanout: {}", fanout_label(config.fanout));
     if let Some(duration) = config.duration {
         println!("- duration: {}s", duration.as_secs_f64());
@@ -2934,6 +3046,7 @@ mod tests {
             single_line: false,
             tui: false,
             poll: None,
+            no_trigger_edge: false,
             fanout: FanoutMode::Matched,
             duration: None,
             history_limit: None,
@@ -2958,13 +3071,16 @@ mod tests {
             single_line: false,
             tui: false,
             poll: None,
+            no_trigger_edge: false,
             fanout: FanoutMode::Matched,
             duration: None,
             history_limit: None,
         };
         let config = resolve_run_config(&args).unwrap();
-        let resolved =
-            resolve_config(config, None, None, true, args.tail, args.once, false, false).unwrap();
+        let resolved = resolve_config(
+            config, None, None, true, args.tail, args.once, false, false, None,
+        )
+        .unwrap();
         assert_eq!(resolved.tail, 123);
         assert!(resolved.once);
         assert_eq!(resolved.rules.len(), 1);
@@ -3077,6 +3193,7 @@ mod tests {
             single_line: false,
             tui: false,
             poll: 5,
+            trigger_edge: true,
             fanout: FanoutMode::Matched,
             duration: None,
         };
@@ -3130,6 +3247,7 @@ mod tests {
             single_line: false,
             tui: false,
             poll: 5,
+            trigger_edge: true,
             fanout: FanoutMode::Matched,
             duration: None,
         };
@@ -3154,6 +3272,36 @@ mod tests {
         assert!(bar.contains("trg"));
         assert!(bar.contains("rem 1m20s"));
         assert!(bar.contains("…"));
+    }
+
+    #[test]
+    fn trigger_edge_rearms_after_clear() {
+        let mut active = HashSet::new();
+        active.insert("ai:7.0|inline|0".to_string());
+
+        let matched_now = HashSet::new();
+        refresh_trigger_edges_for_target(&mut active, "ai:7.0", &matched_now, true);
+        assert!(!active.contains("ai:7.0|inline|0"));
+
+        active.insert("other:1.0|inline|0".to_string());
+        refresh_trigger_edges_for_target(&mut active, "ai:7.0", &matched_now, true);
+        assert!(active.contains("other:1.0|inline|0"));
+    }
+
+    #[test]
+    fn edge_guard_allowance_respects_toggle() {
+        let mut active = HashSet::new();
+        active.insert("ai:7.0|inline|0".to_string());
+        assert!(!edge_guard_allows(&active, "ai:7.0|inline|0", true));
+        assert!(edge_guard_allows(&active, "ai:7.0|inline|0", false));
+        assert!(edge_guard_allows(&active, "ai:7.0|inline|1", true));
+    }
+
+    #[test]
+    fn hash_skip_depends_on_trigger_edge_mode() {
+        assert!(should_skip_scan_by_hash(true, "same", "same"));
+        assert!(!should_skip_scan_by_hash(false, "same", "same"));
+        assert!(!should_skip_scan_by_hash(true, "new", "old"));
     }
 }
 
@@ -3225,6 +3373,7 @@ fn default_template() -> String {
     let template = r#"target: "ai:5.0"
 iterations: 10
 poll: 5
+trigger_edge: true
 duration: 2h
 
 template_vars:
