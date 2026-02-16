@@ -8,13 +8,13 @@ Ship a separate fleet manager for local loopmux processes, with named runs (`--n
 | Stage | Item | Status | Notes |
 |---|---|---|---|
 | 0 | Worktree + br issue setup | done | branch `loopmux-fleet-manager`, issue `bd-efr` in progress |
-| 1 | Define data model + file layout for registry/control | in_progress | decide schema/paths/heartbeat cadence |
-| 2 | Add run identity (`--name`, auto-name, run id) | pending | include in startup + validation output |
-| 3 | Implement local fleet registry + heartbeat lifecycle | pending | register/update/remove run records |
-| 4 | Implement control inbox + run-loop command handling | pending | consume control commands with low-latency polling |
-| 5 | Add manager CLI (`runs ls`, `runs <action>`, `runs tui`) | pending | local listing and command dispatch |
-| 6 | Build fleet TUI navigation + controls (`<`, `>`, stop, hold/resume) | pending | rotate among active runs and act on selected run |
-| 7 | Update docs + tests for fleet features | pending | README examples and focused unit tests |
+| 1 | Define data model + file layout for registry/control | done | local files under `~/.loopmux/runs/{state,control}` |
+| 2 | Add run identity (`--name`, auto-name, run id) | done | `--name` added with sanitized/auto codename + run id |
+| 3 | Implement local fleet registry + heartbeat lifecycle | done | state file written each loop and cleaned on exit |
+| 4 | Implement control inbox + run-loop command handling | done | control commands consumed from control file |
+| 5 | Add manager CLI (`runs ls`, `runs <action>`, `runs tui`) | done | command surface implemented |
+| 6 | Build fleet TUI navigation + controls (`<`, `>`, stop, hold/resume) | done | manager TUI rotates and dispatches controls |
+| 7 | Update docs + tests for fleet features | in_progress | docs and extra tests pending |
 | 8 | Verify (tests + runnable CLI), review, and finalize PR flow | pending | commit sequence, push, PR, merge, cleanup |
 
 ## Execution Order
