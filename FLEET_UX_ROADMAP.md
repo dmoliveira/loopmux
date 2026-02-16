@@ -22,6 +22,15 @@ Status legend: `pending`, `in_progress`, `completed`, `blocked`.
 | E1-T3 | Show local version in fleet TUI header | pending | compare manager vs runs |
 | E1-T4 | Add docs section for version checks (`--version`, help, TUI header) | pending | reduce operator ambiguity |
 
+## Epic 1b - Embedded fleet manager in run TUI
+
+| ID | Task | Status | Notes |
+|---|---|---|---|
+| E1b-T1 | Add `f` shortcut in run TUI to open fleet manager view | completed | reuse existing fleet control flow |
+| E1b-T2 | Keep standalone `runs tui` semantics and embedded return semantics | completed | embedded `q`/`Esc` returns to run view |
+| E1b-T3 | Support `Enter` jump-to-target in fleet manager | completed | handles pane/session/window/all scopes |
+| E1b-T4 | Update docs and verify behavior | completed | README + test/smoke validation |
+
 ## Epic 2 - Cross-run version consistency checks
 
 | ID | Task | Status | Notes |
