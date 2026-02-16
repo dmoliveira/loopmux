@@ -14,8 +14,8 @@ Ship a separate fleet manager for local loopmux processes, with named runs (`--n
 | 4 | Implement control inbox + run-loop command handling | done | control commands consumed from control file |
 | 5 | Add manager CLI (`runs ls`, `runs <action>`, `runs tui`) | done | command surface implemented |
 | 6 | Build fleet TUI navigation + controls (`<`, `>`, stop, hold/resume) | done | manager TUI rotates and dispatches controls |
-| 7 | Update docs + tests for fleet features | in_progress | docs and extra tests pending |
-| 8 | Verify (tests + runnable CLI), review, and finalize PR flow | pending | commit sequence, push, PR, merge, cleanup |
+| 7 | Update docs + tests for fleet features | done | README + unit tests added |
+| 8 | Verify (tests + runnable CLI), review, and finalize PR flow | in_progress | verification complete, ready for PR flow |
 
 ## Execution Order
 1. Finalize file conventions and schema in code comments/types.

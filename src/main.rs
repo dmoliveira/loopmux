@@ -3,12 +3,12 @@ use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use crossterm::QueueableCommand;
 use crossterm::cursor::MoveTo;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType};
-use crossterm::QueueableCommand;
+use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode};
 use regex::Regex;
 use serde::Deserialize;
 use serde::Serialize;
@@ -729,15 +729,24 @@ fn pid_alive(pid: u32) -> bool {
 }
 
 fn resolve_fleet_target(target: &str, runs: &[FleetListedRun]) -> Result<FleetListedRun> {
-    if let Some(run) = runs.iter().find(|run| run.record.id == target) {
+    if let Some(run) = runs
+        .iter()
+        .find(|run| run.record.id == target && !run.stale)
+    {
         return Ok(run.clone());
     }
     let matches = runs
         .iter()
-        .filter(|run| run.record.name == target)
+        .filter(|run| run.record.name == target && !run.stale)
         .cloned()
         .collect::<Vec<_>>();
     if matches.is_empty() {
+        if runs
+            .iter()
+            .any(|run| run.record.id == target || run.record.name == target)
+        {
+            bail!("run is stale/inactive: {target}");
+        }
         bail!("run not found: {target}");
     }
     if matches.len() > 1 {
@@ -801,7 +810,9 @@ fn dispatch_fleet_command(target: &str, command: FleetControlCommand) -> Result<
         command,
         issued_at: timestamp_now(),
     };
-    std::fs::write(&path, serde_json::to_string_pretty(&envelope)?)?;
+    let tmp_path = path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, serde_json::to_string_pretty(&envelope)?)?;
+    std::fs::rename(&tmp_path, &path)?;
     Ok(run)
 }
 
@@ -855,6 +866,24 @@ fn apply_external_control(
     }
 }
 
+fn sleep_with_heartbeat(
+    registry: &FleetRunRegistry,
+    target: &str,
+    state: LoopState,
+    sends: u32,
+    poll_seconds: u64,
+    seconds: u64,
+) -> Result<()> {
+    if seconds == 0 {
+        return Ok(());
+    }
+    for _ in 0..seconds {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        registry.update(target, state, sends, poll_seconds)?;
+    }
+    Ok(())
+}
+
 fn run_fleet_manager_tui() -> Result<()> {
     enable_raw_mode().context("failed to enable raw mode for fleet manager")?;
     let result = run_fleet_manager_tui_inner();
@@ -902,7 +931,7 @@ fn run_fleet_manager_tui_inner() -> Result<()> {
         let footer_row = height.saturating_sub(1);
         let _ = out.queue(MoveTo(0, footer_row));
         let footer = format!(
-            "< prev · > next · h hold · r resume · n next · R renew · s stop · q quit · {}",
+            "< / <- prev · > / -> next · h hold · r resume · n next · R renew · s stop · q quit · {}",
             truncate_text(&message, width.saturating_sub(70) as usize, true)
         );
         let _ = write!(out, "{}", fit_line(&footer, width as usize, true));
@@ -913,7 +942,7 @@ fn run_fleet_manager_tui_inner() -> Result<()> {
                 Event::Resize(_, _) => {}
                 Event::Key(KeyEvent { code, .. }) => match code {
                     KeyCode::Char('q') => break,
-                    KeyCode::Char('<') => {
+                    KeyCode::Char('<') | KeyCode::Left => {
                         if !runs.is_empty() {
                             selected = if selected == 0 {
                                 runs.len() - 1
@@ -922,7 +951,7 @@ fn run_fleet_manager_tui_inner() -> Result<()> {
                             };
                         }
                     }
-                    KeyCode::Char('>') => {
+                    KeyCode::Char('>') | KeyCode::Right => {
                         if !runs.is_empty() {
                             selected = (selected + 1) % runs.len();
                         }
@@ -1477,7 +1506,14 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                 "",
                             )?;
                         }
-                        std::thread::sleep(std::time::Duration::from_secs(delay_seconds));
+                        sleep_with_heartbeat(
+                            &fleet_registry,
+                            &config.target_label,
+                            loop_state,
+                            send_count,
+                            config.poll,
+                            delay_seconds,
+                        )?;
                     }
                 }
 
@@ -1827,7 +1863,14 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                 continue;
             }
         } else {
-            std::thread::sleep(std::time::Duration::from_secs(config.poll));
+            sleep_with_heartbeat(
+                &fleet_registry,
+                &config.target_label,
+                loop_state,
+                send_count,
+                config.poll,
+                config.poll,
+            )?;
         }
     }
 
@@ -3748,6 +3791,42 @@ mod tests {
             matches!(scope, TargetScope::Window { ref session, ref window } if session == "ai" && window == "5")
         );
         assert_eq!(label, "ai:5.*");
+    }
+
+    #[test]
+    fn sanitize_run_name_normalizes_chars() {
+        assert_eq!(sanitize_run_name(" My Run #1 "), "my-run--1");
+        assert_eq!(sanitize_run_name("alpha_beta"), "alpha_beta");
+    }
+
+    #[test]
+    fn external_control_renew_resets_runtime_state() {
+        let mut loop_state = LoopState::Running;
+        let mut hold_started = None;
+        let mut held_total = std::time::Duration::from_secs(0);
+        let mut send_count = 9;
+        let mut last_hash_by_target = std::collections::HashMap::new();
+        last_hash_by_target.insert("ai:1.0".to_string(), "abc".to_string());
+        let mut active_rule = Some("next".to_string());
+        let mut active_rule_by_target = std::collections::HashMap::new();
+        active_rule_by_target.insert("ai:1.0".to_string(), Some("next".to_string()));
+
+        let should_stop = apply_external_control(
+            FleetControlCommand::Renew,
+            &mut loop_state,
+            &mut hold_started,
+            &mut held_total,
+            &mut send_count,
+            &mut last_hash_by_target,
+            &mut active_rule,
+            &mut active_rule_by_target,
+        );
+
+        assert!(!should_stop);
+        assert_eq!(send_count, 0);
+        assert!(last_hash_by_target.is_empty());
+        assert!(active_rule.is_none());
+        assert!(active_rule_by_target.is_empty());
     }
 
     #[test]
