@@ -383,11 +383,19 @@ fn capture_pane(target: &str, lines: usize) -> Result<String> {
 
 fn send_prompt(target: &str, prompt: &str) -> Result<()> {
     let output = std::process::Command::new("tmux")
-        .args(["send-keys", "-t", target, prompt, "Enter"])
+        .args(["send-keys", "-t", target, "-l", prompt])
         .output()
         .context("failed to send tmux keys")?;
     if !output.status.success() {
         bail!("tmux send-keys failed");
+    }
+
+    let output = std::process::Command::new("tmux")
+        .args(["send-keys", "-t", target, "Enter"])
+        .output()
+        .context("failed to submit tmux keys")?;
+    if !output.status.success() {
+        bail!("tmux send-keys submit failed");
     }
     Ok(())
 }
