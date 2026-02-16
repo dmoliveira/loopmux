@@ -892,12 +892,16 @@ fn sleep_with_heartbeat(
 
 fn run_fleet_manager_tui() -> Result<()> {
     enable_raw_mode().context("failed to enable raw mode for fleet manager")?;
-    let result = run_fleet_manager_tui_inner();
+    let result = run_fleet_manager_tui_inner(false);
     let _ = disable_raw_mode();
     result
 }
 
-fn run_fleet_manager_tui_inner() -> Result<()> {
+fn run_fleet_manager_tui_embedded() -> Result<()> {
+    run_fleet_manager_tui_inner(true)
+}
+
+fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
     let mut selected: usize = 0;
     let mut message = String::from("fleet manager ready");
     loop {
@@ -911,9 +915,14 @@ fn run_fleet_manager_tui_inner() -> Result<()> {
         let _ = out.queue(MoveTo(0, 0));
         let _ = out.queue(Clear(ClearType::All));
         let header = format!(
-            "loopmux fleet manager | runs={} | selected={} | q/esc quit manager",
+            "loopmux fleet manager | runs={} | selected={} | q/esc {}",
             runs.len(),
-            if runs.is_empty() { 0 } else { selected + 1 }
+            if runs.is_empty() { 0 } else { selected + 1 },
+            if embedded {
+                "return to run"
+            } else {
+                "quit manager"
+            }
         );
         let _ = writeln!(out, "{}", fit_line(&header, width as usize, true));
 
@@ -937,7 +946,12 @@ fn run_fleet_manager_tui_inner() -> Result<()> {
         let footer_row = height.saturating_sub(1);
         let _ = out.queue(MoveTo(0, footer_row));
         let footer = format!(
-            "< / <- prev · > / -> next · h hold · r resume · n next · R renew · s stop · q/esc quit manager · {}",
+            "< / <- prev · > / -> next · enter jump · h hold · r resume · n next · R renew · s stop · q/esc {} · {}",
+            if embedded {
+                "return to run"
+            } else {
+                "quit manager"
+            },
             truncate_text(&message, width.saturating_sub(70) as usize, true)
         );
         let _ = write!(out, "{}", fit_line(&footer, width as usize, true));
@@ -948,6 +962,9 @@ fn run_fleet_manager_tui_inner() -> Result<()> {
                 Event::Resize(_, _) => {}
                 Event::Key(KeyEvent { code, .. }) => match code {
                     KeyCode::Esc | KeyCode::Char('q') => break,
+                    KeyCode::Enter => {
+                        message = apply_selected_fleet_jump(&runs, selected);
+                    }
                     KeyCode::Char('<') | KeyCode::Left => {
                         if !runs.is_empty() {
                             selected = if selected == 0 {
@@ -1022,6 +1039,86 @@ fn apply_selected_fleet_command(
         ),
         Err(err) => format!("command failed: {err}"),
     }
+}
+
+fn apply_selected_fleet_jump(runs: &[FleetListedRun], selected: usize) -> String {
+    let Some(run) = runs.get(selected) else {
+        return "no run selected".to_string();
+    };
+    match jump_to_tmux_target(&run.record.target) {
+        Ok(()) => format!("jumped to {} ({})", run.record.target, run.record.name),
+        Err(err) => format!("jump failed: {err}"),
+    }
+}
+
+fn jump_to_tmux_target(target: &str) -> Result<()> {
+    if std::env::var("TMUX").is_err() {
+        bail!("not inside tmux; run this from a tmux client");
+    }
+
+    if target == "all sessions/windows/panes" {
+        let panes = list_tmux_panes()?;
+        let first = panes
+            .first()
+            .map(|pane| pane.target.clone())
+            .ok_or_else(|| anyhow::anyhow!("no tmux panes found to jump"))?;
+        return jump_to_tmux_target(&first);
+    }
+
+    if let Some(session) = target.strip_suffix(":*.*") {
+        let switch_status = std::process::Command::new("tmux")
+            .args(["switch-client", "-t", session])
+            .status()
+            .context("failed to run tmux switch-client")?;
+        if !switch_status.success() {
+            bail!("tmux switch-client failed for session: {session}");
+        }
+        return Ok(());
+    }
+
+    if let Some(window_target) = target.strip_suffix(".*") {
+        let (session, _window) = parse_session_window(window_target)?;
+        let switch_status = std::process::Command::new("tmux")
+            .args(["switch-client", "-t", session])
+            .status()
+            .context("failed to run tmux switch-client")?;
+        if !switch_status.success() {
+            bail!("tmux switch-client failed for session: {session}");
+        }
+        let window_status = std::process::Command::new("tmux")
+            .args(["select-window", "-t", window_target])
+            .status()
+            .context("failed to run tmux select-window")?;
+        if !window_status.success() {
+            bail!("tmux select-window failed for {window_target}");
+        }
+        return Ok(());
+    }
+
+    let (session, window, _pane) = parse_target(target)?;
+    let window_target = format!("{session}:{window}");
+    let switch_status = std::process::Command::new("tmux")
+        .args(["switch-client", "-t", session])
+        .status()
+        .context("failed to run tmux switch-client")?;
+    if !switch_status.success() {
+        bail!("tmux switch-client failed for session: {session}");
+    }
+    let window_status = std::process::Command::new("tmux")
+        .args(["select-window", "-t", &window_target])
+        .status()
+        .context("failed to run tmux select-window")?;
+    if !window_status.success() {
+        bail!("tmux select-window failed for {window_target}");
+    }
+    let pane_status = std::process::Command::new("tmux")
+        .args(["select-pane", "-t", target])
+        .status()
+        .context("failed to run tmux select-pane")?;
+    if !pane_status.success() {
+        bail!("tmux select-pane failed for {target}");
+    }
+    Ok(())
 }
 
 fn load_run_history() -> Result<RunHistory> {
@@ -1284,6 +1381,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
             }
         }
         if ui_mode == UiMode::Tui && loop_state == LoopState::Holding {
+            let mut open_fleet_manager = false;
             if let Some(tui_state) = tui.as_mut() {
                 if let Some(action) = tui_state.poll_input()? {
                     match action {
@@ -1302,6 +1400,9 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                 hold_started = Some(std::time::Instant::now());
                                 loop_state = LoopState::Holding;
                             }
+                        }
+                        TuiAction::Fleet => {
+                            open_fleet_manager = true;
                         }
                         TuiAction::Stop => {
                             tui_state
@@ -1357,6 +1458,22 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                     effective_elapsed(run_started, held_total, hold_started),
                     "",
                 )?;
+            }
+            if open_fleet_manager {
+                if let Err(err) = run_fleet_manager_tui_embedded() {
+                    if let Some(tui_state) = tui.as_mut() {
+                        tui_state.push_log(format!(
+                            "[{}] fleet manager error=\"{}\"",
+                            timestamp_now(),
+                            truncate_text(&err.to_string(), 100, true)
+                        ));
+                    }
+                }
+                if let Some(tui_state) = tui.as_mut() {
+                    tui_state
+                        .push_log(format!("[{}] returned from fleet manager", timestamp_now()));
+                }
+                continue;
             }
             if force_rescan {
                 continue;
@@ -1687,6 +1804,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
         }
 
         if ui_mode == UiMode::Tui {
+            let mut open_fleet_manager = false;
             if let Some(tui_state) = tui.as_mut() {
                 if let Some(action) = tui_state.poll_input()? {
                     match action {
@@ -1710,6 +1828,9 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                 hold_started = Some(std::time::Instant::now());
                                 loop_state = LoopState::Holding;
                             }
+                        }
+                        TuiAction::Fleet => {
+                            open_fleet_manager = true;
                         }
                         TuiAction::Stop => {
                             tui_state
@@ -1766,6 +1887,22 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                     "",
                 )?;
             }
+            if open_fleet_manager {
+                if let Err(err) = run_fleet_manager_tui_embedded() {
+                    if let Some(tui_state) = tui.as_mut() {
+                        tui_state.push_log(format!(
+                            "[{}] fleet manager error=\"{}\"",
+                            timestamp_now(),
+                            truncate_text(&err.to_string(), 100, true)
+                        ));
+                    }
+                }
+                if let Some(tui_state) = tui.as_mut() {
+                    tui_state
+                        .push_log(format!("[{}] returned from fleet manager", timestamp_now()));
+                }
+                continue;
+            }
             if force_rescan {
                 continue;
             }
@@ -1799,6 +1936,21 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                     hold_started = Some(std::time::Instant::now());
                                     loop_state = LoopState::Holding;
                                 }
+                            }
+                            TuiAction::Fleet => {
+                                if let Err(err) = run_fleet_manager_tui_embedded() {
+                                    tui_state.push_log(format!(
+                                        "[{}] fleet manager error=\"{}\"",
+                                        timestamp_now(),
+                                        truncate_text(&err.to_string(), 100, true)
+                                    ));
+                                }
+                                tui_state.push_log(format!(
+                                    "[{}] returned from fleet manager",
+                                    timestamp_now()
+                                ));
+                                force_rescan = true;
+                                break;
                             }
                             TuiAction::Next => {
                                 last_hash_by_target.clear();
@@ -2333,6 +2485,7 @@ enum TuiAction {
     Pause,
     Resume,
     HoldToggle,
+    Fleet,
     Stop,
     Next,
     Renew,
@@ -2459,6 +2612,7 @@ impl TuiState {
                     KeyCode::Char('p') => Some(TuiAction::Pause),
                     KeyCode::Char('r') => Some(TuiAction::Resume),
                     KeyCode::Char('h') => Some(TuiAction::HoldToggle),
+                    KeyCode::Char('f') => Some(TuiAction::Fleet),
                     KeyCode::Char('R') => Some(TuiAction::Renew),
                     KeyCode::Char('s') => Some(TuiAction::Stop),
                     KeyCode::Char('n') => Some(TuiAction::Next),
@@ -2529,7 +2683,7 @@ fn render_footer(style: StyleConfig, width: u16, summary: Option<&str>) -> Strin
         format!("stopped{sep_text}{summary}{sep_text}q quit")
     } else {
         format!(
-            "h hold/resume (p/r){sep_text}R renew{sep_text}n next{sep_text}s/^C stop{sep_text}q quit"
+            "h hold/resume (p/r){sep_text}f fleet{sep_text}R renew{sep_text}n next{sep_text}s/^C stop{sep_text}q quit"
         )
     };
     let line = pad_to_width(&text, width as usize);
