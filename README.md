@@ -209,6 +209,20 @@ loopmux run -t ai:5.0 -n 5 \
   ```
 - The formula disables cargo stripping to avoid this dependency on macOS.
 
+### Homebrew checksum mismatch
+- If install fails with `Formula reports different checksum`, your local tap formula is stale or the formula SHA is outdated.
+- Refresh your taps and retry:
+  ```bash
+  brew update
+  brew untap dmoliveira/tap
+  brew tap dmoliveira/tap
+  brew reinstall loopmux
+  ```
+- Maintainers can regenerate `release/loopmux.rb` for a release tag:
+  ```bash
+  ./release/update_formula.sh v0.1.6
+  ```
+
 ## Contributing
 
 1) Fork the repo and create a feature branch.
