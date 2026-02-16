@@ -550,17 +550,17 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
         }
     }
     logger.log(LogEvent::started(&config, start_timestamp.clone()))?;
-
-    let deadline = config
-        .duration
-        .map(|duration| OffsetDateTime::now_utc() + duration);
+    let run_started = std::time::Instant::now();
+    let mut held_total = std::time::Duration::from_secs(0);
+    let mut hold_started: Option<std::time::Instant> = None;
 
     while config.infinite || send_count < max_sends {
-        if let Some(deadline) = deadline {
-            if OffsetDateTime::now_utc() >= deadline {
+        let active_elapsed = effective_elapsed(run_started, held_total, hold_started);
+        if let Some(limit) = config.duration {
+            if active_elapsed >= limit {
                 if ui_mode == UiMode::Tui {
                     if let Some(tui_state) = tui.as_mut() {
-                        let elapsed = format_duration(start, OffsetDateTime::now_utc());
+                        let elapsed = format_std_duration(active_elapsed);
                         tui_state.push_log(format!(
                             "[{}] stopped reason=duration sends={} elapsed={}",
                             timestamp_now(),
@@ -581,6 +581,81 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                 logger.log(LogEvent::stopped(&config, "duration", send_count))?;
                 break;
             }
+        }
+
+        if ui_mode == UiMode::Tui && loop_state == LoopState::Holding {
+            if let Some(tui_state) = tui.as_mut() {
+                if let Some(action) = tui_state.poll_input()? {
+                    match action {
+                        TuiAction::Pause => {}
+                        TuiAction::Resume => {
+                            if let Some(started_at) = hold_started.take() {
+                                held_total += started_at.elapsed();
+                            }
+                            loop_state = LoopState::Running;
+                        }
+                        TuiAction::HoldToggle => {
+                            if let Some(started_at) = hold_started.take() {
+                                held_total += started_at.elapsed();
+                                loop_state = LoopState::Running;
+                            } else {
+                                hold_started = Some(std::time::Instant::now());
+                                loop_state = LoopState::Holding;
+                            }
+                        }
+                        TuiAction::Stop => {
+                            tui_state
+                                .push_log(format!("[{}] stopped reason=manual", timestamp_now()));
+                            logger.log(LogEvent::stopped(&config, "manual", send_count))?;
+                            let elapsed = format_std_duration(effective_elapsed(
+                                run_started,
+                                held_total,
+                                hold_started,
+                            ));
+                            tui_state.update(
+                                LoopState::Stopped,
+                                &config,
+                                send_count,
+                                max_sends,
+                                active_rule.as_deref(),
+                                &elapsed,
+                                "",
+                            )?;
+                            break;
+                        }
+                        TuiAction::Quit => {
+                            tui_state
+                                .push_log(format!("[{}] stopped reason=quit", timestamp_now()));
+                            logger.log(LogEvent::stopped(&config, "quit", send_count))?;
+                            break;
+                        }
+                        TuiAction::Next => last_hash.clear(),
+                        TuiAction::Renew => {
+                            send_count = 0;
+                            last_hash.clear();
+                            active_rule = None;
+                            tui_state.push_log(format!(
+                                "[{}] renewed counter reason=manual",
+                                timestamp_now()
+                            ));
+                        }
+                        TuiAction::Redraw => {}
+                    }
+                }
+                let elapsed =
+                    format_std_duration(effective_elapsed(run_started, held_total, hold_started));
+                tui_state.update(
+                    loop_state,
+                    &config,
+                    send_count,
+                    max_sends,
+                    active_rule.as_deref(),
+                    &elapsed,
+                    "",
+                )?;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            continue;
         }
         let output = match capture_pane(&config.target, config.tail) {
             Ok(output) => output,
@@ -603,8 +678,8 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
             if !rule_matches.is_empty() {
                 let mut stop_after = false;
                 for rule_match in rule_matches {
-                    if loop_state == LoopState::Paused {
-                        loop_state = LoopState::Paused;
+                    if loop_state == LoopState::Holding {
+                        loop_state = LoopState::Holding;
                         break;
                     }
                     if rule_match.rule.next.as_deref() == Some("stop") {
@@ -642,7 +717,11 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                                 send_count,
                                 max_sends,
                                 rule_match.rule.id.as_deref(),
-                                &format_duration(start, OffsetDateTime::now_utc()),
+                                &format_std_duration(effective_elapsed(
+                                    run_started,
+                                    held_total,
+                                    hold_started,
+                                )),
                                 "",
                             )?;
                         }
@@ -667,7 +746,11 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                                     send_count,
                                     max_sends,
                                     rule_match.rule.id.as_deref(),
-                                    &format_duration(start, OffsetDateTime::now_utc()),
+                                    &format_std_duration(effective_elapsed(
+                                        run_started,
+                                        held_total,
+                                        hold_started,
+                                    )),
                                     "",
                                 )?;
                             }
@@ -684,7 +767,11 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                     let timestamp = now
                         .format(&time::format_description::well_known::Rfc3339)
                         .unwrap_or_else(|_| "unknown".into());
-                    let elapsed = format_duration(start, now);
+                    let elapsed = format_std_duration(effective_elapsed(
+                        run_started,
+                        held_total,
+                        hold_started,
+                    ));
                     let status = status_line(
                         &config,
                         send_count,
@@ -745,7 +832,11 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                                 send_count,
                                 max_sends,
                                 active_rule.as_deref(),
-                                &format_duration(start, OffsetDateTime::now_utc()),
+                                &format_std_duration(effective_elapsed(
+                                    run_started,
+                                    held_total,
+                                    hold_started,
+                                )),
                                 "",
                             )?;
                         }
@@ -767,7 +858,11 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                                 send_count,
                                 max_sends,
                                 active_rule.as_deref(),
-                                &format_duration(start, OffsetDateTime::now_utc()),
+                                &format_std_duration(effective_elapsed(
+                                    run_started,
+                                    held_total,
+                                    hold_started,
+                                )),
                                 "",
                             )?;
                         }
@@ -790,8 +885,27 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
             if let Some(tui_state) = tui.as_mut() {
                 if let Some(action) = tui_state.poll_input()? {
                     match action {
-                        TuiAction::Pause => loop_state = LoopState::Paused,
-                        TuiAction::Resume => loop_state = LoopState::Running,
+                        TuiAction::Pause => {
+                            if hold_started.is_none() {
+                                hold_started = Some(std::time::Instant::now());
+                            }
+                            loop_state = LoopState::Holding;
+                        }
+                        TuiAction::Resume => {
+                            if let Some(started_at) = hold_started.take() {
+                                held_total += started_at.elapsed();
+                            }
+                            loop_state = LoopState::Running;
+                        }
+                        TuiAction::HoldToggle => {
+                            if let Some(started_at) = hold_started.take() {
+                                held_total += started_at.elapsed();
+                                loop_state = LoopState::Running;
+                            } else {
+                                hold_started = Some(std::time::Instant::now());
+                                loop_state = LoopState::Holding;
+                            }
+                        }
                         TuiAction::Stop => {
                             tui_state
                                 .push_log(format!("[{}] stopped reason=manual", timestamp_now()));
@@ -801,7 +915,11 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                                 send_count,
                                 max_sends,
                                 active_rule.as_deref(),
-                                &format_duration(start, OffsetDateTime::now_utc()),
+                                &format_std_duration(effective_elapsed(
+                                    run_started,
+                                    held_total,
+                                    hold_started,
+                                )),
                                 "",
                             )?;
                             logger.log(LogEvent::stopped(&config, "manual", send_count))?;
@@ -828,7 +946,8 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                         }
                     }
                 }
-                let elapsed = format_duration(start, OffsetDateTime::now_utc());
+                let elapsed =
+                    format_std_duration(effective_elapsed(run_started, held_total, hold_started));
                 tui_state.update(
                     loop_state,
                     &config,
@@ -849,8 +968,27 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                 if let Some(tui_state) = tui.as_mut() {
                     if let Some(action) = tui_state.poll_input()? {
                         match action {
-                            TuiAction::Pause => loop_state = LoopState::Paused,
-                            TuiAction::Resume => loop_state = LoopState::Running,
+                            TuiAction::Pause => {
+                                if hold_started.is_none() {
+                                    hold_started = Some(std::time::Instant::now());
+                                }
+                                loop_state = LoopState::Holding;
+                            }
+                            TuiAction::Resume => {
+                                if let Some(started_at) = hold_started.take() {
+                                    held_total += started_at.elapsed();
+                                }
+                                loop_state = LoopState::Running;
+                            }
+                            TuiAction::HoldToggle => {
+                                if let Some(started_at) = hold_started.take() {
+                                    held_total += started_at.elapsed();
+                                    loop_state = LoopState::Running;
+                                } else {
+                                    hold_started = Some(std::time::Instant::now());
+                                    loop_state = LoopState::Holding;
+                                }
+                            }
                             TuiAction::Next => last_hash.clear(),
                             TuiAction::Renew => {
                                 send_count = 0;
@@ -867,7 +1005,11 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                                     timestamp_now()
                                 ));
                                 logger.log(LogEvent::stopped(&config, "manual", send_count))?;
-                                let elapsed = format_duration(start, OffsetDateTime::now_utc());
+                                let elapsed = format_std_duration(effective_elapsed(
+                                    run_started,
+                                    held_total,
+                                    hold_started,
+                                ));
                                 tui_state.update(
                                     LoopState::Stopped,
                                     &config,
@@ -890,7 +1032,11 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                             TuiAction::Redraw => {}
                         }
                     }
-                    let elapsed = format_duration(start, OffsetDateTime::now_utc());
+                    let elapsed = format_std_duration(effective_elapsed(
+                        run_started,
+                        held_total,
+                        hold_started,
+                    ));
                     tui_state.update(
                         loop_state,
                         &config,
@@ -911,8 +1057,7 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
         }
     }
 
-    let end = OffsetDateTime::now_utc();
-    let elapsed = format_duration(start, end);
+    let elapsed = format_std_duration(effective_elapsed(run_started, held_total, hold_started));
     if ui_mode == UiMode::Tui {
         if let Some(tui_state) = tui.as_mut() {
             tui_state.push_log(format!(
@@ -1311,7 +1456,7 @@ enum UiMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LoopState {
     Running,
-    Paused,
+    Holding,
     Waiting,
     Delay,
     Sending,
@@ -1344,6 +1489,7 @@ struct StyleConfig {
 enum TuiAction {
     Pause,
     Resume,
+    HoldToggle,
     Stop,
     Next,
     Renew,
@@ -1464,6 +1610,7 @@ impl TuiState {
                     }
                     KeyCode::Char('p') => Some(TuiAction::Pause),
                     KeyCode::Char('r') => Some(TuiAction::Resume),
+                    KeyCode::Char('h') => Some(TuiAction::HoldToggle),
                     KeyCode::Char('R') => Some(TuiAction::Renew),
                     KeyCode::Char('s') => Some(TuiAction::Stop),
                     KeyCode::Char('n') => Some(TuiAction::Next),
@@ -1534,7 +1681,7 @@ fn render_footer(style: StyleConfig, width: u16, summary: Option<&str>) -> Strin
         format!("stopped{sep_text}{summary}{sep_text}q quit")
     } else {
         format!(
-            "p pause{sep_text}r resume{sep_text}R renew{sep_text}s stop{sep_text}n next{sep_text}q quit{sep_text}^C stop"
+            "h hold/resume{sep_text}p pause{sep_text}r resume{sep_text}R renew{sep_text}s stop{sep_text}n next{sep_text}q quit{sep_text}^C stop"
         )
     };
     let line = pad_to_width(&text, width as usize);
@@ -1692,14 +1839,14 @@ fn render_status_bar(
 fn state_label(state: LoopState, icon_mode: IconMode) -> (&'static str, &'static str) {
     match (state, icon_mode) {
         (LoopState::Running, IconMode::Nerd) => ("󰐊", "RUN"),
-        (LoopState::Paused, IconMode::Nerd) => ("󰏤", "PAUSE"),
+        (LoopState::Holding, IconMode::Nerd) => ("󰏤", "HOLD"),
         (LoopState::Delay, IconMode::Nerd) => ("󰔟", "DELAY"),
         (LoopState::Error, IconMode::Nerd) => ("󰅚", "ERROR"),
         (LoopState::Stopped, IconMode::Nerd) => ("󰩈", "STOP"),
         (LoopState::Waiting, IconMode::Nerd) => ("󰔟", "WAIT"),
         (LoopState::Sending, IconMode::Nerd) => ("󰐊", "SEND"),
         (LoopState::Running, IconMode::Ascii) => (">", "RUN"),
-        (LoopState::Paused, IconMode::Ascii) => ("||", "PAUSE"),
+        (LoopState::Holding, IconMode::Ascii) => ("||", "HOLD"),
         (LoopState::Delay, IconMode::Ascii) => ("...", "DELAY"),
         (LoopState::Error, IconMode::Ascii) => ("!", "ERROR"),
         (LoopState::Stopped, IconMode::Ascii) => ("x", "STOP"),
@@ -1768,7 +1915,7 @@ fn ascii_icon(icon: &str) -> &str {
 fn state_color(state: LoopState) -> u8 {
     match state {
         LoopState::Running => 71,
-        LoopState::Paused => 179,
+        LoopState::Holding => 179,
         LoopState::Waiting | LoopState::Delay => 109,
         LoopState::Error => 166,
         LoopState::Stopped => 246,
@@ -2425,9 +2572,20 @@ impl Logger {
     }
 }
 
-fn format_duration(start: OffsetDateTime, end: OffsetDateTime) -> String {
-    let duration = end - start;
-    let total_seconds = duration.whole_seconds().max(0) as u64;
+fn effective_elapsed(
+    run_started: std::time::Instant,
+    held_total: std::time::Duration,
+    hold_started: Option<std::time::Instant>,
+) -> std::time::Duration {
+    let mut total_held = held_total;
+    if let Some(started_at) = hold_started {
+        total_held += started_at.elapsed();
+    }
+    run_started.elapsed().saturating_sub(total_held)
+}
+
+fn format_std_duration(duration: std::time::Duration) -> String {
+    let total_seconds = duration.as_secs();
     let hours = total_seconds / 3600;
     let minutes = (total_seconds % 3600) / 60;
     let seconds = total_seconds % 60;

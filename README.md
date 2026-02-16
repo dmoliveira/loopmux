@@ -182,7 +182,7 @@ loopmux run -t ai:5.0 -n 5 \
 ### TUI history picker
 - Run `loopmux run --tui` with no prompt/config to pick from recent commands.
 - Entries are stored in `~/.loopmux/history.json`, newest first, deduplicated by command shape.
-- TUI controls: `p` pause, `r` resume, `R` renew counter, `s`/`Ctrl+C` stop, `n` next, `q` quit.
+- TUI controls: `h` hold/resume (non-consuming), `p` pause hold, `r` resume run, `R` renew counter, `s`/`Ctrl+C` stop, `n` next, `q` quit.
 
 ### Common flags
 - `-t, --target`: tmux target in `session:window.pane` format.
