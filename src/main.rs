@@ -570,11 +570,8 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                     active_rule = None;
                 }
             }
-        } else {
-            if ui_mode == UiMode::Tui {
-                loop_state = LoopState::Waiting;
-            }
-            std::thread::sleep(std::time::Duration::from_secs(config.poll));
+        } else if ui_mode == UiMode::Tui {
+            loop_state = LoopState::Waiting;
         }
 
         if ui_mode == UiMode::Tui {
@@ -619,6 +616,8 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                 )?;
             }
         }
+
+        std::thread::sleep(std::time::Duration::from_secs(config.poll));
     }
 
     let end = OffsetDateTime::now_utc();
