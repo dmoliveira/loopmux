@@ -607,6 +607,7 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                                 timestamp_now()
                             ));
                         }
+                        TuiAction::Redraw => {}
                         TuiAction::Quit => {
                             tui_state
                                 .push_log(format!("[{}] stopped reason=quit", timestamp_now()));
@@ -628,7 +629,74 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
             }
         }
 
-        std::thread::sleep(std::time::Duration::from_secs(config.poll));
+        if ui_mode == UiMode::Tui {
+            let sleep_until =
+                std::time::Instant::now() + std::time::Duration::from_secs(config.poll);
+            let mut should_exit_loop = false;
+            while std::time::Instant::now() < sleep_until {
+                if let Some(tui_state) = tui.as_mut() {
+                    if let Some(action) = tui_state.poll_input()? {
+                        match action {
+                            TuiAction::Pause => loop_state = LoopState::Paused,
+                            TuiAction::Resume => loop_state = LoopState::Running,
+                            TuiAction::Next => last_hash.clear(),
+                            TuiAction::Renew => {
+                                send_count = 0;
+                                last_hash.clear();
+                                active_rule = None;
+                                tui_state.push_log(format!(
+                                    "[{}] renewed counter reason=manual",
+                                    timestamp_now()
+                                ));
+                            }
+                            TuiAction::Stop => {
+                                tui_state.push_log(format!(
+                                    "[{}] stopped reason=manual",
+                                    timestamp_now()
+                                ));
+                                logger.log(LogEvent::stopped(&config, "manual", send_count))?;
+                                let elapsed = format_duration(start, OffsetDateTime::now_utc());
+                                tui_state.update(
+                                    LoopState::Stopped,
+                                    &config,
+                                    send_count,
+                                    max_sends,
+                                    active_rule.as_deref(),
+                                    &elapsed,
+                                    "",
+                                )?;
+                                should_exit_loop = true;
+                                break;
+                            }
+                            TuiAction::Quit => {
+                                tui_state
+                                    .push_log(format!("[{}] stopped reason=quit", timestamp_now()));
+                                logger.log(LogEvent::stopped(&config, "quit", send_count))?;
+                                should_exit_loop = true;
+                                break;
+                            }
+                            TuiAction::Redraw => {}
+                        }
+                    }
+                    let elapsed = format_duration(start, OffsetDateTime::now_utc());
+                    tui_state.update(
+                        loop_state,
+                        &config,
+                        send_count,
+                        max_sends,
+                        active_rule.as_deref(),
+                        &elapsed,
+                        "",
+                    )?;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            if should_exit_loop {
+                break;
+            }
+        } else {
+            std::thread::sleep(std::time::Duration::from_secs(config.poll));
+        }
     }
 
     let end = OffsetDateTime::now_utc();
@@ -1067,6 +1135,7 @@ enum TuiAction {
     Stop,
     Next,
     Renew,
+    Redraw,
     Quit,
 }
 
@@ -1172,11 +1241,12 @@ impl TuiState {
 
     fn poll_input(&self) -> Result<Option<TuiAction>> {
         if event::poll(Duration::from_millis(10)).context("poll input failed")? {
-            if let Event::Key(KeyEvent {
-                code, modifiers, ..
-            }) = event::read()?
-            {
-                return Ok(match code {
+            let ev = event::read()?;
+            return Ok(match ev {
+                Event::Resize(_, _) => Some(TuiAction::Redraw),
+                Event::Key(KeyEvent {
+                    code, modifiers, ..
+                }) => match code {
                     KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                         Some(TuiAction::Stop)
                     }
@@ -1187,8 +1257,9 @@ impl TuiState {
                     KeyCode::Char('n') => Some(TuiAction::Next),
                     KeyCode::Char('q') => Some(TuiAction::Quit),
                     _ => None,
-                });
-            }
+                },
+                _ => None,
+            });
         }
         Ok(None)
     }
