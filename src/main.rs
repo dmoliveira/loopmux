@@ -19,6 +19,12 @@ use time::OffsetDateTime;
 #[derive(Debug, Parser)]
 #[command(name = "loopmux")]
 #[command(about = "Loop prompts into tmux panes with triggers and delays.")]
+#[command(
+    help_template = "{before-help}{name} {version}\n{about-with-newline}\n{usage-heading} {usage}\n\nCommands:\n{subcommands}\nOptions:\n{options}\n{after-help}"
+)]
+#[command(
+    after_help = "Quick orientation:\n  - Runs against tmux pane scope (`all`, `session`, `session:window`, or `session:window.pane`)\n  - Default safety: trigger-edge ON (sends on false->true trigger transitions)\n\nCommon commands:\n  - run: start looping prompts into target panes\n  - validate: check config/scope without sending\n  - init: print starter YAML template\n  - runs: inspect/stop local loopmux processes\n\nTry next:\n  loopmux run --help\n"
+)]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
