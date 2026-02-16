@@ -47,7 +47,7 @@ enum Command {
 
 #[derive(Debug, Parser)]
 #[command(
-    after_help = "Examples:\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n  loopmux run --config loop.yaml --duration 2h\n  loopmux run --tui\n\nDefaults:\n  tail=1 (last non-blank line)\n  poll=5s\n  history-limit=50\n  trigger-edge=on\n\nDuration units: s, m, h, d, w, mon (30d), y (365d)\n"
+    after_help = "Examples:\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n  loopmux run --config loop.yaml --duration 2h\n  loopmux run --tui\n  loopmux run --config loop.yaml --name planner-a\n\nFleet manager quick start:\n  loopmux runs ls\n  loopmux runs hold planner-a\n  loopmux runs resume planner-a\n  loopmux runs stop planner-a\n  loopmux runs tui\n  loopmux runs --help\n\nDefaults:\n  tail=1 (last non-blank line)\n  poll=5s\n  history-limit=50\n  trigger-edge=on\n\nDuration units: s, m, h, d, w, mon (30d), y (365d)\n"
 )]
 struct RunArgs {
     /// Path to the YAML config file.

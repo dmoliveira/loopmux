@@ -194,11 +194,33 @@ loopmux run -t ai:5.0 -n 5 \
 ### Fleet manager (local)
 - Every running `loopmux run` writes a local registry entry under `~/.loopmux/runs/state/`.
 - Each run has an id plus a codename (`--name` or auto-generated like `amber-fox-0421`).
+- Typical flow:
+  1) Start one or more runs (named recommended):
+     ```bash
+     loopmux run --config loop.yaml --name planner-a
+     loopmux run --config loop.yaml --name reviewer-b
+     ```
+  2) List active runs and copy id/name:
+     ```bash
+     loopmux runs ls
+     ```
+  3) Control a run by id or name:
+     ```bash
+     loopmux runs hold planner-a
+     loopmux runs resume planner-a
+     loopmux runs next planner-a
+     loopmux runs renew planner-a
+     loopmux runs stop planner-a
+     ```
+  4) Open interactive fleet manager:
+     ```bash
+     loopmux runs tui
+     ```
 - List runs:
   ```bash
   loopmux runs ls
   ```
-- Send controls to a run by id or name:
+- Send controls to a run by id or name (non-interactive):
   ```bash
   loopmux runs hold <id-or-name>
   loopmux runs resume <id-or-name>
@@ -210,7 +232,7 @@ loopmux run -t ai:5.0 -n 5 \
   ```bash
   loopmux runs tui
   ```
-  - Controls: `<` previous, `>` next, `h` hold, `r` resume, `n` next, `R` renew, `s` stop, `q` quit.
+  - Controls: `<`/`Left` previous, `>`/`Right` next, `h` hold, `r` resume, `n` next, `R` renew, `s` stop, `q` quit.
 
 ### Common flags
 - `-t, --target`: tmux scope selector.
