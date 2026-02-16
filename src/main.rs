@@ -32,7 +32,7 @@ enum Command {
 
 #[derive(Debug, Parser)]
 #[command(
-    after_help = "Lean mode (no YAML):\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n\nLean flags:\n  --prompt       Required prompt body\n  --trigger      Required regex to match tmux output\n  --exclude      Optional regex to skip matches\n  --pre          Optional pre block\n  --post         Optional post block\n  --once         Send a single prompt and exit\n  --tail N       Capture-pane lines (default 200)\n  --single-line  Update status output on one line\n\nCommon flags:\n  -t, --target       tmux target session:window.pane\n  -n, --iterations   number of iterations\n"
+    after_help = "Lean mode (no YAML):\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n\nLean flags:\n  --prompt       Required prompt body\n  --trigger      Required regex to match tmux output\n  --exclude      Optional regex to skip matches\n  --pre          Optional pre block\n  --post         Optional post block\n  --once         Send a single prompt and exit\n  --tail N       Capture-pane lines (default 200)\n  --single-line  Update status output on one line\n  --poll N       Poll interval in milliseconds (default 300)\n  --tui          Compatibility flag (accepted, no-op)\n\nCommon flags:\n  -t, --target       tmux target session:window.pane\n  -n, --iterations   number of iterations\n"
 )]
 struct RunArgs {
     /// Path to the YAML config file.
@@ -71,6 +71,12 @@ struct RunArgs {
     /// Update status output on a single line.
     #[arg(long)]
     single_line: bool,
+    /// Poll interval in milliseconds while waiting for matches.
+    #[arg(long)]
+    poll: Option<u64>,
+    /// Compatibility flag from older workflows. Currently no-op.
+    #[arg(long)]
+    tui: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -227,6 +233,7 @@ fn run(args: RunArgs) -> Result<()> {
         args.tail,
         args.once,
         args.single_line,
+        args.poll,
     )?;
 
     if args.dry_run {
@@ -354,7 +361,7 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                 }
             }
         } else {
-            std::thread::sleep(std::time::Duration::from_millis(300));
+            std::thread::sleep(std::time::Duration::from_millis(config.poll_ms));
         }
     }
 
@@ -610,6 +617,7 @@ fn validate(args: ValidateArgs) -> Result<()> {
         None,
         false,
         false,
+        None,
     )?;
     print_validation(&resolved);
     Ok(())
@@ -708,6 +716,7 @@ struct ResolvedConfig {
     tail: usize,
     once: bool,
     single_line: bool,
+    poll_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -736,6 +745,7 @@ fn resolve_config(
     tail_override: Option<usize>,
     once: bool,
     single_line: bool,
+    poll_ms_override: Option<u64>,
 ) -> Result<ResolvedConfig> {
     if let Some(target) = target_override {
         config.target = Some(target);
@@ -800,6 +810,7 @@ fn resolve_config(
     }
 
     let tail = tail_override.unwrap_or(200);
+    let poll_ms = poll_ms_override.unwrap_or(300);
     Ok(ResolvedConfig {
         target,
         iterations,
@@ -815,6 +826,7 @@ fn resolve_config(
         tail,
         once,
         single_line,
+        poll_ms,
     })
 }
 
@@ -851,6 +863,7 @@ fn print_validation(config: &ResolvedConfig) {
         );
     }
     println!("- tail: {}", config.tail);
+    println!("- poll_ms: {}", config.poll_ms);
     println!("- once: {}", if config.once { "yes" } else { "no" });
     println!(
         "- single_line: {}",
@@ -1403,6 +1416,8 @@ mod tests {
             once: false,
             dry_run: false,
             single_line: false,
+            poll: None,
+            tui: false,
         };
         assert!(resolve_run_config(&args).is_err());
     }
@@ -1422,11 +1437,16 @@ mod tests {
             once: true,
             dry_run: false,
             single_line: false,
+            poll: Some(30),
+            tui: true,
         };
         let config = resolve_run_config(&args).unwrap();
-        let resolved =
-            resolve_config(config, None, None, true, args.tail, args.once, false).unwrap();
+        let resolved = resolve_config(
+            config, None, None, true, args.tail, args.once, false, args.poll,
+        )
+        .unwrap();
         assert_eq!(resolved.tail, 123);
+        assert_eq!(resolved.poll_ms, 30);
         assert!(resolved.once);
         assert_eq!(resolved.rules.len(), 1);
         assert_eq!(
