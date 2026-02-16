@@ -621,7 +621,7 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                             send_count,
                             max_sends,
                             active_rule.as_deref(),
-                            &elapsed,
+                            active_elapsed,
                             "",
                         )?;
                     }
@@ -654,18 +654,13 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                             tui_state
                                 .push_log(format!("[{}] stopped reason=manual", timestamp_now()));
                             logger.log(LogEvent::stopped(&config, "manual", send_count))?;
-                            let elapsed = format_std_duration(effective_elapsed(
-                                run_started,
-                                held_total,
-                                hold_started,
-                            ));
                             tui_state.update(
                                 LoopState::Stopped,
                                 &config,
                                 send_count,
                                 max_sends,
                                 active_rule.as_deref(),
-                                &elapsed,
+                                effective_elapsed(run_started, held_total, hold_started),
                                 "",
                             )?;
                             break;
@@ -692,15 +687,13 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                         TuiAction::Redraw => {}
                     }
                 }
-                let elapsed =
-                    format_std_duration(effective_elapsed(run_started, held_total, hold_started));
                 tui_state.update(
                     loop_state,
                     &config,
                     send_count,
                     max_sends,
                     active_rule.as_deref(),
-                    &elapsed,
+                    effective_elapsed(run_started, held_total, hold_started),
                     "",
                 )?;
             }
@@ -833,11 +826,7 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                                 send_count,
                                 max_sends,
                                 plan.rule_id.as_deref(),
-                                &format_std_duration(effective_elapsed(
-                                    run_started,
-                                    held_total,
-                                    hold_started,
-                                )),
+                                effective_elapsed(run_started, held_total, hold_started),
                                 "",
                             )?;
                         }
@@ -874,11 +863,7 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                                     send_count,
                                     max_sends,
                                     plan.rule_id.as_deref(),
-                                    &format_std_duration(effective_elapsed(
-                                        run_started,
-                                        held_total,
-                                        hold_started,
-                                    )),
+                                    effective_elapsed(run_started, held_total, hold_started),
                                     "",
                                 )?;
                             }
@@ -925,7 +910,7 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                                 send_count,
                                 max_sends,
                                 plan.rule_id.as_deref(),
-                                &elapsed,
+                                effective_elapsed(run_started, held_total, hold_started),
                                 &status,
                             )?;
                         }
@@ -970,11 +955,7 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                             send_count,
                             max_sends,
                             active_rule.as_deref(),
-                            &format_std_duration(effective_elapsed(
-                                run_started,
-                                held_total,
-                                hold_started,
-                            )),
+                            effective_elapsed(run_started, held_total, hold_started),
                             "",
                         )?;
                     }
@@ -995,11 +976,7 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                             send_count,
                             max_sends,
                             active_rule.as_deref(),
-                            &format_std_duration(effective_elapsed(
-                                run_started,
-                                held_total,
-                                hold_started,
-                            )),
+                            effective_elapsed(run_started, held_total, hold_started),
                             "",
                         )?;
                     }
@@ -1049,11 +1026,7 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                                 send_count,
                                 max_sends,
                                 active_rule.as_deref(),
-                                &format_std_duration(effective_elapsed(
-                                    run_started,
-                                    held_total,
-                                    hold_started,
-                                )),
+                                effective_elapsed(run_started, held_total, hold_started),
                                 "",
                             )?;
                             logger.log(LogEvent::stopped(&config, "manual", send_count))?;
@@ -1081,15 +1054,13 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                         }
                     }
                 }
-                let elapsed =
-                    format_std_duration(effective_elapsed(run_started, held_total, hold_started));
                 tui_state.update(
                     loop_state,
                     &config,
                     send_count,
                     max_sends,
                     active_rule.as_deref(),
-                    &elapsed,
+                    effective_elapsed(run_started, held_total, hold_started),
                     "",
                 )?;
             }
@@ -1141,18 +1112,13 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                                     timestamp_now()
                                 ));
                                 logger.log(LogEvent::stopped(&config, "manual", send_count))?;
-                                let elapsed = format_std_duration(effective_elapsed(
-                                    run_started,
-                                    held_total,
-                                    hold_started,
-                                ));
                                 tui_state.update(
                                     LoopState::Stopped,
                                     &config,
                                     send_count,
                                     max_sends,
                                     active_rule.as_deref(),
-                                    &elapsed,
+                                    effective_elapsed(run_started, held_total, hold_started),
                                     "",
                                 )?;
                                 should_exit_loop = true;
@@ -1168,18 +1134,13 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                             TuiAction::Redraw => {}
                         }
                     }
-                    let elapsed = format_std_duration(effective_elapsed(
-                        run_started,
-                        held_total,
-                        hold_started,
-                    ));
                     tui_state.update(
                         loop_state,
                         &config,
                         send_count,
                         max_sends,
                         active_rule.as_deref(),
-                        &elapsed,
+                        effective_elapsed(run_started, held_total, hold_started),
                         "",
                     )?;
                 }
@@ -1208,7 +1169,7 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                 send_count,
                 max_sends,
                 active_rule.as_deref(),
-                &elapsed,
+                effective_elapsed(run_started, held_total, hold_started),
                 "",
             )?;
             std::thread::sleep(std::time::Duration::from_secs(3));
@@ -1655,9 +1616,13 @@ impl TuiState {
         current: u32,
         total: u32,
         rule_id: Option<&str>,
-        elapsed: &str,
+        active_elapsed: std::time::Duration,
         _last_status: &str,
     ) -> Result<()> {
+        let elapsed = format_std_duration(active_elapsed);
+        let remaining_duration = config
+            .duration
+            .map(|limit| format_std_duration(limit.saturating_sub(active_elapsed)));
         let (width, height) = crossterm::terminal::size().unwrap_or((80, 24));
         self.width = width;
         self.height = height;
@@ -1674,7 +1639,8 @@ impl TuiState {
             current,
             total,
             rule_id,
-            elapsed,
+            &elapsed,
+            remaining_duration.as_deref(),
         );
 
         let log_height = if width < 60 { 0 } else { self.max_logs };
@@ -1705,7 +1671,7 @@ impl TuiState {
 
         let footer_row = self.height.saturating_sub(1);
         let footer_summary = if state == LoopState::Stopped {
-            Some(render_footer_summary(config, current, total, elapsed))
+            Some(render_footer_summary(config, current, total, &elapsed))
         } else {
             None
         };
@@ -1844,6 +1810,7 @@ fn render_status_bar(
     total: u32,
     rule_id: Option<&str>,
     elapsed: &str,
+    remaining_duration: Option<&str>,
 ) -> String {
     let (icon, label) = state_label(state, icon_mode);
     let progress = if config.infinite {
@@ -1894,15 +1861,24 @@ fn render_status_bar(
     let mut right_parts = Vec::new();
     match layout {
         LayoutMode::Compact => {
+            if let Some(remaining) = remaining_duration {
+                right_parts.push(format!("rem {remaining}"));
+            }
             right_parts.push(format!("trg {trigger_text}"));
             right_parts.push(config.target_label.clone());
         }
         LayoutMode::Standard => {
+            if let Some(remaining) = remaining_duration {
+                right_parts.push(format!("rem {remaining}"));
+            }
             right_parts.push(format!("trg {trigger_text}"));
             right_parts.push(format!("last {elapsed}"));
             right_parts.push(config.target_label.clone());
         }
         LayoutMode::Wide => {
+            if let Some(remaining) = remaining_duration {
+                right_parts.push(format!("rem {remaining}"));
+            }
             right_parts.push(format!("trg {trigger_text}"));
             right_parts.push(format!("last {elapsed}"));
             right_parts.push(format!("target {}", config.target_label));
@@ -3120,6 +3096,7 @@ mod tests {
             10,
             Some("Concluded"),
             "00:10",
+            None,
         );
         assert!(bar.contains("RUN"));
         assert!(bar.contains("5/10"));
@@ -3172,8 +3149,10 @@ mod tests {
             10,
             Some("This is a very long trigger string that should truncate"),
             "00:10",
+            Some("1m20s"),
         );
         assert!(bar.contains("trg"));
+        assert!(bar.contains("rem 1m20s"));
         assert!(bar.contains("…"));
     }
 }

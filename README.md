@@ -184,6 +184,7 @@ loopmux run -t ai:5.0 -n 5 \
 - Run `loopmux run --tui` with no prompt/config to pick from recent commands.
 - Entries are stored in `~/.loopmux/history.json`, newest first, deduplicated by command shape.
 - TUI controls: `h` hold/resume (non-consuming), `p` pause hold, `r` resume run, `R` renew counter, `s`/`Ctrl+C` stop, `n` next, `q` quit.
+- When `--duration` is set, the TUI status bar shows remaining time (`rem ...`) and it freezes while HOLD is active.
 
 ### Common flags
 - `-t, --target`: tmux scope selector.
