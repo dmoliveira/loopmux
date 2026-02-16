@@ -27,7 +27,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Run a loop against a tmux target.
+    /// Run a loop against a tmux target scope.
     Run(RunArgs),
     /// Validate configuration without sending anything.
     Validate(ValidateArgs),
@@ -46,7 +46,7 @@ struct RunArgs {
     #[arg(long, short = 'c')]
     config: Option<PathBuf>,
     /// Inline prompt (mutually exclusive with --config).
-    #[arg(long, conflicts_with = "config", requires = "target")]
+    #[arg(long, conflicts_with = "config")]
     prompt: Option<String>,
     /// Inline trigger regex (requires --prompt).
     #[arg(long, requires = "prompt", conflicts_with = "config")]
@@ -60,7 +60,7 @@ struct RunArgs {
     /// Optional post block for inline prompt.
     #[arg(long, requires = "prompt", conflicts_with = "config")]
     post: Option<String>,
-    /// tmux target (session:window.pane), overrides config.
+    /// tmux target scope (session, session:window, or session:window.pane), overrides config.
     #[arg(long, short = 't')]
     target: Option<String>,
     /// Iterations to run, overrides config.
@@ -84,6 +84,9 @@ struct RunArgs {
     /// Poll interval in seconds when waiting for changes.
     #[arg(long)]
     poll: Option<u64>,
+    /// Fanout mode for matched panes.
+    #[arg(long, default_value = "matched")]
+    fanout: FanoutMode,
     /// Stop after a duration (e.g. 5m, 2h, 1d, 1w, 1mon, 1y).
     #[arg(long)]
     duration: Option<String>,
@@ -112,6 +115,7 @@ struct HistoryEntry {
     tail: Option<usize>,
     once: bool,
     poll: Option<u64>,
+    fanout: Option<FanoutMode>,
     duration: Option<String>,
 }
 
@@ -120,7 +124,7 @@ struct ValidateArgs {
     /// Path to the YAML config file.
     #[arg(long, short = 'c')]
     config: Option<PathBuf>,
-    /// tmux target (session:window.pane), overrides config.
+    /// tmux target scope (session, session:window, or session:window.pane), overrides config.
     #[arg(long, short = 't')]
     target: Option<String>,
     /// Iterations to run, overrides config.
@@ -157,6 +161,7 @@ struct Config {
     iterations: Option<u32>,
     infinite: Option<bool>,
     poll: Option<u64>,
+    fanout: Option<FanoutMode>,
     duration: Option<String>,
     rule_eval: Option<RuleEval>,
     default_action: Option<Action>,
@@ -164,6 +169,28 @@ struct Config {
     rules: Option<Vec<Rule>>,
     logging: Option<LoggingConfig>,
     template_vars: Option<TemplateVars>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+enum FanoutMode {
+    Matched,
+    Broadcast,
+}
+
+#[derive(Debug, Clone)]
+enum TargetScope {
+    All,
+    Session(String),
+    Window { session: String, window: String },
+    Pane(String),
+}
+
+#[derive(Debug, Clone)]
+struct TmuxPane {
+    target: String,
+    session: String,
+    window: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -264,6 +291,16 @@ struct RuleMatch<'a> {
     index: usize,
 }
 
+#[derive(Debug, Clone)]
+struct SendPlan {
+    source_target: String,
+    rule_id: Option<String>,
+    next_rule: Option<String>,
+    prompt: String,
+    stop_after: bool,
+    delay_seconds: Option<u64>,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -351,6 +388,11 @@ fn hydrate_run_args_from_history(mut args: RunArgs) -> Result<RunArgs> {
     if args.poll.is_none() {
         args.poll = entry.poll;
     }
+    if args.fanout == FanoutMode::Matched {
+        if let Some(fanout) = entry.fanout {
+            args.fanout = fanout;
+        }
+    }
     if args.duration.is_none() {
         args.duration = entry.duration;
     }
@@ -394,7 +436,7 @@ fn history_signature(args: &RunArgs) -> Option<String> {
     let prompt = args.prompt.as_ref()?;
     let trigger = args.trigger.as_ref()?;
     Some(format!(
-        "target={target}|prompt={prompt}|trigger={trigger}|exclude={}|pre={}|post={}|iterations={}|tail={}|once={}|poll={}|duration={}",
+        "target={target}|prompt={prompt}|trigger={trigger}|exclude={}|pre={}|post={}|iterations={}|tail={}|once={}|poll={}|fanout={}|duration={}",
         args.exclude.as_deref().unwrap_or(""),
         args.pre.as_deref().unwrap_or(""),
         args.post.as_deref().unwrap_or(""),
@@ -402,6 +444,7 @@ fn history_signature(args: &RunArgs) -> Option<String> {
         args.tail.map(|v| v.to_string()).unwrap_or_default(),
         args.once,
         args.poll.map(|v| v.to_string()).unwrap_or_default(),
+        fanout_label(args.fanout),
         args.duration.as_deref().unwrap_or("")
     ))
 }
@@ -433,6 +476,7 @@ fn store_run_history(args: &RunArgs) -> Result<()> {
             tail: args.tail,
             once: args.once,
             poll: args.poll,
+            fanout: Some(args.fanout),
             duration: args.duration.clone(),
         },
     );
@@ -444,7 +488,7 @@ fn store_run_history(args: &RunArgs) -> Result<()> {
 
 fn history_entry_signature(entry: &HistoryEntry) -> Option<String> {
     Some(format!(
-        "target={}|prompt={}|trigger={}|exclude={}|pre={}|post={}|iterations={}|tail={}|once={}|poll={}|duration={}",
+        "target={}|prompt={}|trigger={}|exclude={}|pre={}|post={}|iterations={}|tail={}|once={}|poll={}|fanout={}|duration={}",
         entry.target,
         entry.prompt,
         entry.trigger,
@@ -455,6 +499,7 @@ fn history_entry_signature(entry: &HistoryEntry) -> Option<String> {
         entry.tail.map(|v| v.to_string()).unwrap_or_default(),
         entry.once,
         entry.poll.map(|v| v.to_string()).unwrap_or_default(),
+        fanout_label(entry.fanout.unwrap_or(FanoutMode::Matched)),
         entry.duration.as_deref().unwrap_or("")
     ))
 }
@@ -509,7 +554,10 @@ fn select_history_entry(limit: usize) -> Result<HistoryEntry> {
 fn run_loop(config: ResolvedConfig) -> Result<()> {
     let mut send_count: u32 = 0;
     let max_sends = config.iterations.unwrap_or(u32::MAX);
-    let mut last_hash = String::new();
+    let mut last_hash_by_target: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut active_rule_by_target: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
     let mut active_rule: Option<String> = None;
     let mut backoff_state: std::collections::HashMap<String, BackoffState> =
         std::collections::HashMap::new();
@@ -534,7 +582,7 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| "unknown".into());
     if ui_mode == UiMode::Plain {
-        println!("loopmux: running on {}", config.target);
+        println!("loopmux: running on {}", config.target_label);
         if config.infinite {
             println!("loopmux: iterations = infinite");
         } else {
@@ -545,7 +593,7 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
         if let Some(tui_state) = tui.as_mut() {
             tui_state.push_log(format!(
                 "[{}] started target={}",
-                start_timestamp, config.target
+                start_timestamp, config.target_label
             ));
         }
     }
@@ -582,7 +630,6 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                 break;
             }
         }
-
         if ui_mode == UiMode::Tui && loop_state == LoopState::Holding {
             if let Some(tui_state) = tui.as_mut() {
                 if let Some(action) = tui_state.poll_input()? {
@@ -629,11 +676,14 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                             logger.log(LogEvent::stopped(&config, "quit", send_count))?;
                             break;
                         }
-                        TuiAction::Next => last_hash.clear(),
+                        TuiAction::Next => {
+                            last_hash_by_target.clear();
+                        }
                         TuiAction::Renew => {
                             send_count = 0;
-                            last_hash.clear();
+                            last_hash_by_target.clear();
                             active_rule = None;
+                            active_rule_by_target.clear();
                             tui_state.push_log(format!(
                                 "[{}] renewed counter reason=manual",
                                 timestamp_now()
@@ -657,58 +707,124 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
             std::thread::sleep(std::time::Duration::from_millis(100));
             continue;
         }
-        let output = match capture_pane(&config.target, config.tail) {
-            Ok(output) => output,
-            Err(err) => {
-                let detail = err.to_string();
-                logger.log(LogEvent::error(&config, detail))?;
-                return Err(err);
-            }
-        };
-        let output = if config.tail == 1 {
-            last_non_empty_line(&output)
-        } else {
-            output
-        };
-        let hash = hash_output(&output);
 
-        if hash != last_hash {
-            let rule_matches =
-                evaluate_rules(&config, &mut logger, &output, active_rule.as_deref())?;
-            if !rule_matches.is_empty() {
-                let mut stop_after = false;
+        let mut plans: Vec<SendPlan> = Vec::new();
+        let mut matched_sources: HashSet<String> = HashSet::new();
+        let mut poll_targets: Vec<String> = Vec::new();
+        if loop_state != LoopState::Holding {
+            let panes = match list_tmux_panes() {
+                Ok(value) => value,
+                Err(err) => {
+                    let detail = err.to_string();
+                    logger.log(LogEvent::error(&config, detail))?;
+                    return Err(err);
+                }
+            };
+            poll_targets = select_targets_for_scope(&config.target_scope, &panes);
+            let mut broadcast_plan_keys: HashSet<String> = HashSet::new();
+
+            for target in &poll_targets {
+                let output = match capture_pane(target, config.tail) {
+                    Ok(output) => output,
+                    Err(err) => {
+                        let detail = err.to_string();
+                        logger.log(LogEvent::error(&config, detail))?;
+                        return Err(err);
+                    }
+                };
+                let output = if config.tail == 1 {
+                    last_non_empty_line(&output)
+                } else {
+                    output
+                };
+                let hash = hash_output(&output);
+                let last_hash = last_hash_by_target.get(target).cloned().unwrap_or_default();
+                if hash == last_hash {
+                    continue;
+                }
+
+                let active = active_rule_by_target
+                    .get(target)
+                    .and_then(|value| value.as_deref());
+                let rule_matches = evaluate_rules(&config, &mut logger, &output, active)?;
+                if rule_matches.is_empty() {
+                    continue;
+                }
+
+                matched_sources.insert(target.clone());
                 for rule_match in rule_matches {
-                    if loop_state == LoopState::Holding {
-                        loop_state = LoopState::Holding;
-                        break;
-                    }
-                    if rule_match.rule.next.as_deref() == Some("stop") {
-                        stop_after = true;
-                    }
                     let action = rule_match
                         .rule
                         .action
                         .as_ref()
                         .unwrap_or(&config.default_action);
                     let prompt = build_prompt(action);
+                    if config.fanout == FanoutMode::Broadcast {
+                        let key = format!(
+                            "{}|{}",
+                            rule_match.rule.id.as_deref().unwrap_or("<unnamed>"),
+                            prompt
+                        );
+                        if !broadcast_plan_keys.insert(key) {
+                            continue;
+                        }
+                    }
                     let delay = rule_match.rule.delay.as_ref().or(config.delay.as_ref());
-                    if let Some(delay) = delay {
+                    let delay_seconds = if let Some(delay) = delay {
+                        Some(compute_delay_seconds(
+                            delay,
+                            &rule_match,
+                            &mut backoff_state,
+                        )?)
+                    } else {
+                        None
+                    };
+                    plans.push(SendPlan {
+                        source_target: target.clone(),
+                        rule_id: rule_match.rule.id.clone(),
+                        next_rule: rule_match.rule.next.clone(),
+                        prompt,
+                        stop_after: rule_match.rule.next.as_deref() == Some("stop"),
+                        delay_seconds,
+                    });
+                }
+                if !plans.is_empty() {
+                    last_hash_by_target.insert(target.clone(), hash);
+                }
+
+                if matches!(config.rule_eval, RuleEval::MultiMatch) {
+                    active_rule_by_target.insert(target.clone(), None);
+                }
+            }
+        }
+
+        if plans.is_empty() {
+            if ui_mode == UiMode::Tui {
+                loop_state = LoopState::Waiting;
+            }
+        } else {
+            let mut stop_after = false;
+            for plan in plans {
+                if loop_state == LoopState::Holding {
+                    break;
+                }
+
+                if let Some(delay_seconds) = plan.delay_seconds {
+                    if delay_seconds > 0 {
                         if ui_mode == UiMode::Tui {
                             loop_state = LoopState::Delay;
                         }
-                        let delay_seconds =
-                            sleep_for_delay(delay, &rule_match, &mut backoff_state)?;
                         let detail = format!("delay {}s", delay_seconds);
                         logger.log(LogEvent::delay_scheduled(
                             &config,
-                            rule_match.rule.id.as_deref(),
+                            plan.rule_id.as_deref(),
                             detail,
                         ))?;
                         if let Some(tui_state) = tui.as_mut() {
                             tui_state.push_log(format!(
                                 "[{}] delay rule={} detail=\"delay {}s\"",
                                 timestamp_now(),
-                                rule_match.rule.id.as_deref().unwrap_or("<unnamed>"),
+                                plan.rule_id.as_deref().unwrap_or("<unnamed>"),
                                 delay_seconds
                             ));
                             tui_state.update(
@@ -716,7 +832,7 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                                 &config,
                                 send_count,
                                 max_sends,
-                                rule_match.rule.id.as_deref(),
+                                plan.rule_id.as_deref(),
                                 &format_std_duration(effective_elapsed(
                                     run_started,
                                     held_total,
@@ -725,11 +841,23 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                                 "",
                             )?;
                         }
+                        std::thread::sleep(std::time::Duration::from_secs(delay_seconds));
                     }
+                }
+
+                let recipients = match config.fanout {
+                    FanoutMode::Matched => vec![plan.source_target.clone()],
+                    FanoutMode::Broadcast => poll_targets.clone(),
+                };
+                if recipients.is_empty() {
+                    continue;
+                }
+
+                for target in recipients {
                     if ui_mode == UiMode::Tui {
                         loop_state = LoopState::Sending;
                     }
-                    if let Err(err) = send_prompt(&config.target, &prompt) {
+                    if let Err(err) = send_prompt(&target, &plan.prompt) {
                         let detail = err.to_string();
                         logger.log(LogEvent::error(&config, detail.clone()))?;
                         if ui_mode == UiMode::Tui {
@@ -745,7 +873,7 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                                     &config,
                                     send_count,
                                     max_sends,
-                                    rule_match.rule.id.as_deref(),
+                                    plan.rule_id.as_deref(),
                                     &format_std_duration(effective_elapsed(
                                         run_started,
                                         held_total,
@@ -761,8 +889,9 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                         loop_state = LoopState::Running;
                     }
                     send_count = send_count.saturating_add(1);
-                    last_hash = hash.clone();
-                    active_rule = rule_match.rule.next.clone();
+                    active_rule = plan.next_rule.clone();
+                    active_rule_by_target
+                        .insert(plan.source_target.clone(), plan.next_rule.clone());
                     let now = OffsetDateTime::now_utc();
                     let timestamp = now
                         .format(&time::format_description::well_known::Rfc3339)
@@ -776,7 +905,7 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                         &config,
                         send_count,
                         max_sends,
-                        rule_match.rule.id.as_deref(),
+                        plan.rule_id.as_deref(),
                         &elapsed,
                     );
                     if ui_mode == UiMode::SingleLine {
@@ -785,100 +914,105 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                     } else if ui_mode == UiMode::Tui {
                         if let Some(tui_state) = tui.as_mut() {
                             tui_state.push_log(format!(
-                                "[{timestamp}] sent rule={} prompt=\"{}\"",
-                                rule_match.rule.id.as_deref().unwrap_or("<unnamed>"),
-                                truncate_text(&prompt, 80, true)
+                                "[{timestamp}] sent target={} rule={} prompt=\"{}\"",
+                                target,
+                                plan.rule_id.as_deref().unwrap_or("<unnamed>"),
+                                truncate_text(&plan.prompt, 80, true)
                             ));
                             tui_state.update(
                                 loop_state,
                                 &config,
                                 send_count,
                                 max_sends,
-                                rule_match.rule.id.as_deref(),
+                                plan.rule_id.as_deref(),
                                 &elapsed,
                                 &status,
                             )?;
                         }
                     } else {
                         println!(
-                            "[{}/{}] sent via rule {} at {timestamp} (elapsed {elapsed})",
+                            "[{}/{}] sent target={} via rule {} at {timestamp} (elapsed {elapsed})",
                             send_count,
                             if config.infinite { 0 } else { max_sends },
-                            rule_match.rule.id.as_deref().unwrap_or("<unnamed>")
+                            target,
+                            plan.rule_id.as_deref().unwrap_or("<unnamed>")
                         );
                         println!("{status}");
                     }
                     logger.log(LogEvent::status(&config, status))?;
                     logger.log(LogEvent::sent(
                         &config,
-                        rule_match.rule.id.as_deref(),
+                        plan.rule_id.as_deref(),
                         timestamp,
-                        &prompt,
+                        &format!("target={target} prompt={}", plan.prompt),
                     ))?;
-                    if config.once || (!config.infinite && send_count >= max_sends) {
+
+                    if !config.infinite && send_count >= max_sends {
                         break;
                     }
                 }
-                if stop_after {
-                    if ui_mode == UiMode::Tui {
-                        if let Some(tui_state) = tui.as_mut() {
-                            tui_state.push_log(format!(
-                                "[{}] stopped reason=stop_rule",
-                                timestamp_now()
-                            ));
-                            tui_state.update(
-                                LoopState::Stopped,
-                                &config,
-                                send_count,
-                                max_sends,
-                                active_rule.as_deref(),
-                                &format_std_duration(effective_elapsed(
-                                    run_started,
-                                    held_total,
-                                    hold_started,
-                                )),
-                                "",
-                            )?;
-                        }
-                    }
-                    if ui_mode == UiMode::Plain {
-                        println!("loopmux: stopping due to stop rule");
-                    }
-                    logger.log(LogEvent::stopped(&config, "stop rule matched", send_count))?;
-                    break;
+                if plan.stop_after {
+                    stop_after = true;
                 }
-                if config.once {
-                    if ui_mode == UiMode::Tui {
-                        if let Some(tui_state) = tui.as_mut() {
-                            tui_state
-                                .push_log(format!("[{}] stopped reason=once", timestamp_now()));
-                            tui_state.update(
-                                LoopState::Stopped,
-                                &config,
-                                send_count,
-                                max_sends,
-                                active_rule.as_deref(),
-                                &format_std_duration(effective_elapsed(
-                                    run_started,
-                                    held_total,
-                                    hold_started,
-                                )),
-                                "",
-                            )?;
-                        }
-                    }
-                    if ui_mode == UiMode::Plain {
-                        println!("loopmux: stopping after single send");
-                    }
-                    logger.log(LogEvent::stopped(&config, "once", send_count))?;
+                if config.once || (!config.infinite && send_count >= max_sends) {
                     break;
-                }
-                if matches!(config.rule_eval, RuleEval::MultiMatch) {
-                    active_rule = None;
                 }
             }
-        } else if ui_mode == UiMode::Tui {
-            loop_state = LoopState::Waiting;
+
+            if stop_after {
+                if ui_mode == UiMode::Tui {
+                    if let Some(tui_state) = tui.as_mut() {
+                        tui_state
+                            .push_log(format!("[{}] stopped reason=stop_rule", timestamp_now()));
+                        tui_state.update(
+                            LoopState::Stopped,
+                            &config,
+                            send_count,
+                            max_sends,
+                            active_rule.as_deref(),
+                            &format_std_duration(effective_elapsed(
+                                run_started,
+                                held_total,
+                                hold_started,
+                            )),
+                            "",
+                        )?;
+                    }
+                }
+                if ui_mode == UiMode::Plain {
+                    println!("loopmux: stopping due to stop rule");
+                }
+                logger.log(LogEvent::stopped(&config, "stop rule matched", send_count))?;
+                break;
+            }
+            if config.once {
+                if ui_mode == UiMode::Tui {
+                    if let Some(tui_state) = tui.as_mut() {
+                        tui_state.push_log(format!("[{}] stopped reason=once", timestamp_now()));
+                        tui_state.update(
+                            LoopState::Stopped,
+                            &config,
+                            send_count,
+                            max_sends,
+                            active_rule.as_deref(),
+                            &format_std_duration(effective_elapsed(
+                                run_started,
+                                held_total,
+                                hold_started,
+                            )),
+                            "",
+                        )?;
+                    }
+                }
+                if ui_mode == UiMode::Plain {
+                    println!("loopmux: stopping after single send");
+                }
+                logger.log(LogEvent::stopped(&config, "once", send_count))?;
+                break;
+            }
+            if ui_mode == UiMode::Tui && matched_sources.is_empty() {
+                loop_state = LoopState::Waiting;
+            }
         }
 
         if ui_mode == UiMode::Tui {
@@ -926,12 +1060,13 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                             break;
                         }
                         TuiAction::Next => {
-                            last_hash.clear();
+                            last_hash_by_target.clear();
                         }
                         TuiAction::Renew => {
                             send_count = 0;
-                            last_hash.clear();
+                            last_hash_by_target.clear();
                             active_rule = None;
+                            active_rule_by_target.clear();
                             tui_state.push_log(format!(
                                 "[{}] renewed counter reason=manual",
                                 timestamp_now()
@@ -989,11 +1124,12 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                                     loop_state = LoopState::Holding;
                                 }
                             }
-                            TuiAction::Next => last_hash.clear(),
+                            TuiAction::Next => last_hash_by_target.clear(),
                             TuiAction::Renew => {
                                 send_count = 0;
-                                last_hash.clear();
+                                last_hash_by_target.clear();
                                 active_rule = None;
+                                active_rule_by_target.clear();
                                 tui_state.push_log(format!(
                                     "[{}] renewed counter reason=manual",
                                     timestamp_now()
@@ -1259,18 +1395,6 @@ fn push_block(parts: &mut Vec<String>, block: Option<&PromptBlock>) {
     }
 }
 
-fn sleep_for_delay(
-    delay: &DelayConfig,
-    rule_match: &RuleMatch<'_>,
-    backoff_state: &mut std::collections::HashMap<String, BackoffState>,
-) -> Result<u64> {
-    let seconds = compute_delay_seconds(delay, rule_match, backoff_state)?;
-    if seconds > 0 {
-        std::thread::sleep(std::time::Duration::from_secs(seconds));
-    }
-    Ok(seconds)
-}
-
 fn compute_delay_seconds(
     delay: &DelayConfig,
     rule_match: &RuleMatch<'_>,
@@ -1415,6 +1539,7 @@ fn resolve_run_config(args: &RunArgs) -> Result<Config> {
         iterations: args.iterations,
         infinite: None,
         poll: args.poll,
+        fanout: Some(args.fanout),
         duration: args.duration.clone(),
         rule_eval: Some(RuleEval::FirstMatch),
         default_action: Some(default_action),
@@ -1427,11 +1552,13 @@ fn resolve_run_config(args: &RunArgs) -> Result<Config> {
 
 #[derive(Debug)]
 struct ResolvedConfig {
-    target: String,
+    target_scope: TargetScope,
+    target_label: String,
     iterations: Option<u32>,
     infinite: bool,
     has_prompt: bool,
     poll: u64,
+    fanout: FanoutMode,
     duration: Option<Duration>,
     rule_eval: RuleEval,
     rules: Vec<Rule>,
@@ -1768,17 +1895,17 @@ fn render_status_bar(
     match layout {
         LayoutMode::Compact => {
             right_parts.push(format!("trg {trigger_text}"));
-            right_parts.push(config.target.clone());
+            right_parts.push(config.target_label.clone());
         }
         LayoutMode::Standard => {
             right_parts.push(format!("trg {trigger_text}"));
             right_parts.push(format!("last {elapsed}"));
-            right_parts.push(config.target.clone());
+            right_parts.push(config.target_label.clone());
         }
         LayoutMode::Wide => {
             right_parts.push(format!("trg {trigger_text}"));
             right_parts.push(format!("last {elapsed}"));
-            right_parts.push(format!("target {}", config.target));
+            right_parts.push(format!("target {}", config.target_label));
         }
     }
 
@@ -2033,15 +2160,10 @@ fn resolve_config(
         config.infinite = Some(false);
     }
 
-    let target = config
-        .target
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("target is required"))?
-        .to_string();
-    let target = if skip_tmux {
-        resolve_target_offline(&target)?
+    let (target_scope, target_label) = if skip_tmux {
+        resolve_target_scope_offline(config.target.as_deref())?
     } else {
-        resolve_target(&target)?
+        resolve_target_scope(config.target.as_deref())?
     };
 
     let infinite = config.infinite.unwrap_or(false);
@@ -2090,18 +2212,21 @@ fn resolve_config(
 
     let poll = config.poll.unwrap_or(5).max(1);
 
+    let fanout = config.fanout.unwrap_or(FanoutMode::Matched);
+
     if !skip_tmux {
-        validate_target(&target)?;
-        validate_tmux_target(&target)?;
+        validate_tmux_scope(&target_scope)?;
     }
 
     let tail = tail_override.unwrap_or(1);
     Ok(ResolvedConfig {
-        target,
+        target_scope,
+        target_label,
         iterations,
         infinite,
         has_prompt,
         poll,
+        fanout,
         duration,
         rule_eval,
         rules,
@@ -2119,7 +2244,7 @@ fn resolve_config(
 
 fn print_validation(config: &ResolvedConfig) {
     println!("Validation OK");
-    println!("- target: {}", config.target);
+    println!("- target: {}", config.target_label);
     if config.infinite {
         println!("- iterations: infinite");
     } else if let Some(iterations) = config.iterations {
@@ -2151,6 +2276,7 @@ fn print_validation(config: &ResolvedConfig) {
     }
     println!("- tail: {}", config.tail);
     println!("- poll: {}s", config.poll);
+    println!("- fanout: {}", fanout_label(config.fanout));
     if let Some(duration) = config.duration {
         println!("- duration: {}s", duration.as_secs_f64());
     }
@@ -2168,6 +2294,13 @@ fn rule_eval_label(rule_eval: &RuleEval) -> &'static str {
         RuleEval::FirstMatch => "first_match",
         RuleEval::MultiMatch => "multi_match",
         RuleEval::Priority => "priority",
+    }
+}
+
+fn fanout_label(mode: FanoutMode) -> &'static str {
+    match mode {
+        FanoutMode::Matched => "matched",
+        FanoutMode::Broadcast => "broadcast",
     }
 }
 
@@ -2262,11 +2395,7 @@ fn has_text(value: &Option<String>) -> bool {
         .unwrap_or(false)
 }
 
-fn validate_target(target: &str) -> Result<()> {
-    parse_target(target).map(|_| ())
-}
-
-fn validate_tmux_target(target: &str) -> Result<()> {
+fn validate_tmux_scope(scope: &TargetScope) -> Result<()> {
     let output = std::process::Command::new("tmux")
         .arg("-V")
         .output()
@@ -2274,12 +2403,26 @@ fn validate_tmux_target(target: &str) -> Result<()> {
     if !output.status.success() {
         bail!("tmux not available on PATH");
     }
+
+    if matches!(scope, TargetScope::All) {
+        return Ok(());
+    }
+
+    let panes = list_tmux_panes()?;
+    let candidates = select_targets_for_scope(scope, &panes);
+    if candidates.is_empty() {
+        bail!("tmux target scope not found: {}", target_scope_label(scope));
+    }
+    Ok(())
+}
+
+fn list_tmux_panes() -> Result<Vec<TmuxPane>> {
     let output = std::process::Command::new("tmux")
         .args([
             "list-panes",
             "-a",
             "-F",
-            "#{session_name}:#{window_index}.#{pane_index}",
+            "#{session_name}\t#{window_index}\t#{pane_index}\t#{session_name}:#{window_index}.#{pane_index}",
         ])
         .output()
         .context("failed to run tmux list-panes")?;
@@ -2288,12 +2431,23 @@ fn validate_tmux_target(target: &str) -> Result<()> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut panes = Vec::new();
     for line in stdout.lines() {
-        if line.trim() == target {
-            return Ok(());
+        let mut parts = line.split('\t');
+        let session = parts.next().unwrap_or("").trim();
+        let window = parts.next().unwrap_or("").trim();
+        let _pane = parts.next().unwrap_or("").trim();
+        let target = parts.next().unwrap_or("").trim();
+        if session.is_empty() || window.is_empty() || target.is_empty() {
+            continue;
         }
+        panes.push(TmuxPane {
+            target: target.to_string(),
+            session: session.to_string(),
+            window: window.to_string(),
+        });
     }
-    bail!("tmux target not found: {target}");
+    Ok(panes)
 }
 
 fn resolve_target(target: &str) -> Result<String> {
@@ -2305,6 +2459,90 @@ fn resolve_target_offline(target: &str) -> Result<String> {
         return Ok(target.to_string());
     }
     bail!("target shorthand requires tmux; use session:window.pane")
+}
+
+fn resolve_target_scope(target: Option<&str>) -> Result<(TargetScope, String)> {
+    resolve_target_scope_with(target, resolve_target)
+}
+
+fn resolve_target_scope_offline(target: Option<&str>) -> Result<(TargetScope, String)> {
+    resolve_target_scope_with(target, resolve_target_offline)
+}
+
+fn resolve_target_scope_with(
+    target: Option<&str>,
+    pane_resolver: fn(&str) -> Result<String>,
+) -> Result<(TargetScope, String)> {
+    let Some(raw) = target
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok((TargetScope::All, "all sessions/windows/panes".to_string()));
+    };
+
+    if raw.eq_ignore_ascii_case("all") {
+        return Ok((TargetScope::All, "all sessions/windows/panes".to_string()));
+    }
+
+    if raw.contains(':') {
+        if raw.contains('.') {
+            let resolved = pane_resolver(raw)?;
+            parse_target(&resolved)?;
+            return Ok((TargetScope::Pane(resolved.clone()), resolved));
+        }
+
+        let (session, window) = parse_session_window(raw)?;
+        let label = format!("{session}:{window}.*");
+        return Ok((
+            TargetScope::Window {
+                session: session.to_string(),
+                window: window.to_string(),
+            },
+            label,
+        ));
+    }
+
+    if raw.contains('.') || raw.chars().all(|c| c.is_ascii_digit()) {
+        let resolved = pane_resolver(raw)?;
+        parse_target(&resolved)?;
+        return Ok((TargetScope::Pane(resolved.clone()), resolved));
+    }
+
+    Ok((TargetScope::Session(raw.to_string()), format!("{raw}:*.*")))
+}
+
+fn parse_session_window(value: &str) -> Result<(&str, &str)> {
+    let mut parts = value.splitn(2, ':');
+    let session = parts.next().unwrap_or("").trim();
+    let window = parts.next().unwrap_or("").trim();
+    if session.is_empty() || window.is_empty() {
+        bail!("target must be in the format session, session:window, or session:window.pane");
+    }
+    Ok((session, window))
+}
+
+fn select_targets_for_scope(scope: &TargetScope, panes: &[TmuxPane]) -> Vec<String> {
+    panes
+        .iter()
+        .filter(|pane| match scope {
+            TargetScope::All => true,
+            TargetScope::Session(session) => &pane.session == session,
+            TargetScope::Window { session, window } => {
+                &pane.session == session && &pane.window == window
+            }
+            TargetScope::Pane(target) => &pane.target == target,
+        })
+        .map(|pane| pane.target.clone())
+        .collect()
+}
+
+fn target_scope_label(scope: &TargetScope) -> String {
+    match scope {
+        TargetScope::All => "all sessions/windows/panes".to_string(),
+        TargetScope::Session(session) => format!("{session}:*.*"),
+        TargetScope::Window { session, window } => format!("{session}:{window}.*"),
+        TargetScope::Pane(target) => target.clone(),
+    }
 }
 
 fn resolve_target_with_current(target: &str, current_fn: fn() -> Result<String>) -> Result<String> {
@@ -2416,7 +2654,7 @@ impl LogEvent {
         Self {
             event: "started".to_string(),
             timestamp,
-            target: config.target.clone(),
+            target: config.target_label.clone(),
             rule_id: None,
             detail: None,
             sends: None,
@@ -2432,7 +2670,7 @@ impl LogEvent {
         Self {
             event: "sent".to_string(),
             timestamp,
-            target: config.target.clone(),
+            target: config.target_label.clone(),
             rule_id: rule_id.map(|value| value.to_string()),
             detail: Some(prompt.to_string()),
             sends: None,
@@ -2443,7 +2681,7 @@ impl LogEvent {
         Self {
             event: "delay".to_string(),
             timestamp: String::new(),
-            target: config.target.clone(),
+            target: config.target_label.clone(),
             rule_id: rule_id.map(|value| value.to_string()),
             detail: Some(detail),
             sends: None,
@@ -2454,7 +2692,7 @@ impl LogEvent {
         Self {
             event: "stopped".to_string(),
             timestamp: String::new(),
-            target: config.target.clone(),
+            target: config.target_label.clone(),
             rule_id: None,
             detail: Some(detail.to_string()),
             sends: Some(sends),
@@ -2465,7 +2703,7 @@ impl LogEvent {
         Self {
             event: "match".to_string(),
             timestamp: String::new(),
-            target: config.target.clone(),
+            target: config.target_label.clone(),
             rule_id: rule_id.map(|value| value.to_string()),
             detail: None,
             sends: None,
@@ -2476,7 +2714,7 @@ impl LogEvent {
         Self {
             event: "error".to_string(),
             timestamp: String::new(),
-            target: config.target.clone(),
+            target: config.target_label.clone(),
             rule_id: None,
             detail: Some(detail),
             sends: None,
@@ -2487,7 +2725,7 @@ impl LogEvent {
         Self {
             event: "status".to_string(),
             timestamp: String::new(),
-            target: config.target.clone(),
+            target: config.target_label.clone(),
             rule_id: None,
             detail: Some(detail),
             sends: None,
@@ -2616,7 +2854,7 @@ fn status_line(
     let reset = "\u{001B}[0m";
     format!(
         "{}{} status:{} target={} progress={} rule={} elapsed={}{}",
-        color, icon, reset, config.target, progress, rule, elapsed, reset
+        color, icon, reset, config.target_label, progress, rule, elapsed, reset
     )
 }
 
@@ -2720,6 +2958,7 @@ mod tests {
             single_line: false,
             tui: false,
             poll: None,
+            fanout: FanoutMode::Matched,
             duration: None,
             history_limit: None,
         };
@@ -2743,6 +2982,7 @@ mod tests {
             single_line: false,
             tui: false,
             poll: None,
+            fanout: FanoutMode::Matched,
             duration: None,
             history_limit: None,
         };
@@ -2790,6 +3030,32 @@ mod tests {
     }
 
     #[test]
+    fn resolve_target_scope_defaults_to_all() {
+        let (scope, label) =
+            resolve_target_scope_with(None, |value| Ok(value.to_string())).unwrap();
+        assert!(matches!(scope, TargetScope::All));
+        assert_eq!(label, "all sessions/windows/panes");
+    }
+
+    #[test]
+    fn resolve_target_scope_session() {
+        let (scope, label) =
+            resolve_target_scope_with(Some("ai"), |value| Ok(value.to_string())).unwrap();
+        assert!(matches!(scope, TargetScope::Session(ref value) if value == "ai"));
+        assert_eq!(label, "ai:*.*");
+    }
+
+    #[test]
+    fn resolve_target_scope_window() {
+        let (scope, label) =
+            resolve_target_scope_with(Some("ai:5"), |value| Ok(value.to_string())).unwrap();
+        assert!(
+            matches!(scope, TargetScope::Window { ref session, ref window } if session == "ai" && window == "5")
+        );
+        assert_eq!(label, "ai:5.*");
+    }
+
+    #[test]
     fn parse_duration_units() {
         assert_eq!(parse_duration("5s").unwrap().as_secs(), 5);
         assert_eq!(parse_duration("2m").unwrap().as_secs(), 120);
@@ -2811,7 +3077,8 @@ mod tests {
     #[test]
     fn render_status_bar_compact() {
         let config = ResolvedConfig {
-            target: "ai:5.0".to_string(),
+            target_scope: TargetScope::Pane("ai:5.0".to_string()),
+            target_label: "ai:5.0".to_string(),
             iterations: Some(10),
             infinite: false,
             has_prompt: true,
@@ -2834,6 +3101,7 @@ mod tests {
             single_line: false,
             tui: false,
             poll: 5,
+            fanout: FanoutMode::Matched,
             duration: None,
         };
         let bar = render_status_bar(
@@ -2861,7 +3129,8 @@ mod tests {
     #[test]
     fn render_status_bar_standard_truncates_trigger() {
         let config = ResolvedConfig {
-            target: "ai:5.0".to_string(),
+            target_scope: TargetScope::Pane("ai:5.0".to_string()),
+            target_label: "ai:5.0".to_string(),
             iterations: Some(10),
             infinite: false,
             has_prompt: true,
@@ -2884,6 +3153,7 @@ mod tests {
             single_line: false,
             tui: false,
             poll: 5,
+            fanout: FanoutMode::Matched,
             duration: None,
         };
         let bar = render_status_bar(
