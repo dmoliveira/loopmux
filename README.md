@@ -177,6 +177,12 @@ loopmux run -t ai:5.0 -n 5 \
 - `--single-line`: update status output on a single line.
 - `--poll N`: polling interval in seconds while waiting for matches (default 5).
 - `--tui`: enable the interactive terminal UI.
+- `--history-limit N`: max history entries to keep/show in TUI picker (default 50).
+
+### TUI history picker
+- Run `loopmux run --tui` with no prompt/config to pick from recent commands.
+- Entries are stored in `~/.loopmux/history.json`, newest first, deduplicated by command shape.
+- TUI controls: `p` pause, `r` resume, `R` renew counter, `s`/`Ctrl+C` stop, `n` next, `q` quit.
 
 ### Common flags
 - `-t, --target`: tmux target in `session:window.pane` format.
