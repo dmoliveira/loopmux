@@ -35,6 +35,8 @@ enum Command {
     Init(InitArgs),
     /// Simulate pane output for trigger testing.
     Simulate(SimulateArgs),
+    /// Manage active local loopmux runs.
+    Runs(RunsArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -96,6 +98,9 @@ struct RunArgs {
     /// Max history entries to keep/show for TUI picker.
     #[arg(long)]
     history_limit: Option<usize>,
+    /// Optional run codename (auto-generated when omitted).
+    #[arg(long)]
+    name: Option<String>,
 }
 
 const DEFAULT_HISTORY_LIMIT: usize = 50;
@@ -157,6 +162,30 @@ struct SimulateArgs {
     /// Number of times to print the line (omit to repeat forever).
     #[arg(long)]
     repeat: Option<u32>,
+}
+
+#[derive(Debug, Parser)]
+struct RunsArgs {
+    #[command(subcommand)]
+    action: Option<RunsAction>,
+}
+
+#[derive(Debug, Subcommand)]
+enum RunsAction {
+    /// List active local loopmux runs.
+    Ls,
+    /// Open fleet manager TUI.
+    Tui,
+    /// Stop a run by id or name.
+    Stop { target: String },
+    /// Put a run on hold by id or name.
+    Hold { target: String },
+    /// Resume a held run by id or name.
+    Resume { target: String },
+    /// Force next cycle by id or name.
+    Next { target: String },
+    /// Renew counters and hashes by id or name.
+    Renew { target: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -307,6 +336,56 @@ struct SendPlan {
     delay_seconds: Option<u64>,
 }
 
+#[derive(Debug, Clone)]
+struct RunIdentity {
+    id: String,
+    name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct FleetRunRecord {
+    id: String,
+    name: String,
+    pid: u32,
+    host: String,
+    target: String,
+    state: String,
+    sends: u32,
+    poll_seconds: u64,
+    started_at: String,
+    last_seen: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct FleetControlEnvelope {
+    token: String,
+    command: FleetControlCommand,
+    issued_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum FleetControlCommand {
+    Stop,
+    Hold,
+    Resume,
+    Next,
+    Renew,
+}
+
+struct FleetRunRegistry {
+    identity: RunIdentity,
+    state_path: PathBuf,
+    control_path: PathBuf,
+    last_control_token: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct FleetListedRun {
+    record: FleetRunRecord,
+    stale: bool,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -315,6 +394,7 @@ fn main() -> Result<()> {
         Command::Validate(args) => validate(args),
         Command::Init(args) => init(args),
         Command::Simulate(args) => simulate(args),
+        Command::Runs(args) => runs(args),
     }
 }
 
@@ -344,6 +424,7 @@ fn simulate(args: SimulateArgs) -> Result<()> {
 
 fn run(args: RunArgs) -> Result<()> {
     let args = hydrate_run_args_from_history(args)?;
+    let identity = resolve_run_identity(args.name.as_deref());
     let config = resolve_run_config(&args)?;
     let resolved = resolve_config(
         config,
@@ -359,14 +440,28 @@ fn run(args: RunArgs) -> Result<()> {
 
     if args.dry_run {
         print_validation(&resolved);
+        println!("- run_id: {}", identity.id);
+        println!("- run_name: {}", identity.name);
         return Ok(());
     }
 
-    let run_result = run_loop(resolved);
+    let run_result = run_loop(resolved, identity);
     if run_result.is_ok() {
         store_run_history(&args)?;
     }
     run_result
+}
+
+fn runs(args: RunsArgs) -> Result<()> {
+    match args.action.unwrap_or(RunsAction::Ls) {
+        RunsAction::Ls => print_fleet_runs(),
+        RunsAction::Tui => run_fleet_manager_tui(),
+        RunsAction::Stop { target } => send_fleet_command(&target, FleetControlCommand::Stop),
+        RunsAction::Hold { target } => send_fleet_command(&target, FleetControlCommand::Hold),
+        RunsAction::Resume { target } => send_fleet_command(&target, FleetControlCommand::Resume),
+        RunsAction::Next { target } => send_fleet_command(&target, FleetControlCommand::Next),
+        RunsAction::Renew { target } => send_fleet_command(&target, FleetControlCommand::Renew),
+    }
 }
 
 fn hydrate_run_args_from_history(mut args: RunArgs) -> Result<RunArgs> {
@@ -418,6 +513,509 @@ fn history_dir() -> Result<PathBuf> {
 
 fn history_path() -> Result<PathBuf> {
     Ok(history_dir()?.join("history.json"))
+}
+
+fn fleet_dir() -> Result<PathBuf> {
+    Ok(history_dir()?.join("runs"))
+}
+
+fn fleet_state_dir() -> Result<PathBuf> {
+    Ok(fleet_dir()?.join("state"))
+}
+
+fn fleet_control_dir() -> Result<PathBuf> {
+    Ok(fleet_dir()?.join("control"))
+}
+
+fn fleet_state_path(run_id: &str) -> Result<PathBuf> {
+    Ok(fleet_state_dir()?.join(format!("{run_id}.json")))
+}
+
+fn fleet_control_path(run_id: &str) -> Result<PathBuf> {
+    Ok(fleet_control_dir()?.join(format!("{run_id}.json")))
+}
+
+fn resolve_run_identity(name_override: Option<&str>) -> RunIdentity {
+    let pid = std::process::id();
+    let now = OffsetDateTime::now_utc().unix_timestamp_nanos();
+    let id = format!("run-{now}-{pid}");
+    let name = name_override
+        .map(|value| sanitize_run_name(value))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(auto_run_name);
+    RunIdentity { id, name }
+}
+
+fn sanitize_run_name(value: &str) -> String {
+    value
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
+}
+
+fn auto_run_name() -> String {
+    const ADJECTIVES: &[&str] = &[
+        "amber", "brisk", "calm", "daring", "ember", "frost", "gold", "hazel", "indigo", "jolly",
+        "keen", "lunar", "mellow", "nova", "opal", "proud", "quick", "river",
+    ];
+    const NOUNS: &[&str] = &[
+        "otter", "fox", "owl", "lynx", "falcon", "orca", "puma", "raven", "kite", "heron", "wolf",
+        "bison", "yak", "ibis", "drake", "badger", "beaver", "hare",
+    ];
+    let seed = OffsetDateTime::now_utc()
+        .unix_timestamp_nanos()
+        .unsigned_abs();
+    let adj = ADJECTIVES[(seed as usize) % ADJECTIVES.len()];
+    let noun = NOUNS[((seed / 97) as usize) % NOUNS.len()];
+    let suffix = (seed % 10_000) as u16;
+    format!("{adj}-{noun}-{suffix:04}")
+}
+
+impl FleetRunRegistry {
+    fn new(identity: RunIdentity) -> Result<Self> {
+        std::fs::create_dir_all(fleet_state_dir()?)?;
+        std::fs::create_dir_all(fleet_control_dir()?)?;
+        Ok(Self {
+            state_path: fleet_state_path(&identity.id)?,
+            control_path: fleet_control_path(&identity.id)?,
+            identity,
+            last_control_token: None,
+        })
+    }
+
+    fn update(&self, target: &str, state: LoopState, sends: u32, poll_seconds: u64) -> Result<()> {
+        let now = timestamp_now();
+        let host = std::env::var("HOSTNAME")
+            .or_else(|_| std::env::var("HOST"))
+            .unwrap_or_else(|_| "localhost".to_string());
+        let record = FleetRunRecord {
+            id: self.identity.id.clone(),
+            name: self.identity.name.clone(),
+            pid: std::process::id(),
+            host,
+            target: target.to_string(),
+            state: fleet_state_label(state).to_string(),
+            sends,
+            poll_seconds,
+            started_at: now.clone(),
+            last_seen: now,
+        };
+
+        let mut record = if self.state_path.exists() {
+            match std::fs::read_to_string(&self.state_path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<FleetRunRecord>(&raw).ok())
+            {
+                Some(existing) => FleetRunRecord {
+                    started_at: existing.started_at,
+                    ..record
+                },
+                None => record,
+            }
+        } else {
+            record
+        };
+        record.last_seen = timestamp_now();
+        let content = serde_json::to_string_pretty(&record)?;
+        std::fs::write(&self.state_path, content)?;
+        Ok(())
+    }
+
+    fn consume_control_command(&mut self) -> Result<Option<FleetControlCommand>> {
+        if !self.control_path.exists() {
+            return Ok(None);
+        }
+        let raw = std::fs::read_to_string(&self.control_path)?;
+        let envelope: FleetControlEnvelope = match serde_json::from_str(&raw) {
+            Ok(value) => value,
+            Err(_) => {
+                let _ = std::fs::remove_file(&self.control_path);
+                return Ok(None);
+            }
+        };
+        if self
+            .last_control_token
+            .as_ref()
+            .map(|token| token == &envelope.token)
+            .unwrap_or(false)
+        {
+            return Ok(None);
+        }
+        self.last_control_token = Some(envelope.token);
+        let _ = std::fs::remove_file(&self.control_path);
+        Ok(Some(envelope.command))
+    }
+
+    fn cleanup(&self) {
+        let _ = std::fs::remove_file(&self.state_path);
+        let _ = std::fs::remove_file(&self.control_path);
+    }
+}
+
+impl Drop for FleetRunRegistry {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
+fn fleet_state_label(state: LoopState) -> &'static str {
+    match state {
+        LoopState::Running => "running",
+        LoopState::Holding => "holding",
+        LoopState::Waiting => "waiting",
+        LoopState::Delay => "delay",
+        LoopState::Sending => "sending",
+        LoopState::Error => "error",
+        LoopState::Stopped => "stopped",
+    }
+}
+
+fn load_fleet_runs() -> Result<Vec<FleetListedRun>> {
+    let dir = fleet_state_dir()?;
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut runs = Vec::new();
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|v| v.to_str()) != Some("json") {
+            continue;
+        }
+        let raw = std::fs::read_to_string(&path)?;
+        let Ok(record) = serde_json::from_str::<FleetRunRecord>(&raw) else {
+            continue;
+        };
+        runs.push(FleetListedRun {
+            stale: is_fleet_record_stale(&record),
+            record,
+        });
+    }
+    runs.sort_by(|a, b| b.record.last_seen.cmp(&a.record.last_seen));
+    Ok(runs)
+}
+
+fn is_fleet_record_stale(record: &FleetRunRecord) -> bool {
+    if !pid_alive(record.pid) {
+        return true;
+    }
+    let Ok(last_seen) = OffsetDateTime::parse(
+        &record.last_seen,
+        &time::format_description::well_known::Rfc3339,
+    ) else {
+        return true;
+    };
+    let now = OffsetDateTime::now_utc();
+    let age = now - last_seen;
+    let max_age = (record.poll_seconds.max(1) * 3 + 5) as i64;
+    age.whole_seconds() > max_age
+}
+
+fn pid_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn resolve_fleet_target(target: &str, runs: &[FleetListedRun]) -> Result<FleetListedRun> {
+    if let Some(run) = runs
+        .iter()
+        .find(|run| run.record.id == target && !run.stale)
+    {
+        return Ok(run.clone());
+    }
+    let matches = runs
+        .iter()
+        .filter(|run| run.record.name == target && !run.stale)
+        .cloned()
+        .collect::<Vec<_>>();
+    if matches.is_empty() {
+        if runs
+            .iter()
+            .any(|run| run.record.id == target || run.record.name == target)
+        {
+            bail!("run is stale/inactive: {target}");
+        }
+        bail!("run not found: {target}");
+    }
+    if matches.len() > 1 {
+        bail!("multiple runs share name '{target}', use run id");
+    }
+    Ok(matches[0].clone())
+}
+
+fn print_fleet_runs() -> Result<()> {
+    let runs = load_fleet_runs()?;
+    if runs.is_empty() {
+        println!("No local loopmux runs found.");
+        return Ok(());
+    }
+    println!("Active local loopmux runs:");
+    for run in runs {
+        let stale = if run.stale { "stale" } else { "active" };
+        println!(
+            "- {} ({}) id={} pid={} state={} sends={} target={} last_seen={}",
+            run.record.name,
+            stale,
+            run.record.id,
+            run.record.pid,
+            run.record.state,
+            run.record.sends,
+            run.record.target,
+            run.record.last_seen,
+        );
+    }
+    Ok(())
+}
+
+fn send_fleet_command(target: &str, command: FleetControlCommand) -> Result<()> {
+    let run = dispatch_fleet_command(target, command)?;
+    println!(
+        "Sent {} to {} ({})",
+        fleet_command_label(command),
+        run.record.name,
+        run.record.id
+    );
+    Ok(())
+}
+
+fn dispatch_fleet_command(target: &str, command: FleetControlCommand) -> Result<FleetListedRun> {
+    let runs = load_fleet_runs()?;
+    if runs.is_empty() {
+        bail!("no active local loopmux runs found");
+    }
+    let run = resolve_fleet_target(target, &runs)?;
+    let path = fleet_control_path(&run.record.id)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let token = format!(
+        "{}-{}",
+        OffsetDateTime::now_utc().unix_timestamp_nanos(),
+        std::process::id()
+    );
+    let envelope = FleetControlEnvelope {
+        token,
+        command,
+        issued_at: timestamp_now(),
+    };
+    let tmp_path = path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, serde_json::to_string_pretty(&envelope)?)?;
+    std::fs::rename(&tmp_path, &path)?;
+    Ok(run)
+}
+
+fn fleet_command_label(command: FleetControlCommand) -> &'static str {
+    match command {
+        FleetControlCommand::Stop => "stop",
+        FleetControlCommand::Hold => "hold",
+        FleetControlCommand::Resume => "resume",
+        FleetControlCommand::Next => "next",
+        FleetControlCommand::Renew => "renew",
+    }
+}
+
+fn apply_external_control(
+    command: FleetControlCommand,
+    loop_state: &mut LoopState,
+    hold_started: &mut Option<std::time::Instant>,
+    held_total: &mut std::time::Duration,
+    send_count: &mut u32,
+    last_hash_by_target: &mut std::collections::HashMap<String, String>,
+    active_rule: &mut Option<String>,
+    active_rule_by_target: &mut std::collections::HashMap<String, Option<String>>,
+) -> bool {
+    match command {
+        FleetControlCommand::Stop => true,
+        FleetControlCommand::Hold => {
+            if hold_started.is_none() {
+                *hold_started = Some(std::time::Instant::now());
+            }
+            *loop_state = LoopState::Holding;
+            false
+        }
+        FleetControlCommand::Resume => {
+            if let Some(started_at) = hold_started.take() {
+                *held_total += started_at.elapsed();
+            }
+            *loop_state = LoopState::Running;
+            false
+        }
+        FleetControlCommand::Next => {
+            last_hash_by_target.clear();
+            false
+        }
+        FleetControlCommand::Renew => {
+            *send_count = 0;
+            last_hash_by_target.clear();
+            *active_rule = None;
+            active_rule_by_target.clear();
+            false
+        }
+    }
+}
+
+fn sleep_with_heartbeat(
+    registry: &FleetRunRegistry,
+    target: &str,
+    state: LoopState,
+    sends: u32,
+    poll_seconds: u64,
+    seconds: u64,
+) -> Result<()> {
+    if seconds == 0 {
+        return Ok(());
+    }
+    for _ in 0..seconds {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        registry.update(target, state, sends, poll_seconds)?;
+    }
+    Ok(())
+}
+
+fn run_fleet_manager_tui() -> Result<()> {
+    enable_raw_mode().context("failed to enable raw mode for fleet manager")?;
+    let result = run_fleet_manager_tui_inner();
+    let _ = disable_raw_mode();
+    result
+}
+
+fn run_fleet_manager_tui_inner() -> Result<()> {
+    let mut selected: usize = 0;
+    let mut message = String::from("fleet manager ready");
+    loop {
+        let runs = load_fleet_runs()?;
+        if !runs.is_empty() && selected >= runs.len() {
+            selected = runs.len() - 1;
+        }
+
+        let (width, height) = crossterm::terminal::size().unwrap_or((120, 30));
+        let mut out = std::io::stdout();
+        let _ = out.queue(MoveTo(0, 0));
+        let _ = out.queue(Clear(ClearType::All));
+        let header = format!(
+            "loopmux fleet manager | runs={} | selected={} | q quit",
+            runs.len(),
+            if runs.is_empty() { 0 } else { selected + 1 }
+        );
+        let _ = writeln!(out, "{}", fit_line(&header, width as usize, true));
+
+        let max_rows = height.saturating_sub(3) as usize;
+        for (idx, run) in runs.iter().take(max_rows).enumerate() {
+            let marker = if idx == selected { ">" } else { " " };
+            let stale = if run.stale { "stale" } else { "active" };
+            let line = format!(
+                "{} {} [{}] id={} state={} sends={} target={}",
+                marker,
+                run.record.name,
+                stale,
+                truncate_text(&run.record.id, 16, true),
+                run.record.state,
+                run.record.sends,
+                truncate_text(&run.record.target, 28, true)
+            );
+            let _ = writeln!(out, "{}", fit_line(&line, width as usize, true));
+        }
+
+        let footer_row = height.saturating_sub(1);
+        let _ = out.queue(MoveTo(0, footer_row));
+        let footer = format!(
+            "< / <- prev · > / -> next · h hold · r resume · n next · R renew · s stop · q quit · {}",
+            truncate_text(&message, width.saturating_sub(70) as usize, true)
+        );
+        let _ = write!(out, "{}", fit_line(&footer, width as usize, true));
+        let _ = out.flush();
+
+        if event::poll(Duration::from_millis(200)).context("fleet manager poll failed")? {
+            match event::read()? {
+                Event::Resize(_, _) => {}
+                Event::Key(KeyEvent { code, .. }) => match code {
+                    KeyCode::Char('q') => break,
+                    KeyCode::Char('<') | KeyCode::Left => {
+                        if !runs.is_empty() {
+                            selected = if selected == 0 {
+                                runs.len() - 1
+                            } else {
+                                selected - 1
+                            };
+                        }
+                    }
+                    KeyCode::Char('>') | KeyCode::Right => {
+                        if !runs.is_empty() {
+                            selected = (selected + 1) % runs.len();
+                        }
+                    }
+                    KeyCode::Char('s') => {
+                        message = apply_selected_fleet_command(
+                            &runs,
+                            selected,
+                            FleetControlCommand::Stop,
+                        );
+                    }
+                    KeyCode::Char('h') => {
+                        message = apply_selected_fleet_command(
+                            &runs,
+                            selected,
+                            FleetControlCommand::Hold,
+                        );
+                    }
+                    KeyCode::Char('r') => {
+                        message = apply_selected_fleet_command(
+                            &runs,
+                            selected,
+                            FleetControlCommand::Resume,
+                        );
+                    }
+                    KeyCode::Char('n') => {
+                        message = apply_selected_fleet_command(
+                            &runs,
+                            selected,
+                            FleetControlCommand::Next,
+                        );
+                    }
+                    KeyCode::Char('R') => {
+                        message = apply_selected_fleet_command(
+                            &runs,
+                            selected,
+                            FleetControlCommand::Renew,
+                        );
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_selected_fleet_command(
+    runs: &[FleetListedRun],
+    selected: usize,
+    command: FleetControlCommand,
+) -> String {
+    let Some(run) = runs.get(selected) else {
+        return "no run selected".to_string();
+    };
+    match dispatch_fleet_command(&run.record.id, command) {
+        Ok(_) => format!(
+            "sent {} to {}",
+            fleet_command_label(command),
+            run.record.name
+        ),
+        Err(err) => format!("command failed: {err}"),
+    }
 }
 
 fn load_run_history() -> Result<RunHistory> {
@@ -566,7 +1164,7 @@ fn select_history_entry(limit: usize) -> Result<HistoryEntry> {
     }
 }
 
-fn run_loop(config: ResolvedConfig) -> Result<()> {
+fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
     let mut send_count: u32 = 0;
     let max_sends = config.iterations.unwrap_or(u32::MAX);
     let mut last_hash_by_target: std::collections::HashMap<String, String> =
@@ -578,6 +1176,7 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
     let mut backoff_state: std::collections::HashMap<String, BackoffState> =
         std::collections::HashMap::new();
     let mut logger = Logger::new(config.logging.clone())?;
+    let mut fleet_registry = FleetRunRegistry::new(identity.clone())?;
     let tui_enabled = config.tui && std::io::stdout().is_terminal();
     let ui_mode = if tui_enabled {
         UiMode::Tui
@@ -599,6 +1198,7 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
         .unwrap_or_else(|_| "unknown".into());
     if ui_mode == UiMode::Plain {
         println!("loopmux: running on {}", config.target_label);
+        println!("loopmux: run {} ({})", identity.name, identity.id);
         if config.infinite {
             println!("loopmux: iterations = infinite");
         } else {
@@ -608,8 +1208,8 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
     } else if ui_mode == UiMode::Tui {
         if let Some(tui_state) = tui.as_mut() {
             tui_state.push_log(format!(
-                "[{}] started target={}",
-                start_timestamp, config.target_label
+                "[{}] started target={} run={} ({})",
+                start_timestamp, config.target_label, identity.name, identity.id
             ));
         }
     }
@@ -617,8 +1217,10 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
     let run_started = std::time::Instant::now();
     let mut held_total = std::time::Duration::from_secs(0);
     let mut hold_started: Option<std::time::Instant> = None;
+    fleet_registry.update(&config.target_label, loop_state, send_count, config.poll)?;
 
     while config.infinite || send_count < max_sends {
+        fleet_registry.update(&config.target_label, loop_state, send_count, config.poll)?;
         let mut force_rescan = false;
         let active_elapsed = effective_elapsed(run_started, held_total, hold_started);
         if let Some(limit) = config.duration {
@@ -644,6 +1246,34 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                     }
                 }
                 logger.log(LogEvent::stopped(&config, "duration", send_count))?;
+                break;
+            }
+        }
+
+        if let Some(command) = fleet_registry.consume_control_command()? {
+            let stop = apply_external_control(
+                command,
+                &mut loop_state,
+                &mut hold_started,
+                &mut held_total,
+                &mut send_count,
+                &mut last_hash_by_target,
+                &mut active_rule,
+                &mut active_rule_by_target,
+            );
+            if let Some(tui_state) = tui.as_mut() {
+                tui_state.push_log(format!(
+                    "[{}] control command={} source=fleet-manager",
+                    timestamp_now(),
+                    fleet_command_label(command)
+                ));
+            }
+            logger.log(LogEvent::status(
+                &config,
+                format!("control command={}", fleet_command_label(command)),
+            ))?;
+            if stop {
+                logger.log(LogEvent::stopped(&config, "external stop", send_count))?;
                 break;
             }
         }
@@ -876,7 +1506,14 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                                 "",
                             )?;
                         }
-                        std::thread::sleep(std::time::Duration::from_secs(delay_seconds));
+                        sleep_with_heartbeat(
+                            &fleet_registry,
+                            &config.target_label,
+                            loop_state,
+                            send_count,
+                            config.poll,
+                            delay_seconds,
+                        )?;
                     }
                 }
 
@@ -1226,7 +1863,14 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                 continue;
             }
         } else {
-            std::thread::sleep(std::time::Duration::from_secs(config.poll));
+            sleep_with_heartbeat(
+                &fleet_registry,
+                &config.target_label,
+                loop_state,
+                send_count,
+                config.poll,
+                config.poll,
+            )?;
         }
     }
 
@@ -3050,6 +3694,7 @@ mod tests {
             fanout: FanoutMode::Matched,
             duration: None,
             history_limit: None,
+            name: None,
         };
         assert!(resolve_run_config(&args).is_err());
     }
@@ -3075,6 +3720,7 @@ mod tests {
             fanout: FanoutMode::Matched,
             duration: None,
             history_limit: None,
+            name: None,
         };
         let config = resolve_run_config(&args).unwrap();
         let resolved = resolve_config(
@@ -3145,6 +3791,42 @@ mod tests {
             matches!(scope, TargetScope::Window { ref session, ref window } if session == "ai" && window == "5")
         );
         assert_eq!(label, "ai:5.*");
+    }
+
+    #[test]
+    fn sanitize_run_name_normalizes_chars() {
+        assert_eq!(sanitize_run_name(" My Run #1 "), "my-run--1");
+        assert_eq!(sanitize_run_name("alpha_beta"), "alpha_beta");
+    }
+
+    #[test]
+    fn external_control_renew_resets_runtime_state() {
+        let mut loop_state = LoopState::Running;
+        let mut hold_started = None;
+        let mut held_total = std::time::Duration::from_secs(0);
+        let mut send_count = 9;
+        let mut last_hash_by_target = std::collections::HashMap::new();
+        last_hash_by_target.insert("ai:1.0".to_string(), "abc".to_string());
+        let mut active_rule = Some("next".to_string());
+        let mut active_rule_by_target = std::collections::HashMap::new();
+        active_rule_by_target.insert("ai:1.0".to_string(), Some("next".to_string()));
+
+        let should_stop = apply_external_control(
+            FleetControlCommand::Renew,
+            &mut loop_state,
+            &mut hold_started,
+            &mut held_total,
+            &mut send_count,
+            &mut last_hash_by_target,
+            &mut active_rule,
+            &mut active_rule_by_target,
+        );
+
+        assert!(!should_stop);
+        assert_eq!(send_count, 0);
+        assert!(last_hash_by_target.is_empty());
+        assert!(active_rule.is_none());
+        assert!(active_rule_by_target.is_empty());
     }
 
     #[test]

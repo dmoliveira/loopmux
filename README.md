@@ -153,6 +153,9 @@ loopmux run --config loop.yaml [--target ai:5.0] [--iterations 10]
 loopmux run --config loop.yaml --dry-run
 loopmux validate --config loop.yaml [--skip-tmux]
 loopmux init --output loop.yaml
+loopmux runs ls
+loopmux runs tui
+loopmux runs stop <run-id-or-name>
 ```
 
 ## Lean Mode (no YAML)
@@ -180,12 +183,34 @@ loopmux run -t ai:5.0 -n 5 \
 - `--fanout matched|broadcast`: send to matched panes only (default) or broadcast to all panes in scope.
 - `--tui`: enable the interactive terminal UI.
 - `--history-limit N`: max history entries to keep/show in TUI picker (default 50).
+- `--name`: optional codename for this run; auto-generated if omitted.
 
 ### TUI history picker
 - Run `loopmux run --tui` with no prompt/config to pick from recent commands.
 - Entries are stored in `~/.loopmux/history.json`, newest first, deduplicated by command shape.
 - TUI controls: `h` hold/resume (non-consuming, alias `p`/`r`), `R` renew counter, `n` next, `s`/`Ctrl+C` stop, `q` quit.
 - When `--duration` is set, the TUI status bar shows remaining time (`rem ...`) and it freezes while HOLD is active.
+
+### Fleet manager (local)
+- Every running `loopmux run` writes a local registry entry under `~/.loopmux/runs/state/`.
+- Each run has an id plus a codename (`--name` or auto-generated like `amber-fox-0421`).
+- List runs:
+  ```bash
+  loopmux runs ls
+  ```
+- Send controls to a run by id or name:
+  ```bash
+  loopmux runs hold <id-or-name>
+  loopmux runs resume <id-or-name>
+  loopmux runs next <id-or-name>
+  loopmux runs renew <id-or-name>
+  loopmux runs stop <id-or-name>
+  ```
+- Open the fleet manager TUI:
+  ```bash
+  loopmux runs tui
+  ```
+  - Controls: `<` previous, `>` next, `h` hold, `r` resume, `n` next, `R` renew, `s` stop, `q` quit.
 
 ### Common flags
 - `-t, --target`: tmux scope selector.
