@@ -1,7 +1,7 @@
 
 [package]
 name = "loopmux"
-version = "0.1.3"
+version = "0.1.7"
 edition = "2024"
 description = "Loop prompts into tmux panes with triggers and delays."
 license = "MIT"
