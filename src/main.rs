@@ -1774,7 +1774,7 @@ fn render_footer(style: StyleConfig, width: u16, summary: Option<&str>) -> Strin
         format!("stopped{sep_text}{summary}{sep_text}q quit")
     } else {
         format!(
-            "h hold/resume{sep_text}p pause{sep_text}r resume{sep_text}R renew{sep_text}s stop{sep_text}n next{sep_text}q quit{sep_text}^C stop"
+            "h hold/resume (p/r){sep_text}R renew{sep_text}n next{sep_text}s/^C stop{sep_text}q quit"
         )
     };
     let line = pad_to_width(&text, width as usize);
