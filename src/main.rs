@@ -1,9 +1,14 @@
 use std::collections::{BTreeMap, HashSet};
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use crossterm::QueueableCommand;
+use crossterm::cursor::MoveTo;
+use crossterm::event::{self, Event, KeyCode, KeyEvent};
+use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode};
 use regex::Regex;
 use serde::Deserialize;
 use serde::Serialize;
@@ -28,11 +33,13 @@ enum Command {
     Validate(ValidateArgs),
     /// Print a starter YAML config to stdout.
     Init(InitArgs),
+    /// Simulate pane output for trigger testing.
+    Simulate(SimulateArgs),
 }
 
 #[derive(Debug, Parser)]
 #[command(
-    after_help = "Lean mode (no YAML):\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n\nLean flags:\n  --prompt       Required prompt body\n  --trigger      Required regex to match tmux output\n  --exclude      Optional regex to skip matches\n  --pre          Optional pre block\n  --post         Optional post block\n  --once         Send a single prompt and exit\n  --tail N       Capture-pane lines (default 200)\n  --single-line  Update status output on one line\n  --poll N       Poll interval in milliseconds (default 300)\n  --tui          Compatibility flag (accepted, no-op)\n\nCommon flags:\n  -t, --target       tmux target session:window.pane\n  -n, --iterations   number of iterations\n"
+    after_help = "Examples:\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n  loopmux run --config loop.yaml --duration 2h\n\nDefaults:\n  tail=1 (last non-blank line)\n  poll=5s\n\nDuration units: s, m, h, d, w, mon (30d), y (365d)\n"
 )]
 struct RunArgs {
     /// Path to the YAML config file.
@@ -59,7 +66,7 @@ struct RunArgs {
     /// Iterations to run, overrides config.
     #[arg(long, short = 'n')]
     iterations: Option<u32>,
-    /// Tail lines from tmux capture (default 200).
+    /// Tail lines from tmux capture (default 1).
     #[arg(long, requires = "prompt", conflicts_with = "config")]
     tail: Option<usize>,
     /// Run a single send and exit.
@@ -71,12 +78,15 @@ struct RunArgs {
     /// Update status output on a single line.
     #[arg(long)]
     single_line: bool,
-    /// Poll interval in milliseconds while waiting for matches.
-    #[arg(long)]
-    poll: Option<u64>,
-    /// Compatibility flag from older workflows. Currently no-op.
+    /// Enable TUI mode (status bar + log + shortcuts).
     #[arg(long)]
     tui: bool,
+    /// Poll interval in seconds when waiting for changes.
+    #[arg(long)]
+    poll: Option<u64>,
+    /// Stop after a duration (e.g. 5m, 2h, 1d, 1w, 1mon, 1y).
+    #[arg(long)]
+    duration: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -102,11 +112,26 @@ struct InitArgs {
     output: Option<PathBuf>,
 }
 
+#[derive(Debug, Parser)]
+struct SimulateArgs {
+    /// Line to print after delay.
+    #[arg(long)]
+    line: String,
+    /// Seconds to sleep before printing (default 5).
+    #[arg(long, default_value_t = 5)]
+    sleep: u64,
+    /// Number of times to print the line (omit to repeat forever).
+    #[arg(long)]
+    repeat: Option<u32>,
+}
+
 #[derive(Debug, Deserialize)]
 struct Config {
     target: Option<String>,
     iterations: Option<u32>,
     infinite: Option<bool>,
+    poll: Option<u64>,
+    duration: Option<String>,
     rule_eval: Option<RuleEval>,
     default_action: Option<Action>,
     delay: Option<DelayConfig>,
@@ -220,7 +245,32 @@ fn main() -> Result<()> {
         Command::Run(args) => run(args),
         Command::Validate(args) => validate(args),
         Command::Init(args) => init(args),
+        Command::Simulate(args) => simulate(args),
     }
+}
+
+fn simulate(args: SimulateArgs) -> Result<()> {
+    let delay = std::time::Duration::from_secs(args.sleep);
+    match args.repeat {
+        Some(count) => {
+            let repeat = count.max(1);
+            for _ in 0..repeat {
+                if args.sleep > 0 {
+                    std::thread::sleep(delay);
+                }
+                println!("[{}] {}", timestamp_local_now(), args.line);
+                std::io::stdout().flush()?;
+            }
+        }
+        None => loop {
+            if args.sleep > 0 {
+                std::thread::sleep(delay);
+            }
+            println!("[{}] {}", timestamp_local_now(), args.line);
+            std::io::stdout().flush()?;
+        },
+    }
+    Ok(())
 }
 
 fn run(args: RunArgs) -> Result<()> {
@@ -233,7 +283,7 @@ fn run(args: RunArgs) -> Result<()> {
         args.tail,
         args.once,
         args.single_line,
-        args.poll,
+        args.tui,
     )?;
 
     if args.dry_run {
@@ -252,21 +302,74 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
     let mut backoff_state: std::collections::HashMap<String, BackoffState> =
         std::collections::HashMap::new();
     let mut logger = Logger::new(config.logging.clone())?;
+    let tui_enabled = config.tui && std::io::stdout().is_terminal();
+    let ui_mode = if tui_enabled {
+        UiMode::Tui
+    } else if config.single_line {
+        UiMode::SingleLine
+    } else {
+        UiMode::Plain
+    };
+    let mut loop_state = LoopState::Running;
+    let mut tui = if ui_mode == UiMode::Tui {
+        Some(TuiState::new(&config)?)
+    } else {
+        None
+    };
 
     let start = OffsetDateTime::now_utc();
     let start_timestamp = start
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| "unknown".into());
-    println!("loopmux: running on {}", config.target);
-    if config.infinite {
-        println!("loopmux: iterations = infinite");
-    } else {
-        println!("loopmux: iterations = {max_sends}");
+    if ui_mode == UiMode::Plain {
+        println!("loopmux: running on {}", config.target);
+        if config.infinite {
+            println!("loopmux: iterations = infinite");
+        } else {
+            println!("loopmux: iterations = {max_sends}");
+        }
+        println!("loopmux: started at {start_timestamp}");
+    } else if ui_mode == UiMode::Tui {
+        if let Some(tui_state) = tui.as_mut() {
+            tui_state.push_log(format!(
+                "[{}] started target={}",
+                start_timestamp, config.target
+            ));
+        }
     }
-    println!("loopmux: started at {start_timestamp}");
     logger.log(LogEvent::started(&config, start_timestamp.clone()))?;
 
+    let deadline = config
+        .duration
+        .map(|duration| OffsetDateTime::now_utc() + duration);
+
     while config.infinite || send_count < max_sends {
+        if let Some(deadline) = deadline {
+            if OffsetDateTime::now_utc() >= deadline {
+                if ui_mode == UiMode::Tui {
+                    if let Some(tui_state) = tui.as_mut() {
+                        let elapsed = format_duration(start, OffsetDateTime::now_utc());
+                        tui_state.push_log(format!(
+                            "[{}] stopped reason=duration sends={} elapsed={}",
+                            timestamp_now(),
+                            send_count,
+                            elapsed
+                        ));
+                        tui_state.update(
+                            LoopState::Stopped,
+                            &config,
+                            send_count,
+                            max_sends,
+                            active_rule.as_deref(),
+                            &elapsed,
+                            "",
+                        )?;
+                    }
+                }
+                logger.log(LogEvent::stopped(&config, "duration", send_count))?;
+                break;
+            }
+        }
         let output = match capture_pane(&config.target, config.tail) {
             Ok(output) => output,
             Err(err) => {
@@ -274,6 +377,11 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                 logger.log(LogEvent::error(&config, detail))?;
                 return Err(err);
             }
+        };
+        let output = if config.tail == 1 {
+            last_non_empty_line(&output)
+        } else {
+            output
         };
         let hash = hash_output(&output);
 
@@ -283,6 +391,10 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
             if !rule_matches.is_empty() {
                 let mut stop_after = false;
                 for rule_match in rule_matches {
+                    if loop_state == LoopState::Paused {
+                        loop_state = LoopState::Paused;
+                        break;
+                    }
                     if rule_match.rule.next.as_deref() == Some("stop") {
                         stop_after = true;
                     }
@@ -294,6 +406,9 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                     let prompt = build_prompt(action);
                     let delay = rule_match.rule.delay.as_ref().or(config.delay.as_ref());
                     if let Some(delay) = delay {
+                        if ui_mode == UiMode::Tui {
+                            loop_state = LoopState::Delay;
+                        }
                         let delay_seconds =
                             sleep_for_delay(delay, &rule_match, &mut backoff_state)?;
                         let detail = format!("delay {}s", delay_seconds);
@@ -302,11 +417,53 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                             rule_match.rule.id.as_deref(),
                             detail,
                         ))?;
+                        if let Some(tui_state) = tui.as_mut() {
+                            tui_state.push_log(format!(
+                                "[{}] delay rule={} detail=\"delay {}s\"",
+                                timestamp_now(),
+                                rule_match.rule.id.as_deref().unwrap_or("<unnamed>"),
+                                delay_seconds
+                            ));
+                            tui_state.update(
+                                loop_state,
+                                &config,
+                                send_count,
+                                max_sends,
+                                rule_match.rule.id.as_deref(),
+                                &format_duration(start, OffsetDateTime::now_utc()),
+                                "",
+                            )?;
+                        }
+                    }
+                    if ui_mode == UiMode::Tui {
+                        loop_state = LoopState::Sending;
                     }
                     if let Err(err) = send_prompt(&config.target, &prompt) {
                         let detail = err.to_string();
-                        logger.log(LogEvent::error(&config, detail))?;
+                        logger.log(LogEvent::error(&config, detail.clone()))?;
+                        if ui_mode == UiMode::Tui {
+                            loop_state = LoopState::Error;
+                            if let Some(tui_state) = tui.as_mut() {
+                                tui_state.push_log(format!(
+                                    "[{}] error detail=\"{}\"",
+                                    timestamp_now(),
+                                    truncate_text(&detail, 120, true)
+                                ));
+                                tui_state.update(
+                                    loop_state,
+                                    &config,
+                                    send_count,
+                                    max_sends,
+                                    rule_match.rule.id.as_deref(),
+                                    &format_duration(start, OffsetDateTime::now_utc()),
+                                    "",
+                                )?;
+                            }
+                        }
                         return Err(err);
+                    }
+                    if ui_mode == UiMode::Tui {
+                        loop_state = LoopState::Running;
                     }
                     send_count = send_count.saturating_add(1);
                     last_hash = hash.clone();
@@ -323,9 +480,26 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                         rule_match.rule.id.as_deref(),
                         &elapsed,
                     );
-                    if config.single_line {
+                    if ui_mode == UiMode::SingleLine {
                         print!("\r{status}");
                         let _ = std::io::stdout().flush();
+                    } else if ui_mode == UiMode::Tui {
+                        if let Some(tui_state) = tui.as_mut() {
+                            tui_state.push_log(format!(
+                                "[{timestamp}] sent rule={} prompt=\"{}\"",
+                                rule_match.rule.id.as_deref().unwrap_or("<unnamed>"),
+                                truncate_text(&prompt, 80, true)
+                            ));
+                            tui_state.update(
+                                loop_state,
+                                &config,
+                                send_count,
+                                max_sends,
+                                rule_match.rule.id.as_deref(),
+                                &elapsed,
+                                &status,
+                            )?;
+                        }
                     } else {
                         println!(
                             "[{}/{}] sent via rule {} at {timestamp} (elapsed {elapsed})",
@@ -347,12 +521,48 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                     }
                 }
                 if stop_after {
-                    println!("loopmux: stopping due to stop rule");
+                    if ui_mode == UiMode::Tui {
+                        if let Some(tui_state) = tui.as_mut() {
+                            tui_state.push_log(format!(
+                                "[{}] stopped reason=stop_rule",
+                                timestamp_now()
+                            ));
+                            tui_state.update(
+                                LoopState::Stopped,
+                                &config,
+                                send_count,
+                                max_sends,
+                                active_rule.as_deref(),
+                                &format_duration(start, OffsetDateTime::now_utc()),
+                                "",
+                            )?;
+                        }
+                    }
+                    if ui_mode == UiMode::Plain {
+                        println!("loopmux: stopping due to stop rule");
+                    }
                     logger.log(LogEvent::stopped(&config, "stop rule matched", send_count))?;
                     break;
                 }
                 if config.once {
-                    println!("loopmux: stopping after single send");
+                    if ui_mode == UiMode::Tui {
+                        if let Some(tui_state) = tui.as_mut() {
+                            tui_state
+                                .push_log(format!("[{}] stopped reason=once", timestamp_now()));
+                            tui_state.update(
+                                LoopState::Stopped,
+                                &config,
+                                send_count,
+                                max_sends,
+                                active_rule.as_deref(),
+                                &format_duration(start, OffsetDateTime::now_utc()),
+                                "",
+                            )?;
+                        }
+                    }
+                    if ui_mode == UiMode::Plain {
+                        println!("loopmux: stopping after single send");
+                    }
                     logger.log(LogEvent::stopped(&config, "once", send_count))?;
                     break;
                 }
@@ -361,17 +571,86 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                 }
             }
         } else {
-            std::thread::sleep(std::time::Duration::from_millis(config.poll_ms));
+            if ui_mode == UiMode::Tui {
+                loop_state = LoopState::Waiting;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(config.poll));
+        }
+
+        if ui_mode == UiMode::Tui {
+            if let Some(tui_state) = tui.as_mut() {
+                if let Some(action) = tui_state.poll_input()? {
+                    match action {
+                        TuiAction::Pause => loop_state = LoopState::Paused,
+                        TuiAction::Resume => loop_state = LoopState::Running,
+                        TuiAction::Stop => {
+                            if let Some(tui_state) = tui.as_mut() {
+                                tui_state.push_log(format!(
+                                    "[{}] stopped reason=manual",
+                                    timestamp_now()
+                                ));
+                                tui_state.update(
+                                    LoopState::Stopped,
+                                    &config,
+                                    send_count,
+                                    max_sends,
+                                    active_rule.as_deref(),
+                                    &format_duration(start, OffsetDateTime::now_utc()),
+                                    "",
+                                )?;
+                            }
+                            break;
+                        }
+                        TuiAction::Next => {
+                            last_hash.clear();
+                        }
+                        TuiAction::Quit => break,
+                    }
+                }
+                let elapsed = format_duration(start, OffsetDateTime::now_utc());
+                tui_state.update(
+                    loop_state,
+                    &config,
+                    send_count,
+                    max_sends,
+                    active_rule.as_deref(),
+                    &elapsed,
+                    "",
+                )?;
+            }
         }
     }
 
     let end = OffsetDateTime::now_utc();
     let elapsed = format_duration(start, end);
-    if config.single_line {
+    if ui_mode == UiMode::Tui {
+        if let Some(tui_state) = tui.as_mut() {
+            tui_state.push_log(format!(
+                "[{}] stopped reason=completed sends={} elapsed={}",
+                timestamp_now(),
+                send_count,
+                elapsed
+            ));
+            tui_state.update(
+                LoopState::Stopped,
+                &config,
+                send_count,
+                max_sends,
+                active_rule.as_deref(),
+                &elapsed,
+                "",
+            )?;
+            std::thread::sleep(std::time::Duration::from_secs(3));
+        }
+    }
+    logger.log(LogEvent::stopped(&config, "completed", send_count))?;
+    if let Some(mut tui_state) = tui {
+        tui_state.shutdown()?;
+    }
+    if ui_mode == UiMode::SingleLine {
         println!();
     }
     println!("loopmux: stopped after {send_count} sends (elapsed {elapsed})");
-    logger.log(LogEvent::stopped(&config, "completed", send_count))?;
     Ok(())
 }
 
@@ -386,6 +665,15 @@ fn capture_pane(target: &str, lines: usize) -> Result<String> {
         bail!("tmux capture-pane failed");
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn last_non_empty_line(output: &str) -> String {
+    output
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .to_string()
 }
 
 fn send_prompt(target: &str, prompt: &str) -> Result<()> {
@@ -617,7 +905,7 @@ fn validate(args: ValidateArgs) -> Result<()> {
         None,
         false,
         false,
-        None,
+        false,
     )?;
     print_validation(&resolved);
     Ok(())
@@ -691,6 +979,8 @@ fn resolve_run_config(args: &RunArgs) -> Result<Config> {
         target: args.target.clone(),
         iterations: args.iterations,
         infinite: None,
+        poll: args.poll,
+        duration: args.duration.clone(),
         rule_eval: Some(RuleEval::FirstMatch),
         default_action: Some(default_action),
         delay: None,
@@ -706,6 +996,8 @@ struct ResolvedConfig {
     iterations: Option<u32>,
     infinite: bool,
     has_prompt: bool,
+    poll: u64,
+    duration: Option<Duration>,
     rule_eval: RuleEval,
     rules: Vec<Rule>,
     delay: Option<DelayConfig>,
@@ -716,7 +1008,543 @@ struct ResolvedConfig {
     tail: usize,
     once: bool,
     single_line: bool,
-    poll_ms: u64,
+    tui: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UiMode {
+    Plain,
+    SingleLine,
+    Tui,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopState {
+    Running,
+    Paused,
+    Waiting,
+    Delay,
+    Sending,
+    Error,
+    Stopped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LayoutMode {
+    Compact,
+    Standard,
+    Wide,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IconMode {
+    Nerd,
+    Ascii,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StyleConfig {
+    use_color: bool,
+    use_bg: bool,
+    use_unicode_ellipsis: bool,
+    dim_logs: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuiAction {
+    Pause,
+    Resume,
+    Stop,
+    Next,
+    Quit,
+}
+
+struct TuiState {
+    width: u16,
+    height: u16,
+    icon_mode: IconMode,
+    style: StyleConfig,
+    logs: Vec<String>,
+    max_logs: usize,
+}
+
+impl TuiState {
+    fn new(_config: &ResolvedConfig) -> Result<Self> {
+        enable_raw_mode().context("failed to enable raw mode")?;
+        let (width, height) = crossterm::terminal::size().unwrap_or((80, 24));
+        let style = detect_style();
+        Ok(Self {
+            width,
+            height,
+            icon_mode: detect_icon_mode(),
+            style,
+            logs: Vec::new(),
+            max_logs: height.saturating_sub(3) as usize,
+        })
+    }
+
+    fn update(
+        &mut self,
+        state: LoopState,
+        config: &ResolvedConfig,
+        current: u32,
+        total: u32,
+        rule_id: Option<&str>,
+        elapsed: &str,
+        _last_status: &str,
+    ) -> Result<()> {
+        let (width, height) = crossterm::terminal::size().unwrap_or((80, 24));
+        self.width = width;
+        self.height = height;
+        self.max_logs = height.saturating_sub(3) as usize;
+
+        let layout = layout_mode(width);
+        let bar = render_status_bar(
+            state,
+            layout,
+            self.icon_mode,
+            self.style,
+            width,
+            config,
+            current,
+            total,
+            rule_id,
+            elapsed,
+        );
+
+        let log_height = if width < 60 { 0 } else { self.max_logs };
+
+        let mut out = std::io::stdout();
+        let _ = out.queue(MoveTo(0, 0));
+        let _ = out.queue(Clear(ClearType::All));
+        let _ = write!(out, "{bar}");
+
+        for idx in 0..log_height {
+            let mut line = self
+                .logs
+                .iter()
+                .rev()
+                .take(log_height)
+                .rev()
+                .nth(idx)
+                .map(|value| fit_line(value, width as usize, self.style.use_unicode_ellipsis))
+                .unwrap_or_else(|| "".to_string());
+            if self.style.use_color && self.style.dim_logs && !line.is_empty() {
+                let log_prefix = style_prefix(Some(245), None, false);
+                line = format!("{log_prefix}{line}\x1B[0m");
+            }
+            let _ = out.queue(MoveTo(0, (idx + 1) as u16));
+            let _ = out.queue(Clear(ClearType::CurrentLine));
+            let _ = write!(out, "{line}");
+        }
+
+        let footer_row = self.height.saturating_sub(1);
+        let footer_summary = if state == LoopState::Stopped {
+            Some(render_footer_summary(config, current, total, elapsed))
+        } else {
+            None
+        };
+        let footer = render_footer(self.style, width, footer_summary.as_deref());
+        let _ = out.queue(MoveTo(0, footer_row));
+        let _ = out.queue(Clear(ClearType::CurrentLine));
+        let _ = write!(out, "{footer}");
+        let _ = out.flush();
+        Ok(())
+    }
+
+    fn push_log(&mut self, line: String) {
+        self.logs.push(line);
+        if self.logs.len() > 500 {
+            self.logs.drain(0..self.logs.len().saturating_sub(500));
+        }
+    }
+
+    fn poll_input(&self) -> Result<Option<TuiAction>> {
+        if event::poll(Duration::from_millis(10)).context("poll input failed")? {
+            if let Event::Key(KeyEvent { code, .. }) = event::read()? {
+                return Ok(match code {
+                    KeyCode::Char('p') => Some(TuiAction::Pause),
+                    KeyCode::Char('r') => Some(TuiAction::Resume),
+                    KeyCode::Char('s') => Some(TuiAction::Stop),
+                    KeyCode::Char('n') => Some(TuiAction::Next),
+                    KeyCode::Char('q') => Some(TuiAction::Quit),
+                    _ => None,
+                });
+            }
+        }
+        Ok(None)
+    }
+
+    fn shutdown(&mut self) -> Result<()> {
+        disable_raw_mode().context("failed to disable raw mode")?;
+        Ok(())
+    }
+}
+
+fn layout_mode(width: u16) -> LayoutMode {
+    if width <= 80 {
+        LayoutMode::Compact
+    } else if width <= 120 {
+        LayoutMode::Standard
+    } else {
+        LayoutMode::Wide
+    }
+}
+
+fn detect_icon_mode() -> IconMode {
+    if std::env::var("LOOPMUX_NO_NERD_FONT").is_ok() {
+        return IconMode::Ascii;
+    }
+    IconMode::Nerd
+}
+
+fn detect_style() -> StyleConfig {
+    let no_color = std::env::var("NO_COLOR").is_ok();
+    let term = std::env::var("TERM").unwrap_or_default();
+    let color_term = std::env::var("COLORTERM").unwrap_or_default();
+    let use_color = !no_color && term != "dumb";
+    let use_bg = use_color && (term.contains("256color") || !color_term.is_empty());
+    let use_unicode_ellipsis = supports_unicode();
+    let dim_logs = std::env::var("LOOPMUX_TUI_BRIGHT_LOGS").is_err();
+    StyleConfig {
+        use_color,
+        use_bg,
+        use_unicode_ellipsis,
+        dim_logs,
+    }
+}
+
+fn supports_unicode() -> bool {
+    let locale = std::env::var("LC_ALL")
+        .or_else(|_| std::env::var("LC_CTYPE"))
+        .or_else(|_| std::env::var("LANG"))
+        .unwrap_or_default();
+    let locale = locale.to_lowercase();
+    locale.contains("utf-8") || locale.contains("utf8")
+}
+
+fn render_footer(style: StyleConfig, width: u16, summary: Option<&str>) -> String {
+    let sep_text = if style.use_unicode_ellipsis {
+        " · "
+    } else {
+        " . "
+    };
+    let text = if let Some(summary) = summary {
+        format!("stopped{sep_text}{summary}{sep_text}q quit")
+    } else {
+        format!("p pause{sep_text}r resume{sep_text}s stop{sep_text}n next{sep_text}q quit")
+    };
+    let line = pad_to_width(&text, width as usize);
+    if style.use_color {
+        let prefix = style_prefix(Some(240), style.use_bg.then_some(235), false);
+        format!("{prefix}{line}\x1B[0m")
+    } else {
+        line
+    }
+}
+
+fn render_footer_summary(
+    config: &ResolvedConfig,
+    current: u32,
+    total: u32,
+    elapsed: &str,
+) -> String {
+    if config.infinite || total == 0 || total == u32::MAX {
+        format!("sends {current} elapsed {elapsed}")
+    } else {
+        format!("iter {current}/{total} elapsed {elapsed}")
+    }
+}
+
+fn render_status_bar(
+    state: LoopState,
+    layout: LayoutMode,
+    icon_mode: IconMode,
+    style: StyleConfig,
+    width: u16,
+    config: &ResolvedConfig,
+    current: u32,
+    total: u32,
+    rule_id: Option<&str>,
+    elapsed: &str,
+) -> String {
+    let (icon, label) = state_label(state, icon_mode);
+    let progress = if config.infinite {
+        "inf".to_string()
+    } else {
+        format!("{}/{}", current, total)
+    };
+    let percent = if config.infinite || total == 0 {
+        "--".to_string()
+    } else {
+        format!("{}%", (current * 100 / total))
+    };
+    let bar = render_progress_bar(current, total, layout, style.use_unicode_ellipsis);
+    let trigger = rule_id.unwrap_or("-");
+
+    let icon_glyph = if style.use_unicode_ellipsis {
+        icon
+    } else {
+        ascii_icon(icon)
+    };
+    let state_text = format!("{icon_glyph} {label}");
+    let iter_text = if config.infinite {
+        "iter ∞".to_string()
+    } else {
+        format!("iter {progress}")
+    };
+    let trigger_text = truncate_text(
+        trigger,
+        match layout {
+            LayoutMode::Compact => 16,
+            LayoutMode::Standard => 28,
+            LayoutMode::Wide => 44,
+        },
+        style.use_unicode_ellipsis,
+    );
+
+    let sep_text = if style.use_unicode_ellipsis {
+        " · "
+    } else {
+        " . "
+    };
+
+    let mut left_parts = Vec::new();
+    left_parts.push(state_text.clone());
+    left_parts.push(iter_text);
+    left_parts.push(format!("{bar} {percent}"));
+
+    let mut right_parts = Vec::new();
+    match layout {
+        LayoutMode::Compact => {
+            right_parts.push(format!("trg {trigger_text}"));
+            right_parts.push(config.target.clone());
+        }
+        LayoutMode::Standard => {
+            right_parts.push(format!("trg {trigger_text}"));
+            right_parts.push(format!("last {elapsed}"));
+            right_parts.push(config.target.clone());
+        }
+        LayoutMode::Wide => {
+            right_parts.push(format!("trg {trigger_text}"));
+            right_parts.push(format!("last {elapsed}"));
+            right_parts.push(format!("target {}", config.target));
+        }
+    }
+
+    let left_sep_text = if matches!(layout, LayoutMode::Compact) {
+        " "
+    } else {
+        sep_text
+    };
+    let left_text = left_parts.join(left_sep_text);
+    let right_sep_text = if matches!(layout, LayoutMode::Compact) {
+        " "
+    } else {
+        sep_text
+    };
+    let mut right_text = right_parts.join(right_sep_text);
+    let mut line = if right_text.is_empty() {
+        left_text.clone()
+    } else {
+        let width_usize = width as usize;
+        let left_len = left_text.chars().count();
+        let right_len = right_text.chars().count();
+        let gap = 1;
+        if left_len + gap + right_len > width_usize {
+            let available = width_usize.saturating_sub(left_len + gap);
+            if available > 0 {
+                right_text = truncate_text(&right_text, available, style.use_unicode_ellipsis);
+                format!("{left_text}{}{}", " ".repeat(gap), right_text)
+            } else {
+                left_text.clone()
+            }
+        } else {
+            let padding = width_usize.saturating_sub(left_len + gap + right_len);
+            format!(
+                "{left_text}{}{}{}",
+                " ".repeat(gap),
+                " ".repeat(padding),
+                right_text
+            )
+        }
+    };
+    line = pad_to_width(&line, width as usize);
+
+    if style.use_color {
+        let label_color = state_color(state);
+        let base_prefix = style_prefix(Some(248), style.use_bg.then_some(236), false);
+        let state_prefix = format!("\x1B[38;5;{label_color}m");
+        let sep_prefix = style_prefix(Some(240), style.use_bg.then_some(236), false);
+        let colored_state = format!("{state_prefix}{state_text}{base_prefix}");
+        let mut colored_line = line.replacen(&state_text, &colored_state, 1);
+        colored_line =
+            colored_line.replace(sep_text, &format!("{sep_prefix}{sep_text}{base_prefix}"));
+        format!("{base_prefix}{colored_line}\x1B[0m")
+    } else {
+        line
+    }
+}
+
+fn state_label(state: LoopState, icon_mode: IconMode) -> (&'static str, &'static str) {
+    match (state, icon_mode) {
+        (LoopState::Running, IconMode::Nerd) => ("󰐊", "RUN"),
+        (LoopState::Paused, IconMode::Nerd) => ("󰏤", "PAUSE"),
+        (LoopState::Delay, IconMode::Nerd) => ("󰔟", "DELAY"),
+        (LoopState::Error, IconMode::Nerd) => ("󰅚", "ERROR"),
+        (LoopState::Stopped, IconMode::Nerd) => ("󰩈", "STOP"),
+        (LoopState::Waiting, IconMode::Nerd) => ("󰔟", "WAIT"),
+        (LoopState::Sending, IconMode::Nerd) => ("󰐊", "SEND"),
+        (LoopState::Running, IconMode::Ascii) => (">", "RUN"),
+        (LoopState::Paused, IconMode::Ascii) => ("||", "PAUSE"),
+        (LoopState::Delay, IconMode::Ascii) => ("...", "DELAY"),
+        (LoopState::Error, IconMode::Ascii) => ("!", "ERROR"),
+        (LoopState::Stopped, IconMode::Ascii) => ("x", "STOP"),
+        (LoopState::Waiting, IconMode::Ascii) => ("...", "WAIT"),
+        (LoopState::Sending, IconMode::Ascii) => (">", "SEND"),
+    }
+}
+
+fn render_progress_bar(current: u32, total: u32, layout: LayoutMode, unicode: bool) -> String {
+    let width = match layout {
+        LayoutMode::Compact => 6,
+        LayoutMode::Standard => 10,
+        LayoutMode::Wide => 14,
+    };
+    if total == 0 {
+        return if unicode {
+            "░".repeat(width)
+        } else {
+            ".".repeat(width)
+        };
+    }
+    let filled = ((current as f64 / total as f64) * width as f64).round() as usize;
+    let filled = filled.min(width);
+    let filled_char = if unicode { "▰" } else { "=" };
+    let empty_char = if unicode { "▱" } else { "." };
+    format!(
+        "{}{}",
+        filled_char.repeat(filled),
+        empty_char.repeat(width - filled)
+    )
+}
+
+fn truncate_text(text: &str, max: usize, use_unicode: bool) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut s = text.chars().take(max.saturating_sub(1)).collect::<String>();
+    if use_unicode {
+        s.push('…');
+    } else {
+        s.push_str("...");
+    }
+    s
+}
+
+fn pad_to_width(text: &str, width: usize) -> String {
+    let len = text.chars().count();
+    if len >= width {
+        return text.chars().take(width).collect();
+    }
+    let padding = width - len;
+    format!("{text}{}", " ".repeat(padding))
+}
+
+fn ascii_icon(icon: &str) -> &str {
+    match icon {
+        "󰐊" => ">",
+        "󰏤" => "||",
+        "󰔟" => "...",
+        "󰅚" => "!",
+        "󰩈" => "x",
+        _ => ">",
+    }
+}
+
+fn state_color(state: LoopState) -> u8 {
+    match state {
+        LoopState::Running => 71,
+        LoopState::Paused => 179,
+        LoopState::Waiting | LoopState::Delay => 109,
+        LoopState::Error => 166,
+        LoopState::Stopped => 246,
+        LoopState::Sending => 109,
+    }
+}
+
+fn style_prefix(fg: Option<u8>, bg: Option<u8>, bold: bool) -> String {
+    let mut prefix = String::new();
+    if bold {
+        prefix.push_str("\x1B[1m");
+    }
+    if let Some(fg) = fg {
+        prefix.push_str(&format!("\x1B[38;5;{fg}m"));
+    }
+    if let Some(bg) = bg {
+        prefix.push_str(&format!("\x1B[48;5;{bg}m"));
+    }
+    prefix
+}
+
+fn fit_line(text: &str, width: usize, use_unicode: bool) -> String {
+    if text.chars().count() <= width {
+        return pad_to_width(text, width);
+    }
+    truncate_text(text, width, use_unicode)
+}
+
+fn timestamp_now() -> String {
+    OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "unknown".into())
+}
+
+fn timestamp_local_now() -> String {
+    OffsetDateTime::now_local()
+        .unwrap_or_else(|_| OffsetDateTime::now_utc())
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "unknown".into())
+}
+
+fn parse_duration(value: &str) -> Result<Duration> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        bail!("duration is empty");
+    }
+    let mut number_part = String::new();
+    let mut unit_part = String::new();
+    for ch in trimmed.chars() {
+        if ch.is_ascii_digit() || ch == '.' {
+            if !unit_part.is_empty() {
+                bail!("invalid duration: {value}");
+            }
+            number_part.push(ch);
+        } else if !ch.is_whitespace() {
+            unit_part.push(ch);
+        }
+    }
+    if number_part.is_empty() || unit_part.is_empty() {
+        bail!("invalid duration: {value}");
+    }
+    let amount: f64 = number_part
+        .parse()
+        .with_context(|| format!("invalid duration number: {value}"))?;
+    if amount <= 0.0 {
+        bail!("duration must be > 0: {value}");
+    }
+    let unit = unit_part.to_lowercase();
+    let seconds = match unit.as_str() {
+        "s" | "sec" | "secs" | "second" | "seconds" => amount,
+        "m" | "min" | "mins" | "minute" | "minutes" => amount * 60.0,
+        "h" | "hr" | "hrs" | "hour" | "hours" => amount * 3600.0,
+        "d" | "day" | "days" => amount * 86_400.0,
+        "w" | "wk" | "wks" | "week" | "weeks" => amount * 604_800.0,
+        "mon" | "month" | "months" => amount * 2_592_000.0,
+        "y" | "yr" | "yrs" | "year" | "years" => amount * 31_536_000.0,
+        _ => bail!("invalid duration unit: {unit_part}"),
+    };
+    Ok(Duration::from_secs_f64(seconds))
 }
 
 #[derive(Debug, Clone)]
@@ -745,7 +1573,7 @@ fn resolve_config(
     tail_override: Option<usize>,
     once: bool,
     single_line: bool,
-    poll_ms_override: Option<u64>,
+    tui: bool,
 ) -> Result<ResolvedConfig> {
     if let Some(target) = target_override {
         config.target = Some(target);
@@ -774,6 +1602,12 @@ fn resolve_config(
     if !infinite && iterations.unwrap_or(0) == 0 {
         bail!("iterations must be > 0 unless infinite is true");
     }
+
+    let duration = if let Some(ref value) = config.duration {
+        Some(parse_duration(value).with_context(|| "invalid duration")?)
+    } else {
+        None
+    };
 
     let Some(default_action) = config.default_action else {
         bail!("default_action.prompt is required");
@@ -804,18 +1638,21 @@ fn resolve_config(
         validate_delay(delay)?;
     }
 
+    let poll = config.poll.unwrap_or(5).max(1);
+
     if !skip_tmux {
         validate_target(&target)?;
         validate_tmux_target(&target)?;
     }
 
-    let tail = tail_override.unwrap_or(200);
-    let poll_ms = poll_ms_override.unwrap_or(300);
+    let tail = tail_override.unwrap_or(1);
     Ok(ResolvedConfig {
         target,
         iterations,
         infinite,
         has_prompt,
+        poll,
+        duration,
         rule_eval,
         rules,
         delay,
@@ -826,7 +1663,7 @@ fn resolve_config(
         tail,
         once,
         single_line,
-        poll_ms,
+        tui,
     })
 }
 
@@ -863,12 +1700,16 @@ fn print_validation(config: &ResolvedConfig) {
         );
     }
     println!("- tail: {}", config.tail);
-    println!("- poll_ms: {}", config.poll_ms);
+    println!("- poll: {}s", config.poll);
+    if let Some(duration) = config.duration {
+        println!("- duration: {}s", duration.as_secs_f64());
+    }
     println!("- once: {}", if config.once { "yes" } else { "no" });
     println!(
         "- single_line: {}",
         if config.single_line { "yes" } else { "no" }
     );
+    println!("- tui: {}", if config.tui { "yes" } else { "no" });
     println!("- note: dry-run only, no tmux commands sent");
 }
 
@@ -1416,8 +2257,9 @@ mod tests {
             once: false,
             dry_run: false,
             single_line: false,
-            poll: None,
             tui: false,
+            poll: None,
+            duration: None,
         };
         assert!(resolve_run_config(&args).is_err());
     }
@@ -1437,16 +2279,14 @@ mod tests {
             once: true,
             dry_run: false,
             single_line: false,
-            poll: Some(30),
-            tui: true,
+            tui: false,
+            poll: None,
+            duration: None,
         };
         let config = resolve_run_config(&args).unwrap();
-        let resolved = resolve_config(
-            config, None, None, true, args.tail, args.once, false, args.poll,
-        )
-        .unwrap();
+        let resolved =
+            resolve_config(config, None, None, true, args.tail, args.once, false, false).unwrap();
         assert_eq!(resolved.tail, 123);
-        assert_eq!(resolved.poll_ms, 30);
         assert!(resolved.once);
         assert_eq!(resolved.rules.len(), 1);
         assert_eq!(
@@ -1484,6 +2324,124 @@ mod tests {
     fn resolve_target_shorthand_window_pane() {
         let resolved = resolve_target_with_current("2.1", || Ok("ai:5.2".to_string())).unwrap();
         assert_eq!(resolved, "ai:2.1");
+    }
+
+    #[test]
+    fn parse_duration_units() {
+        assert_eq!(parse_duration("5s").unwrap().as_secs(), 5);
+        assert_eq!(parse_duration("2m").unwrap().as_secs(), 120);
+        assert_eq!(parse_duration("1h").unwrap().as_secs(), 3600);
+        assert_eq!(parse_duration("1d").unwrap().as_secs(), 86_400);
+        assert_eq!(parse_duration("1w").unwrap().as_secs(), 604_800);
+        assert_eq!(parse_duration("1mon").unwrap().as_secs(), 2_592_000);
+        assert_eq!(parse_duration("1y").unwrap().as_secs(), 31_536_000);
+    }
+
+    #[test]
+    fn parse_duration_rejects_invalid() {
+        assert!(parse_duration("0s").is_err());
+        assert!(parse_duration("5").is_err());
+        assert!(parse_duration("s").is_err());
+        assert!(parse_duration("5x").is_err());
+    }
+
+    #[test]
+    fn render_status_bar_compact() {
+        let config = ResolvedConfig {
+            target: "ai:5.0".to_string(),
+            iterations: Some(10),
+            infinite: false,
+            has_prompt: true,
+            rule_eval: RuleEval::FirstMatch,
+            rules: Vec::new(),
+            delay: None,
+            prompt_placeholders: Vec::new(),
+            template_vars: Vec::new(),
+            default_action: Action {
+                pre: None,
+                prompt: Some(PromptBlock::Single("hi".to_string())),
+                post: None,
+            },
+            logging: LoggingConfigResolved {
+                path: None,
+                format: LogFormatResolved::Text,
+            },
+            tail: 200,
+            once: false,
+            single_line: false,
+            tui: false,
+            poll: 5,
+            duration: None,
+        };
+        let bar = render_status_bar(
+            LoopState::Running,
+            LayoutMode::Compact,
+            IconMode::Ascii,
+            StyleConfig {
+                use_color: false,
+                use_bg: false,
+                use_unicode_ellipsis: false,
+                dim_logs: true,
+            },
+            80,
+            &config,
+            5,
+            10,
+            Some("Concluded"),
+            "00:10",
+        );
+        assert!(bar.contains("RUN"));
+        assert!(bar.contains("5/10"));
+        assert!(bar.contains("ai:5.0"));
+    }
+
+    #[test]
+    fn render_status_bar_standard_truncates_trigger() {
+        let config = ResolvedConfig {
+            target: "ai:5.0".to_string(),
+            iterations: Some(10),
+            infinite: false,
+            has_prompt: true,
+            rule_eval: RuleEval::FirstMatch,
+            rules: Vec::new(),
+            delay: None,
+            prompt_placeholders: Vec::new(),
+            template_vars: Vec::new(),
+            default_action: Action {
+                pre: None,
+                prompt: Some(PromptBlock::Single("hi".to_string())),
+                post: None,
+            },
+            logging: LoggingConfigResolved {
+                path: None,
+                format: LogFormatResolved::Text,
+            },
+            tail: 200,
+            once: false,
+            single_line: false,
+            tui: false,
+            poll: 5,
+            duration: None,
+        };
+        let bar = render_status_bar(
+            LoopState::Running,
+            LayoutMode::Standard,
+            IconMode::Ascii,
+            StyleConfig {
+                use_color: false,
+                use_bg: false,
+                use_unicode_ellipsis: true,
+                dim_logs: true,
+            },
+            120,
+            &config,
+            1,
+            10,
+            Some("This is a very long trigger string that should truncate"),
+            "00:10",
+        );
+        assert!(bar.contains("trg"));
+        assert!(bar.contains("…"));
     }
 }
 
@@ -1554,6 +2512,8 @@ fn find_missing_vars(required: &[String], available: &TemplateVars) -> Vec<Strin
 fn default_template() -> String {
     let template = r#"target: "ai:5.0"
 iterations: 10
+poll: 5
+duration: 2h
 
 template_vars:
   project: loopmux
