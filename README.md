@@ -176,6 +176,7 @@ loopmux run -t ai:5.0 -n 5 \
 - `--tail N`: number of capture-pane lines (default 1, last non-blank line).
 - `--single-line`: update status output on a single line.
 - `--poll N`: polling interval in seconds while waiting for matches (default 5).
+- `--fanout matched|broadcast`: send to matched panes only (default) or broadcast to all panes in scope.
 - `--tui`: enable the interactive terminal UI.
 - `--history-limit N`: max history entries to keep/show in TUI picker (default 50).
 
@@ -185,13 +186,19 @@ loopmux run -t ai:5.0 -n 5 \
 - TUI controls: `h` hold/resume (non-consuming), `p` pause hold, `r` resume run, `R` renew counter, `s`/`Ctrl+C` stop, `n` next, `q` quit.
 
 ### Common flags
-- `-t, --target`: tmux target in `session:window.pane` format.
+- `-t, --target`: tmux scope selector.
+  - omit `-t`: scan all sessions/windows/panes each poll
+  - `session`: all panes in that session
+  - `session:window`: all panes in that window
+  - `session:window.pane`: one pane
 - `-n, --iterations`: number of iterations (omit for infinite when using config).
 
 ### Target shorthand (inside tmux)
 - `-t 0` expands to `current_session:current_window.0`
 - `-t 2.1` expands to `current_session:2.1`
- - Shorthand requires tmux; otherwise provide full `session:window.pane`.
+  - Shorthand requires tmux; otherwise provide full `session:window.pane`.
+
+When no candidates are found in the selected scope, loopmux waits and re-scans on the next `--poll` interval.
 
 ## Troubleshooting
 
