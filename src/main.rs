@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use crossterm::QueueableCommand;
 use crossterm::cursor::MoveTo;
-use crossterm::event::{self, Event, KeyCode, KeyEvent};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode};
 use regex::Regex;
 use serde::Deserialize;
@@ -581,27 +581,38 @@ fn run_loop(config: ResolvedConfig) -> Result<()> {
                         TuiAction::Pause => loop_state = LoopState::Paused,
                         TuiAction::Resume => loop_state = LoopState::Running,
                         TuiAction::Stop => {
-                            if let Some(tui_state) = tui.as_mut() {
-                                tui_state.push_log(format!(
-                                    "[{}] stopped reason=manual",
-                                    timestamp_now()
-                                ));
-                                tui_state.update(
-                                    LoopState::Stopped,
-                                    &config,
-                                    send_count,
-                                    max_sends,
-                                    active_rule.as_deref(),
-                                    &format_duration(start, OffsetDateTime::now_utc()),
-                                    "",
-                                )?;
-                            }
+                            tui_state
+                                .push_log(format!("[{}] stopped reason=manual", timestamp_now()));
+                            tui_state.update(
+                                LoopState::Stopped,
+                                &config,
+                                send_count,
+                                max_sends,
+                                active_rule.as_deref(),
+                                &format_duration(start, OffsetDateTime::now_utc()),
+                                "",
+                            )?;
+                            logger.log(LogEvent::stopped(&config, "manual", send_count))?;
                             break;
                         }
                         TuiAction::Next => {
                             last_hash.clear();
                         }
-                        TuiAction::Quit => break,
+                        TuiAction::Renew => {
+                            send_count = 0;
+                            last_hash.clear();
+                            active_rule = None;
+                            tui_state.push_log(format!(
+                                "[{}] renewed counter reason=manual",
+                                timestamp_now()
+                            ));
+                        }
+                        TuiAction::Quit => {
+                            tui_state
+                                .push_log(format!("[{}] stopped reason=quit", timestamp_now()));
+                            logger.log(LogEvent::stopped(&config, "quit", send_count))?;
+                            break;
+                        }
                     }
                 }
                 let elapsed = format_duration(start, OffsetDateTime::now_utc());
@@ -1055,6 +1066,7 @@ enum TuiAction {
     Resume,
     Stop,
     Next,
+    Renew,
     Quit,
 }
 
@@ -1160,10 +1172,17 @@ impl TuiState {
 
     fn poll_input(&self) -> Result<Option<TuiAction>> {
         if event::poll(Duration::from_millis(10)).context("poll input failed")? {
-            if let Event::Key(KeyEvent { code, .. }) = event::read()? {
+            if let Event::Key(KeyEvent {
+                code, modifiers, ..
+            }) = event::read()?
+            {
                 return Ok(match code {
+                    KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                        Some(TuiAction::Stop)
+                    }
                     KeyCode::Char('p') => Some(TuiAction::Pause),
                     KeyCode::Char('r') => Some(TuiAction::Resume),
+                    KeyCode::Char('R') => Some(TuiAction::Renew),
                     KeyCode::Char('s') => Some(TuiAction::Stop),
                     KeyCode::Char('n') => Some(TuiAction::Next),
                     KeyCode::Char('q') => Some(TuiAction::Quit),
@@ -1231,7 +1250,9 @@ fn render_footer(style: StyleConfig, width: u16, summary: Option<&str>) -> Strin
     let text = if let Some(summary) = summary {
         format!("stopped{sep_text}{summary}{sep_text}q quit")
     } else {
-        format!("p pause{sep_text}r resume{sep_text}s stop{sep_text}n next{sep_text}q quit")
+        format!(
+            "p pause{sep_text}r resume{sep_text}R renew{sep_text}s stop{sep_text}n next{sep_text}q quit{sep_text}^C stop"
+        )
     };
     let line = pad_to_width(&text, width as usize);
     if style.use_color {
