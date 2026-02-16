@@ -188,7 +188,7 @@ loopmux run -t ai:5.0 -n 5 \
 ### TUI history picker
 - Run `loopmux run --tui` with no prompt/config to pick from recent commands.
 - Entries are stored in `~/.loopmux/history.json`, newest first, deduplicated by command shape.
-- TUI controls: `h` hold/resume (non-consuming, alias `p`/`r`), `R` renew counter, `n` next, `s`/`Ctrl+C` stop, `q` quit.
+- TUI controls: `h` hold/resume (non-consuming, alias `p`/`r`), `R` renew counter, `n` next, `s`/`Ctrl+C` stop run, `q` quit run view.
 - When `--duration` is set, the TUI status bar shows remaining time (`rem ...`) and it freezes while HOLD is active.
 
 ### Fleet manager (local)
@@ -210,7 +210,7 @@ loopmux run -t ai:5.0 -n 5 \
   ```bash
   loopmux runs tui
   ```
-  - Controls: `<` previous, `>` next, `h` hold, `r` resume, `n` next, `R` renew, `s` stop, `q` quit.
+  - Controls: `<`/`Left` previous, `>`/`Right` next, `h` hold, `r` resume, `n` next, `R` renew, `s` stop selected run, `q`/`Esc` quit manager.
 
 ### Common flags
 - `-t, --target`: tmux scope selector.

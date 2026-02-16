@@ -911,7 +911,7 @@ fn run_fleet_manager_tui_inner() -> Result<()> {
         let _ = out.queue(MoveTo(0, 0));
         let _ = out.queue(Clear(ClearType::All));
         let header = format!(
-            "loopmux fleet manager | runs={} | selected={} | q quit",
+            "loopmux fleet manager | runs={} | selected={} | q/esc quit manager",
             runs.len(),
             if runs.is_empty() { 0 } else { selected + 1 }
         );
@@ -937,7 +937,7 @@ fn run_fleet_manager_tui_inner() -> Result<()> {
         let footer_row = height.saturating_sub(1);
         let _ = out.queue(MoveTo(0, footer_row));
         let footer = format!(
-            "< / <- prev · > / -> next · h hold · r resume · n next · R renew · s stop · q quit · {}",
+            "< / <- prev · > / -> next · h hold · r resume · n next · R renew · s stop · q/esc quit manager · {}",
             truncate_text(&message, width.saturating_sub(70) as usize, true)
         );
         let _ = write!(out, "{}", fit_line(&footer, width as usize, true));
@@ -947,7 +947,7 @@ fn run_fleet_manager_tui_inner() -> Result<()> {
             match event::read()? {
                 Event::Resize(_, _) => {}
                 Event::Key(KeyEvent { code, .. }) => match code {
-                    KeyCode::Char('q') => break,
+                    KeyCode::Esc | KeyCode::Char('q') => break,
                     KeyCode::Char('<') | KeyCode::Left => {
                         if !runs.is_empty() {
                             selected = if selected == 0 {
