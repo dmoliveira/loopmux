@@ -176,6 +176,7 @@ loopmux run -t ai:5.0 -n 5 \
 - `--tail N`: number of capture-pane lines (default 1, last non-blank line).
 - `--single-line`: update status output on a single line.
 - `--poll N`: polling interval in seconds while waiting for matches (default 5).
+- `--no-trigger-edge`: opt out of edge-guard (default guard is ON to avoid repeated queue injections while trigger stays true).
 - `--fanout matched|broadcast`: send to matched panes only (default) or broadcast to all panes in scope.
 - `--tui`: enable the interactive terminal UI.
 - `--history-limit N`: max history entries to keep/show in TUI picker (default 50).
@@ -200,6 +201,8 @@ loopmux run -t ai:5.0 -n 5 \
   - Shorthand requires tmux; otherwise provide full `session:window.pane`.
 
 When no candidates are found in the selected scope, loopmux waits and re-scans on the next `--poll` interval.
+
+By default, loopmux sends only on trigger state transitions (`false -> true`) per target/rule and waits for the trigger to clear before sending again.
 
 ## Troubleshooting
 
