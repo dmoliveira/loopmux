@@ -39,7 +39,7 @@ enum Command {
 
 #[derive(Debug, Parser)]
 #[command(
-    after_help = "Examples:\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n  loopmux run --config loop.yaml --duration 2h\n\nDefaults:\n  tail=1 (last non-blank line)\n  poll=5s\n\nDuration units: s, m, h, d, w, mon (30d), y (365d)\n"
+    after_help = "Examples:\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n  loopmux run --config loop.yaml --duration 2h\n  loopmux run --tui\n\nDefaults:\n  tail=1 (last non-blank line)\n  poll=5s\n  history-limit=50\n\nDuration units: s, m, h, d, w, mon (30d), y (365d)\n"
 )]
 struct RunArgs {
     /// Path to the YAML config file.
@@ -86,6 +86,32 @@ struct RunArgs {
     poll: Option<u64>,
     /// Stop after a duration (e.g. 5m, 2h, 1d, 1w, 1mon, 1y).
     #[arg(long)]
+    duration: Option<String>,
+    /// Max history entries to keep/show for TUI picker.
+    #[arg(long)]
+    history_limit: Option<usize>,
+}
+
+const DEFAULT_HISTORY_LIMIT: usize = 50;
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct RunHistory {
+    entries: Vec<HistoryEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct HistoryEntry {
+    last_run: String,
+    target: String,
+    prompt: String,
+    trigger: String,
+    exclude: Option<String>,
+    pre: Option<String>,
+    post: Option<String>,
+    iterations: Option<u32>,
+    tail: Option<usize>,
+    once: bool,
+    poll: Option<u64>,
     duration: Option<String>,
 }
 
@@ -274,6 +300,7 @@ fn simulate(args: SimulateArgs) -> Result<()> {
 }
 
 fn run(args: RunArgs) -> Result<()> {
+    let args = hydrate_run_args_from_history(args)?;
     let config = resolve_run_config(&args)?;
     let resolved = resolve_config(
         config,
@@ -291,7 +318,192 @@ fn run(args: RunArgs) -> Result<()> {
         return Ok(());
     }
 
-    run_loop(resolved)
+    let run_result = run_loop(resolved);
+    if run_result.is_ok() {
+        store_run_history(&args)?;
+    }
+    run_result
+}
+
+fn hydrate_run_args_from_history(mut args: RunArgs) -> Result<RunArgs> {
+    let needs_history =
+        args.tui && args.config.is_none() && args.prompt.is_none() && args.trigger.is_none();
+    if !needs_history {
+        return Ok(args);
+    }
+
+    let entry = select_history_entry(args.history_limit.unwrap_or(DEFAULT_HISTORY_LIMIT))?;
+    args.target = Some(entry.target);
+    args.prompt = Some(entry.prompt);
+    args.trigger = Some(entry.trigger);
+    args.exclude = entry.exclude;
+    args.pre = entry.pre;
+    args.post = entry.post;
+    if args.iterations.is_none() {
+        args.iterations = entry.iterations;
+    }
+    if args.tail.is_none() {
+        args.tail = entry.tail;
+    }
+    if !args.once {
+        args.once = entry.once;
+    }
+    if args.poll.is_none() {
+        args.poll = entry.poll;
+    }
+    if args.duration.is_none() {
+        args.duration = entry.duration;
+    }
+    Ok(args)
+}
+
+fn history_dir() -> Result<PathBuf> {
+    let home = std::env::var("HOME").context("HOME not set for history storage")?;
+    Ok(PathBuf::from(home).join(".loopmux"))
+}
+
+fn history_path() -> Result<PathBuf> {
+    Ok(history_dir()?.join("history.json"))
+}
+
+fn load_run_history() -> Result<RunHistory> {
+    let path = history_path()?;
+    if !path.exists() {
+        return Ok(RunHistory::default());
+    }
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read history file: {}", path.display()))?;
+    let history: RunHistory = serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse history file: {}", path.display()))?;
+    Ok(history)
+}
+
+fn save_run_history(history: &RunHistory) -> Result<()> {
+    let dir = history_dir()?;
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create history dir: {}", dir.display()))?;
+    let path = history_path()?;
+    let content = serde_json::to_string_pretty(history).context("failed to serialize history")?;
+    std::fs::write(&path, content)
+        .with_context(|| format!("failed to write history file: {}", path.display()))?;
+    Ok(())
+}
+
+fn history_signature(args: &RunArgs) -> Option<String> {
+    let target = args.target.as_ref()?;
+    let prompt = args.prompt.as_ref()?;
+    let trigger = args.trigger.as_ref()?;
+    Some(format!(
+        "target={target}|prompt={prompt}|trigger={trigger}|exclude={}|pre={}|post={}|iterations={}|tail={}|once={}|poll={}|duration={}",
+        args.exclude.as_deref().unwrap_or(""),
+        args.pre.as_deref().unwrap_or(""),
+        args.post.as_deref().unwrap_or(""),
+        args.iterations.map(|v| v.to_string()).unwrap_or_default(),
+        args.tail.map(|v| v.to_string()).unwrap_or_default(),
+        args.once,
+        args.poll.map(|v| v.to_string()).unwrap_or_default(),
+        args.duration.as_deref().unwrap_or("")
+    ))
+}
+
+fn store_run_history(args: &RunArgs) -> Result<()> {
+    let Some(signature) = history_signature(args) else {
+        return Ok(());
+    };
+
+    let mut history = load_run_history()?;
+    let limit = args.history_limit.unwrap_or(DEFAULT_HISTORY_LIMIT).max(1);
+    history.entries.retain(|entry| {
+        history_entry_signature(entry)
+            .map(|existing| existing != signature)
+            .unwrap_or(true)
+    });
+
+    history.entries.insert(
+        0,
+        HistoryEntry {
+            last_run: timestamp_now(),
+            target: args.target.clone().unwrap_or_default(),
+            prompt: args.prompt.clone().unwrap_or_default(),
+            trigger: args.trigger.clone().unwrap_or_default(),
+            exclude: args.exclude.clone(),
+            pre: args.pre.clone(),
+            post: args.post.clone(),
+            iterations: args.iterations,
+            tail: args.tail,
+            once: args.once,
+            poll: args.poll,
+            duration: args.duration.clone(),
+        },
+    );
+    if history.entries.len() > limit {
+        history.entries.truncate(limit);
+    }
+    save_run_history(&history)
+}
+
+fn history_entry_signature(entry: &HistoryEntry) -> Option<String> {
+    Some(format!(
+        "target={}|prompt={}|trigger={}|exclude={}|pre={}|post={}|iterations={}|tail={}|once={}|poll={}|duration={}",
+        entry.target,
+        entry.prompt,
+        entry.trigger,
+        entry.exclude.as_deref().unwrap_or(""),
+        entry.pre.as_deref().unwrap_or(""),
+        entry.post.as_deref().unwrap_or(""),
+        entry.iterations.map(|v| v.to_string()).unwrap_or_default(),
+        entry.tail.map(|v| v.to_string()).unwrap_or_default(),
+        entry.once,
+        entry.poll.map(|v| v.to_string()).unwrap_or_default(),
+        entry.duration.as_deref().unwrap_or("")
+    ))
+}
+
+fn select_history_entry(limit: usize) -> Result<HistoryEntry> {
+    let history = load_run_history()?;
+    if history.entries.is_empty() {
+        bail!("no run history found; run a command once before using --tui history picker");
+    }
+
+    println!("loopmux history (most recent first):");
+    let visible = history
+        .entries
+        .iter()
+        .take(limit.max(1))
+        .collect::<Vec<_>>();
+    for (idx, entry) in visible.iter().enumerate() {
+        let prompt = truncate_text(&entry.prompt, 70, true);
+        println!(
+            "{}. [{}] target={} trigger={} prompt={}",
+            idx + 1,
+            entry.last_run,
+            entry.target,
+            entry.trigger,
+            prompt
+        );
+    }
+
+    loop {
+        print!("Select history number (1-{}, q to cancel): ", visible.len());
+        let _ = std::io::stdout().flush();
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .context("failed to read history selection")?;
+        let trimmed = input.trim();
+        if trimmed.eq_ignore_ascii_case("q") {
+            bail!("history selection cancelled");
+        }
+        let Ok(index) = trimmed.parse::<usize>() else {
+            println!("Invalid selection: {trimmed}");
+            continue;
+        };
+        if index == 0 || index > visible.len() {
+            println!("Selection out of range: {index}");
+            continue;
+        }
+        return Ok(visible[index - 1].clone());
+    }
 }
 
 fn run_loop(config: ResolvedConfig) -> Result<()> {
@@ -2351,6 +2563,7 @@ mod tests {
             tui: false,
             poll: None,
             duration: None,
+            history_limit: None,
         };
         assert!(resolve_run_config(&args).is_err());
     }
@@ -2373,6 +2586,7 @@ mod tests {
             tui: false,
             poll: None,
             duration: None,
+            history_limit: None,
         };
         let config = resolve_run_config(&args).unwrap();
         let resolved =
