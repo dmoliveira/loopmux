@@ -82,6 +82,7 @@ default_action:
 target: "ai:5.0"
 iterations: 50
 trigger_confirm_seconds: 5
+recheck_before_send: true
 
 rule_eval: first_match
 
@@ -175,6 +176,7 @@ loopmux run -t ai:5.0 -n 5 \
 ### Lean flags
 - `--prompt`: required prompt body.
 - `--trigger`: regex to match tmux output (required).
+- `--trigger-exact-line`: treat `--trigger` as an exact trimmed line match (good for sentinel tokens like `<CONTINUE-LOOP>`).
 - `--exclude`: regex to skip matches (optional).
 - `--pre` / `--post`: optional prompt blocks.
 - `--once`: send a single prompt and exit.
@@ -184,6 +186,7 @@ loopmux run -t ai:5.0 -n 5 \
 - `--trigger-confirm-seconds N`: require trigger to stay matched for N seconds before send (default 5).
 - `--log-preview-lines N`: number of captured lines shown in folded sent-log previews (default 3).
 - `--no-trigger-edge`: opt out of edge-guard (default guard is ON to avoid repeated queue injections while trigger stays true).
+- `--no-recheck-before-send`: skip the default pre-send trigger recheck (default is ON).
 - `--fanout matched|broadcast`: send to matched panes only (default) or broadcast to all panes in scope.
 - `--tui`: enable the interactive terminal UI.
 - `--history-limit N`: max history entries to keep/show in TUI picker (default 50).
