@@ -48,7 +48,7 @@ Status legend: `pending`, `in_progress`, `completed`, `blocked`.
 | E3-T2 | Add search/filter controls by name/id/target/state | completed | added `/` search and `f` state filter cycle |
 | E3-T3 | Add safer destructive flow (stop confirmation) | completed | stop now uses arm + enter confirm + cancel |
 | E3-T4 | Add copy helpers (`id`, command snippet) | completed | added `i` run-id copy and `y` stop-snippet copy |
-| E3-T5 | Add summary counters (active/holding/stale/mismatch) | pending | fleet health overview |
+| E3-T5 | Add summary counters (active/holding/stale/mismatch) | completed | header/details now expose fleet health counters |
 
 ## Execution order
 
