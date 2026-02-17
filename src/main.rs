@@ -2639,17 +2639,18 @@ impl TuiState {
         let _ = write!(out, "{bar}");
 
         for idx in 0..log_height {
-            let mut line = self
+            let raw_line = self
                 .logs
                 .iter()
                 .rev()
                 .take(log_height)
                 .rev()
                 .nth(idx)
-                .map(|value| fit_line(value, width as usize, self.style.use_unicode_ellipsis))
+                .map(|value| value.to_string())
                 .unwrap_or_else(|| "".to_string());
+            let mut line = fit_line(&raw_line, width as usize, self.style.use_unicode_ellipsis);
             if self.style.use_color && self.style.dim_logs && !line.is_empty() {
-                let log_prefix = style_prefix(Some(245), None, false);
+                let log_prefix = style_prefix(Some(log_line_color(&raw_line)), None, false);
                 line = format!("{log_prefix}{line}\x1B[0m");
             }
             let _ = out.queue(MoveTo(0, (idx + 1) as u16));
@@ -3054,6 +3055,58 @@ fn timestamp_local_now() -> String {
         .unwrap_or_else(|_| OffsetDateTime::now_utc())
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| "unknown".into())
+}
+
+fn log_line_color(line: &str) -> u8 {
+    let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
+    log_line_color_at(line, now)
+}
+
+fn log_line_color_at(line: &str, now: OffsetDateTime) -> u8 {
+    if let Some(timestamp) = parse_log_timestamp(line) {
+        let local_timestamp = timestamp.to_offset(now.offset());
+        if local_timestamp.date() == now.date() {
+            return 251;
+        }
+        return 244;
+    }
+    if looks_like_compact_time_prefix(line) {
+        return 249;
+    }
+    245
+}
+
+#[cfg(test)]
+fn log_line_date(line: &str) -> Option<&str> {
+    if !line.starts_with('[') {
+        return None;
+    }
+    let close = line.find(']')?;
+    let ts = line.get(1..close)?;
+    let date = ts.split('T').next()?;
+    if date.len() == 10 { Some(date) } else { None }
+}
+
+fn parse_log_timestamp(line: &str) -> Option<OffsetDateTime> {
+    if !line.starts_with('[') {
+        return None;
+    }
+    let close = line.find(']')?;
+    let ts = line.get(1..close)?;
+    OffsetDateTime::parse(ts, &time::format_description::well_known::Rfc3339).ok()
+}
+
+fn looks_like_compact_time_prefix(line: &str) -> bool {
+    let mut parts = line.split(':');
+    let (Some(h), Some(m), Some(s)) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    h.len() == 2
+        && m.len() == 2
+        && s.len() >= 2
+        && h.chars().all(|ch| ch.is_ascii_digit())
+        && m.chars().all(|ch| ch.is_ascii_digit())
+        && s.chars().take(2).all(|ch| ch.is_ascii_digit())
 }
 
 fn parse_duration(value: &str) -> Result<Duration> {
@@ -4253,6 +4306,55 @@ mod tests {
         let (_, preview) = extract_trigger_preview(output, 2, false);
         assert!(preview.contains(" | "));
         assert!(!preview.contains(" │ "));
+    }
+
+    #[test]
+    fn log_line_date_extracts_rfc3339_prefix() {
+        let line = "[2026-02-17T00:12:34Z] started target=ai:7.0";
+        assert_eq!(log_line_date(line), Some("2026-02-17"));
+        assert_eq!(log_line_date("23:11:04 > ai:7.0"), None);
+    }
+
+    #[test]
+    fn compact_time_prefix_detection() {
+        assert!(looks_like_compact_time_prefix("23:11:04 > ai:7.0"));
+        assert!(!looks_like_compact_time_prefix(
+            "[2026-02-17T00:12:34Z] sent"
+        ));
+    }
+
+    #[test]
+    fn log_line_color_same_and_prior_day() {
+        let now = OffsetDateTime::parse(
+            "2026-02-17T10:00:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        assert_eq!(log_line_color_at("[2026-02-17T01:02:03Z] sent", now), 251);
+        assert_eq!(log_line_color_at("[2026-02-16T23:59:59Z] sent", now), 244);
+    }
+
+    #[test]
+    fn log_line_color_handles_timezone_offsets() {
+        let now = OffsetDateTime::parse(
+            "2026-02-17T00:30:00+00:00",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        assert_eq!(
+            log_line_color_at("[2026-02-16T23:30:00-02:00] sent", now),
+            251
+        );
+    }
+
+    #[test]
+    fn log_line_color_compact_prefix_still_dimmed() {
+        let now = OffsetDateTime::parse(
+            "2026-02-17T00:30:00+00:00",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        assert_eq!(log_line_color_at("23:11:04 > ai:7.0", now), 249);
     }
 }
 

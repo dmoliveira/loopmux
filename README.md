@@ -192,6 +192,7 @@ loopmux run -t ai:5.0 -n 5 \
 - TUI controls: `h` hold/resume (non-consuming, alias `p`/`r`), `f` open fleet manager view, `R` renew counter, `n` next, `s`/`Ctrl+C` stop run, `q` quit run view.
 - When `--duration` is set, the TUI status bar shows remaining time (`rem ...`) and it freezes while HOLD is active.
 - Sent logs are compact and include a folded trigger preview (`N` lines from capture tail) to keep long prompts readable.
+- TUI log timestamps use subtle date-aware coloring to make same-day activity easier to scan.
 
 ### Fleet manager (local)
 - Every running `loopmux run` writes a local registry entry under `~/.loopmux/runs/state/`.
