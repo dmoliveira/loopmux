@@ -47,7 +47,7 @@ enum Command {
 
 #[derive(Debug, Parser)]
 #[command(
-    after_help = "Examples:\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n  loopmux run --config loop.yaml --duration 2h\n  loopmux run --tui\n\nDefaults:\n  tail=1 (last non-blank line)\n  poll=5s\n  history-limit=50\n  trigger-edge=on\n\nDuration units: s, m, h, d, w, mon (30d), y (365d)\n"
+    after_help = "Examples:\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n  loopmux run --config loop.yaml --duration 2h\n  loopmux run --tui\n\nDefaults:\n  tail=1 (last non-blank line)\n  poll=5s\n  history-limit=50\n  log-preview-lines=3\n  trigger-edge=on\n\nDuration units: s, m, h, d, w, mon (30d), y (365d)\n"
 )]
 struct RunArgs {
     /// Path to the YAML config file.
@@ -92,6 +92,9 @@ struct RunArgs {
     /// Poll interval in seconds when waiting for changes.
     #[arg(long)]
     poll: Option<u64>,
+    /// Number of captured lines to show in folded trigger preview logs.
+    #[arg(long)]
+    log_preview_lines: Option<usize>,
     /// Disable trigger edge-guard and allow repeated sends while trigger stays true.
     #[arg(long)]
     no_trigger_edge: bool,
@@ -129,6 +132,7 @@ struct HistoryEntry {
     tail: Option<usize>,
     once: bool,
     poll: Option<u64>,
+    log_preview_lines: Option<usize>,
     trigger_edge: Option<bool>,
     fanout: Option<FanoutMode>,
     duration: Option<String>,
@@ -200,6 +204,7 @@ struct Config {
     iterations: Option<u32>,
     infinite: Option<bool>,
     poll: Option<u64>,
+    log_preview_lines: Option<usize>,
     trigger_edge: Option<bool>,
     fanout: Option<FanoutMode>,
     duration: Option<String>,
@@ -338,6 +343,8 @@ struct SendPlan {
     next_rule: Option<String>,
     edge_key: String,
     prompt: String,
+    trigger_preview: String,
+    trigger_preview_lines: usize,
     stop_after: bool,
     delay_seconds: Option<u64>,
 }
@@ -495,6 +502,9 @@ fn hydrate_run_args_from_history(mut args: RunArgs) -> Result<RunArgs> {
     }
     if args.poll.is_none() {
         args.poll = entry.poll;
+    }
+    if args.log_preview_lines.is_none() {
+        args.log_preview_lines = entry.log_preview_lines;
     }
     if !args.no_trigger_edge {
         if let Some(trigger_edge) = entry.trigger_edge {
@@ -1149,7 +1159,7 @@ fn history_signature(args: &RunArgs) -> Option<String> {
     let prompt = args.prompt.as_ref()?;
     let trigger = args.trigger.as_ref()?;
     Some(format!(
-        "target={target}|prompt={prompt}|trigger={trigger}|exclude={}|pre={}|post={}|iterations={}|tail={}|once={}|poll={}|trigger_edge={}|fanout={}|duration={}",
+        "target={target}|prompt={prompt}|trigger={trigger}|exclude={}|pre={}|post={}|iterations={}|tail={}|once={}|poll={}|log_preview_lines={}|trigger_edge={}|fanout={}|duration={}",
         args.exclude.as_deref().unwrap_or(""),
         args.pre.as_deref().unwrap_or(""),
         args.post.as_deref().unwrap_or(""),
@@ -1157,6 +1167,9 @@ fn history_signature(args: &RunArgs) -> Option<String> {
         args.tail.map(|v| v.to_string()).unwrap_or_default(),
         args.once,
         args.poll.map(|v| v.to_string()).unwrap_or_default(),
+        args.log_preview_lines
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
         !args.no_trigger_edge,
         fanout_label(args.fanout),
         args.duration.as_deref().unwrap_or("")
@@ -1190,6 +1203,7 @@ fn store_run_history(args: &RunArgs) -> Result<()> {
             tail: args.tail,
             once: args.once,
             poll: args.poll,
+            log_preview_lines: args.log_preview_lines,
             trigger_edge: Some(!args.no_trigger_edge),
             fanout: Some(args.fanout),
             duration: args.duration.clone(),
@@ -1203,7 +1217,7 @@ fn store_run_history(args: &RunArgs) -> Result<()> {
 
 fn history_entry_signature(entry: &HistoryEntry) -> Option<String> {
     Some(format!(
-        "target={}|prompt={}|trigger={}|exclude={}|pre={}|post={}|iterations={}|tail={}|once={}|poll={}|trigger_edge={}|fanout={}|duration={}",
+        "target={}|prompt={}|trigger={}|exclude={}|pre={}|post={}|iterations={}|tail={}|once={}|poll={}|log_preview_lines={}|trigger_edge={}|fanout={}|duration={}",
         entry.target,
         entry.prompt,
         entry.trigger,
@@ -1214,6 +1228,10 @@ fn history_entry_signature(entry: &HistoryEntry) -> Option<String> {
         entry.tail.map(|v| v.to_string()).unwrap_or_default(),
         entry.once,
         entry.poll.map(|v| v.to_string()).unwrap_or_default(),
+        entry
+            .log_preview_lines
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
         entry.trigger_edge.unwrap_or(true),
         fanout_label(entry.fanout.unwrap_or(FanoutMode::Matched)),
         entry.duration.as_deref().unwrap_or("")
@@ -1288,6 +1306,8 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
     } else {
         UiMode::Plain
     };
+    let log_icon_mode = detect_icon_mode();
+    let log_use_unicode = supports_unicode();
     let mut loop_state = LoopState::Running;
     let mut tui = if ui_mode == UiMode::Tui {
         Some(TuiState::new(&config)?)
@@ -1544,6 +1564,9 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                         continue;
                     }
 
+                    let (trigger_preview_lines, trigger_preview) =
+                        extract_trigger_preview(&output, config.log_preview_lines, log_use_unicode);
+
                     let action = rule_match
                         .rule
                         .action
@@ -1576,6 +1599,8 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                         next_rule: rule_match.rule.next.clone(),
                         edge_key,
                         prompt,
+                        trigger_preview,
+                        trigger_preview_lines,
                         stop_after: rule_match.rule.next.as_deref() == Some("stop"),
                         delay_seconds,
                     });
@@ -1706,11 +1731,14 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                         let _ = std::io::stdout().flush();
                     } else if ui_mode == UiMode::Tui {
                         if let Some(tui_state) = tui.as_mut() {
-                            tui_state.push_log(format!(
-                                "[{timestamp}] sent target={} rule={} prompt=\"{}\"",
-                                target,
-                                plan.rule_id.as_deref().unwrap_or("<unnamed>"),
-                                truncate_text(&plan.prompt, 80, true)
+                            tui_state.push_log(compact_sent_log(
+                                &timestamp,
+                                target.as_str(),
+                                plan.rule_id.as_deref(),
+                                &plan.trigger_preview,
+                                plan.trigger_preview_lines,
+                                log_use_unicode,
+                                log_icon_mode,
                             ));
                             tui_state.update(
                                 loop_state,
@@ -2201,6 +2229,56 @@ fn should_skip_scan_by_hash(trigger_edge_enabled: bool, hash: &str, last_hash: &
     trigger_edge_enabled && hash == last_hash
 }
 
+fn extract_trigger_preview(output: &str, max_lines: usize, use_unicode: bool) -> (usize, String) {
+    let lines = output
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .map(|line| truncate_text(line, 60, use_unicode))
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return (0, "<empty>".to_string());
+    }
+    let take = max_lines.max(1).min(lines.len());
+    let start = lines.len().saturating_sub(take);
+    let sep = if use_unicode { " │ " } else { " | " };
+    let preview = lines[start..].join(sep);
+    (take, preview)
+}
+
+fn compact_timestamp(timestamp: &str) -> String {
+    let mut parts = timestamp.split('T');
+    let _date = parts.next();
+    let Some(time_part) = parts.next() else {
+        return timestamp.to_string();
+    };
+    let time = time_part.trim_end_matches('Z');
+    let time = time.split('+').next().unwrap_or(time);
+    let time = time.split('-').next().unwrap_or(time);
+    truncate_text(time, 12, false)
+}
+
+fn compact_sent_log(
+    timestamp: &str,
+    target: &str,
+    rule_id: Option<&str>,
+    trigger_preview: &str,
+    trigger_preview_lines: usize,
+    use_unicode: bool,
+    icon_mode: IconMode,
+) -> String {
+    let rule = rule_id.unwrap_or("-");
+    let ts = compact_timestamp(timestamp);
+    let use_nerd = use_unicode && icon_mode == IconMode::Nerd;
+    let send_icon = if use_nerd { "󰐊" } else { ">" };
+    let fold_icon = if use_nerd { "" } else { ">" };
+    format!(
+        "{ts} {send_icon} {target} {rule} {fold_icon} {}L {}",
+        trigger_preview_lines,
+        truncate_text(trigger_preview, 70, use_unicode)
+    )
+}
+
 fn matches_rule(rule: &Rule, output: &str) -> Result<bool> {
     let match_defined = rule.match_.as_ref().map(has_match).unwrap_or(false);
     let matches = if match_defined {
@@ -2405,6 +2483,7 @@ fn resolve_run_config(args: &RunArgs) -> Result<Config> {
         iterations: args.iterations,
         infinite: None,
         poll: args.poll,
+        log_preview_lines: args.log_preview_lines,
         trigger_edge: Some(!args.no_trigger_edge),
         fanout: Some(args.fanout),
         duration: args.duration.clone(),
@@ -2425,6 +2504,7 @@ struct ResolvedConfig {
     infinite: bool,
     has_prompt: bool,
     poll: u64,
+    log_preview_lines: usize,
     trigger_edge: bool,
     fanout: FanoutMode,
     duration: Option<Duration>,
@@ -2895,12 +2975,19 @@ fn truncate_text(text: &str, max: usize, use_unicode: bool) -> String {
     if text.chars().count() <= max {
         return text.to_string();
     }
-    let mut s = text.chars().take(max.saturating_sub(1)).collect::<String>();
-    if use_unicode {
-        s.push('…');
-    } else {
-        s.push_str("...");
+    if max == 0 {
+        return String::new();
     }
+    let suffix = if use_unicode { "…" } else { "..." };
+    let suffix_len = suffix.chars().count();
+    if max <= suffix_len {
+        return text.chars().take(max).collect();
+    }
+    let mut s = text
+        .chars()
+        .take(max.saturating_sub(suffix_len))
+        .collect::<String>();
+    s.push_str(suffix);
     s
 }
 
@@ -3098,6 +3185,7 @@ fn resolve_config(
 
     let poll = config.poll.unwrap_or(5).max(1);
     let trigger_edge = trigger_edge_override.unwrap_or(config.trigger_edge.unwrap_or(true));
+    let log_preview_lines = config.log_preview_lines.unwrap_or(3).max(1);
 
     let fanout = config.fanout.unwrap_or(FanoutMode::Matched);
 
@@ -3113,6 +3201,7 @@ fn resolve_config(
         infinite,
         has_prompt,
         poll,
+        log_preview_lines,
         trigger_edge,
         fanout,
         duration,
@@ -3164,6 +3253,7 @@ fn print_validation(config: &ResolvedConfig) {
     }
     println!("- tail: {}", config.tail);
     println!("- poll: {}s", config.poll);
+    println!("- log_preview_lines: {}", config.log_preview_lines);
     println!(
         "- trigger_edge: {}",
         if config.trigger_edge { "yes" } else { "no" }
@@ -3850,6 +3940,7 @@ mod tests {
             single_line: false,
             tui: false,
             poll: None,
+            log_preview_lines: None,
             no_trigger_edge: false,
             fanout: FanoutMode::Matched,
             duration: None,
@@ -3876,6 +3967,7 @@ mod tests {
             single_line: false,
             tui: false,
             poll: None,
+            log_preview_lines: None,
             no_trigger_edge: false,
             fanout: FanoutMode::Matched,
             duration: None,
@@ -4035,6 +4127,7 @@ mod tests {
             single_line: false,
             tui: false,
             poll: 5,
+            log_preview_lines: 3,
             trigger_edge: true,
             fanout: FanoutMode::Matched,
             duration: None,
@@ -4089,6 +4182,7 @@ mod tests {
             single_line: false,
             tui: false,
             poll: 5,
+            log_preview_lines: 3,
             trigger_edge: true,
             fanout: FanoutMode::Matched,
             duration: None,
@@ -4144,6 +4238,21 @@ mod tests {
         assert!(should_skip_scan_by_hash(true, "same", "same"));
         assert!(!should_skip_scan_by_hash(false, "same", "same"));
         assert!(!should_skip_scan_by_hash(true, "new", "old"));
+    }
+
+    #[test]
+    fn truncate_text_respects_ascii_max_width() {
+        let truncated = truncate_text("abcdefghijk", 8, false);
+        assert_eq!(truncated.chars().count(), 8);
+        assert_eq!(truncated, "abcde...");
+    }
+
+    #[test]
+    fn extract_trigger_preview_ascii_separator() {
+        let output = "line1\nline2\nline3\n";
+        let (_, preview) = extract_trigger_preview(output, 2, false);
+        assert!(preview.contains(" | "));
+        assert!(!preview.contains(" │ "));
     }
 }
 
@@ -4215,6 +4324,7 @@ fn default_template() -> String {
     let template = r#"target: "ai:5.0"
 iterations: 10
 poll: 5
+log_preview_lines: 3
 trigger_edge: true
 duration: 2h
 
