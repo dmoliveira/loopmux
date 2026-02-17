@@ -194,6 +194,7 @@ loopmux run -t ai:5.0 -n 5 \
 - Entries are stored in `~/.loopmux/history.json`, newest first, deduplicated by command shape.
 - TUI controls: `h` hold/resume (non-consuming, alias `p`/`r`), `f` open fleet manager view, `R` renew counter, `n` next, `s`/`Ctrl+C` stop run, `q` quit run view.
 - When `--duration` is set, the TUI status bar shows remaining time (`rem ...`) and it freezes while HOLD is active.
+- Run TUI status bar includes current loopmux version (`vX.Y.Z`) for quick parity checks.
 - Sent logs are compact and include a folded trigger preview (`N` lines from capture tail) to keep long prompts readable.
 - TUI log timestamps use subtle date-aware coloring to make same-day activity easier to scan.
 
@@ -204,6 +205,7 @@ loopmux run -t ai:5.0 -n 5 \
   ```bash
   loopmux runs ls
   ```
+  - Output includes each run version and whether it matches local version.
 - Send controls to a run by id or name:
   ```bash
   loopmux runs hold <id-or-name>
@@ -216,8 +218,14 @@ loopmux run -t ai:5.0 -n 5 \
   ```bash
   loopmux runs tui
   ```
-  - Controls: `<`/`Left` previous, `>`/`Right` next, `x` toggle stale visibility (hidden by default), `Enter` jump to selected tmux target, `h` hold, `r` resume, `n` next, `R` renew, `s` stop selected run, `q`/`Esc` quit manager.
+  - Controls: `<`/`Left` previous, `>`/`Right` next, `x` toggle stale visibility (hidden by default), `v` mismatch-only filter, `Enter` jump to selected tmux target, `h` hold, `r` resume, `n` next, `R` renew, `s` stop selected run, `q`/`Esc` quit manager.
   - When opened from `run --tui` via `f`, `q`/`Esc` returns to the run view.
+  - Header includes local version plus counts (`active`, `holding`, `stale`, `mismatch`).
+
+### Version checks
+- `loopmux --version` shows the active binary version.
+- `loopmux run --help` and `loopmux runs --help` include version references.
+- Fleet manager and run TUI surfaces include version labels to spot mismatched runs quickly.
 
 ### Common flags
 - `-t, --target`: tmux scope selector.
