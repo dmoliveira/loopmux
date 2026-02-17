@@ -870,6 +870,7 @@ fn fleet_detail_lines(
     state_filter: FleetStateFilter,
     search_query: &str,
     counts: (usize, usize, usize, usize),
+    pending_stop_run_id: Option<&str>,
 ) -> Vec<String> {
     let mut lines = Vec::new();
     lines.push("Details".to_string());
@@ -888,6 +889,9 @@ fn fleet_detail_lines(
         "summary active={} holding={} stale={} mismatch={}",
         counts.0, counts.1, counts.2, counts.3
     ));
+    if let Some(id) = pending_stop_run_id {
+        lines.push(format!("pending stop confirmation for id={id}"));
+    }
     lines.push(String::new());
 
     if let Some(run) = selected_run {
@@ -1115,6 +1119,7 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
     let mut state_filter = FleetStateFilter::All;
     let mut search_query = String::new();
     let mut search_mode = false;
+    let mut pending_stop_run_id: Option<String> = None;
     let mut last_frame = String::new();
     loop {
         let all_runs = load_fleet_runs()?;
@@ -1197,10 +1202,11 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
             state_filter,
             &search_query,
             (active_count, holding_count, stale_count, mismatch_count),
+            pending_stop_run_id.as_deref(),
         );
 
         let footer = format!(
-            "< / <- prev · > / -> next · x stale · v mismatch-only · f state-filter · / search · enter jump · h hold · r resume · n next · R renew · s stop · q/esc {} · {}",
+            "< / <- prev · > / -> next · x stale · v mismatch-only · f state-filter · / search · enter jump/confirm stop · h hold · r resume · n next · R renew · s arm stop · c cancel stop · q/esc {} · {}",
             if embedded {
                 "return to run"
             } else {
@@ -1273,11 +1279,13 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
                             KeyCode::Backspace => {
                                 search_query.pop();
                                 selected = 0;
+                                pending_stop_run_id = None;
                                 message = format!("search: {}", search_query);
                             }
                             KeyCode::Char(c) => {
                                 search_query.push(c);
                                 selected = 0;
+                                pending_stop_run_id = None;
                                 message = format!("search: {}", search_query);
                             }
                             _ => {}
@@ -1288,7 +1296,20 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
                     match code {
                         KeyCode::Esc | KeyCode::Char('q') => break,
                         KeyCode::Enter => {
-                            message = apply_selected_fleet_jump(&runs, selected);
+                            if let Some(run) = runs.get(selected) {
+                                if pending_stop_run_id.as_deref() == Some(run.record.id.as_str()) {
+                                    message = apply_selected_fleet_command(
+                                        &runs,
+                                        selected,
+                                        FleetControlCommand::Stop,
+                                    );
+                                    pending_stop_run_id = None;
+                                } else {
+                                    message = apply_selected_fleet_jump(&runs, selected);
+                                }
+                            } else {
+                                message = "no run selected".to_string();
+                            }
                         }
                         KeyCode::Char('<') | KeyCode::Left => {
                             if !runs.is_empty() {
@@ -1298,15 +1319,18 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
                                     selected - 1
                                 };
                             }
+                            pending_stop_run_id = None;
                         }
                         KeyCode::Char('>') | KeyCode::Right => {
                             if !runs.is_empty() {
                                 selected = (selected + 1) % runs.len();
                             }
+                            pending_stop_run_id = None;
                         }
                         KeyCode::Char('x') => {
                             show_stale = !show_stale;
                             selected = 0;
+                            pending_stop_run_id = None;
                             message = if show_stale {
                                 "showing stale + active runs".to_string()
                             } else {
@@ -1316,6 +1340,7 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
                         KeyCode::Char('v') => {
                             mismatch_only = !mismatch_only;
                             selected = 0;
+                            pending_stop_run_id = None;
                             message = if mismatch_only {
                                 "showing version mismatches only".to_string()
                             } else {
@@ -1325,20 +1350,31 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
                         KeyCode::Char('f') => {
                             state_filter = state_filter.next();
                             selected = 0;
+                            pending_stop_run_id = None;
                             message = format!("state filter={}", state_filter.label());
                         }
                         KeyCode::Char('/') => {
                             search_mode = true;
+                            pending_stop_run_id = None;
                             message = format!("search: {}", search_query);
                         }
                         KeyCode::Char('s') => {
-                            message = apply_selected_fleet_command(
-                                &runs,
-                                selected,
-                                FleetControlCommand::Stop,
-                            );
+                            if let Some(run) = runs.get(selected) {
+                                pending_stop_run_id = Some(run.record.id.clone());
+                                message = format!(
+                                    "confirm stop {}: press Enter, or c to cancel",
+                                    run.record.name
+                                );
+                            } else {
+                                message = "no run selected".to_string();
+                            }
+                        }
+                        KeyCode::Char('c') => {
+                            pending_stop_run_id = None;
+                            message = "stop confirmation cleared".to_string();
                         }
                         KeyCode::Char('h') => {
+                            pending_stop_run_id = None;
                             message = apply_selected_fleet_command(
                                 &runs,
                                 selected,
@@ -1346,6 +1382,7 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
                             );
                         }
                         KeyCode::Char('r') => {
+                            pending_stop_run_id = None;
                             message = apply_selected_fleet_command(
                                 &runs,
                                 selected,
@@ -1353,6 +1390,7 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
                             );
                         }
                         KeyCode::Char('n') => {
+                            pending_stop_run_id = None;
                             message = apply_selected_fleet_command(
                                 &runs,
                                 selected,
@@ -1360,6 +1398,7 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
                             );
                         }
                         KeyCode::Char('R') => {
+                            pending_stop_run_id = None;
                             message = apply_selected_fleet_command(
                                 &runs,
                                 selected,
