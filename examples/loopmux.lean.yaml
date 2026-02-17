@@ -1,5 +1,6 @@
 target: "ai:5.0"
 iterations: 5
+trigger_confirm_seconds: 5
 
 default_action:
   prompt: "Do the next iteration."
