@@ -16,6 +16,8 @@ use serde_json::json;
 use serde_yaml::Number;
 use time::OffsetDateTime;
 
+const LOOPMUX_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(Debug, Parser)]
 #[command(name = "loopmux")]
 #[command(about = "Loop prompts into tmux panes with triggers and delays.")]
@@ -47,7 +49,12 @@ enum Command {
 
 #[derive(Debug, Parser)]
 #[command(
-    after_help = "Examples:\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n  loopmux run --config loop.yaml --duration 2h\n  loopmux run --tui\n\nDefaults:\n  tail=1 (last non-blank line)\n  poll=5s\n  trigger-confirm-seconds=5\n  history-limit=50\n  log-preview-lines=3\n  trigger-edge=on\n\nDuration units: s, m, h, d, w, mon (30d), y (365d)\n"
+    after_help = concat!(
+        "Examples:\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n  loopmux run --config loop.yaml --duration 2h\n  loopmux run --tui\n\nDefaults:\n  tail=1 (last non-blank line)\n  poll=5s\n  trigger-confirm-seconds=5\n  history-limit=50\n  log-preview-lines=3\n  trigger-edge=on\n\nDuration units: s, m, h, d, w, mon (30d), y (365d)\n\n",
+        "Version: ",
+        env!("CARGO_PKG_VERSION"),
+        "\n"
+    )
 )]
 struct RunArgs {
     /// Path to the YAML config file.
@@ -180,6 +187,7 @@ struct SimulateArgs {
 }
 
 #[derive(Debug, Parser)]
+#[command(after_help = concat!("Version: ", env!("CARGO_PKG_VERSION"), "\n"))]
 struct RunsArgs {
     #[command(subcommand)]
     action: Option<RunsAction>,
@@ -374,6 +382,8 @@ struct FleetRunRecord {
     poll_seconds: u64,
     started_at: String,
     last_seen: String,
+    #[serde(default)]
+    version: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -404,6 +414,7 @@ struct FleetRunRegistry {
 struct FleetListedRun {
     record: FleetRunRecord,
     stale: bool,
+    version_mismatch: bool,
 }
 
 fn main() -> Result<()> {
@@ -634,6 +645,7 @@ impl FleetRunRegistry {
             poll_seconds,
             started_at: now.clone(),
             last_seen: now,
+            version: LOOPMUX_VERSION.to_string(),
         };
 
         let mut record = if self.state_path.exists() {
@@ -723,11 +735,16 @@ fn load_fleet_runs() -> Result<Vec<FleetListedRun>> {
         };
         runs.push(FleetListedRun {
             stale: is_fleet_record_stale(&record),
+            version_mismatch: is_version_mismatch(&record.version),
             record,
         });
     }
     runs.sort_by(|a, b| b.record.last_seen.cmp(&a.record.last_seen));
     Ok(runs)
+}
+
+fn is_version_mismatch(run_version: &str) -> bool {
+    run_version.trim().is_empty() || run_version.trim() != LOOPMUX_VERSION
 }
 
 fn is_fleet_record_stale(record: &FleetRunRecord) -> bool {
@@ -754,11 +771,37 @@ fn pid_alive(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
-fn fleet_manager_visible_runs(runs: &[FleetListedRun], show_stale: bool) -> Vec<FleetListedRun> {
-    if show_stale {
-        return runs.to_vec();
+fn fleet_manager_visible_runs(
+    runs: &[FleetListedRun],
+    show_stale: bool,
+    mismatch_only: bool,
+) -> Vec<FleetListedRun> {
+    runs.iter()
+        .filter(|run| show_stale || !run.stale)
+        .filter(|run| !mismatch_only || run.version_mismatch)
+        .cloned()
+        .collect()
+}
+
+fn fleet_manager_counts(runs: &[FleetListedRun]) -> (usize, usize, usize, usize) {
+    let mut active = 0;
+    let mut holding = 0;
+    let mut stale = 0;
+    let mut mismatch = 0;
+    for run in runs {
+        if run.stale {
+            stale += 1;
+        } else {
+            active += 1;
+        }
+        if run.record.state == "holding" {
+            holding += 1;
+        }
+        if run.version_mismatch {
+            mismatch += 1;
+        }
     }
-    runs.iter().filter(|run| !run.stale).cloned().collect()
+    (active, holding, stale, mismatch)
 }
 
 fn resolve_fleet_target(target: &str, runs: &[FleetListedRun]) -> Result<FleetListedRun> {
@@ -794,11 +837,21 @@ fn print_fleet_runs() -> Result<()> {
         println!("No local loopmux runs found.");
         return Ok(());
     }
-    println!("Active local loopmux runs:");
+    println!("Active local loopmux runs (local v{}):", LOOPMUX_VERSION);
     for run in runs {
         let stale = if run.stale { "stale" } else { "active" };
+        let version = if run.record.version.is_empty() {
+            "unknown"
+        } else {
+            run.record.version.as_str()
+        };
+        let mismatch = if run.version_mismatch {
+            "mismatch"
+        } else {
+            "match"
+        };
         println!(
-            "- {} ({}) id={} pid={} state={} sends={} target={} last_seen={}",
+            "- {} ({}) id={} pid={} state={} sends={} target={} version={} ({}) last_seen={}",
             run.record.name,
             stale,
             run.record.id,
@@ -806,6 +859,8 @@ fn print_fleet_runs() -> Result<()> {
             run.record.state,
             run.record.sends,
             run.record.target,
+            version,
+            mismatch,
             run.record.last_seen,
         );
     }
@@ -932,10 +987,13 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
     let mut selected: usize = 0;
     let mut message = String::from("fleet manager ready");
     let mut show_stale = false;
+    let mut mismatch_only = false;
     let mut last_frame = String::new();
     loop {
         let all_runs = load_fleet_runs()?;
-        let runs = fleet_manager_visible_runs(&all_runs, show_stale);
+        let runs = fleet_manager_visible_runs(&all_runs, show_stale, mismatch_only);
+        let (active_count, holding_count, stale_count, mismatch_count) =
+            fleet_manager_counts(&all_runs);
         if !runs.is_empty() && selected >= runs.len() {
             selected = runs.len() - 1;
         } else if runs.is_empty() {
@@ -944,10 +1002,20 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
 
         let (width, height) = crossterm::terminal::size().unwrap_or((120, 30));
         let header = format!(
-            "loopmux fleet manager | runs={}/{}{} | selected={} | q/esc {}",
+            "loopmux v{} fleet manager | runs={}/{}{}{} | active={} holding={} stale={} mismatch={} | selected={} | q/esc {}",
+            LOOPMUX_VERSION,
             runs.len(),
             all_runs.len(),
             if show_stale { "" } else { " (hide stale)" },
+            if mismatch_only {
+                " (mismatch only)"
+            } else {
+                ""
+            },
+            active_count,
+            holding_count,
+            stale_count,
+            mismatch_count,
             if runs.is_empty() { 0 } else { selected + 1 },
             if embedded {
                 "return to run"
@@ -961,21 +1029,29 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
         for (idx, run) in runs.iter().take(max_rows).enumerate() {
             let marker = if idx == selected { ">" } else { " " };
             let stale = if run.stale { "stale" } else { "active" };
+            let version = if run.record.version.is_empty() {
+                "unknown"
+            } else {
+                run.record.version.as_str()
+            };
+            let mismatch = if run.version_mismatch { " !" } else { "" };
             let line = format!(
-                "{} {} [{}] id={} state={} sends={} target={}",
+                "{} {} [{}{}] id={} state={} sends={} ver={} target={}",
                 marker,
                 run.record.name,
                 stale,
+                mismatch,
                 truncate_text(&run.record.id, 16, true),
                 run.record.state,
                 run.record.sends,
+                version,
                 truncate_text(&run.record.target, 28, true)
             );
             lines.push(line);
         }
 
         let footer = format!(
-            "< / <- prev · > / -> next · x stale · enter jump · h hold · r resume · n next · R renew · s stop · q/esc {} · {}",
+            "< / <- prev · > / -> next · x stale · v mismatch-only · enter jump · h hold · r resume · n next · R renew · s stop · q/esc {} · {}",
             if embedded {
                 "return to run"
             } else {
@@ -1037,6 +1113,15 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
                             "showing stale + active runs".to_string()
                         } else {
                             "showing active runs only".to_string()
+                        };
+                    }
+                    KeyCode::Char('v') => {
+                        mismatch_only = !mismatch_only;
+                        selected = 0;
+                        message = if mismatch_only {
+                            "showing version mismatches only".to_string()
+                        } else {
+                            "showing all version states".to_string()
                         };
                     }
                     KeyCode::Char('s') => {
@@ -1381,6 +1466,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
         .unwrap_or_else(|_| "unknown".into());
     if ui_mode == UiMode::Plain {
         println!("loopmux: running on {}", config.target_label);
+        println!("loopmux: version {}", LOOPMUX_VERSION);
         println!("loopmux: run {} ({})", identity.name, identity.id);
         if config.infinite {
             println!("loopmux: iterations = infinite");
@@ -2972,6 +3058,7 @@ fn render_status_bar(
                 right_parts.push(format!("rem {remaining}"));
             }
             right_parts.push(format!("trg {trigger_text}"));
+            right_parts.push(format!("v{}", LOOPMUX_VERSION));
             right_parts.push(config.target_label.clone());
         }
         LayoutMode::Standard => {
@@ -2980,6 +3067,7 @@ fn render_status_bar(
             }
             right_parts.push(format!("trg {trigger_text}"));
             right_parts.push(format!("last {elapsed}"));
+            right_parts.push(format!("v{}", LOOPMUX_VERSION));
             right_parts.push(config.target_label.clone());
         }
         LayoutMode::Wide => {
@@ -2988,6 +3076,7 @@ fn render_status_bar(
             }
             right_parts.push(format!("trg {trigger_text}"));
             right_parts.push(format!("last {elapsed}"));
+            right_parts.push(format!("v{}", LOOPMUX_VERSION));
             right_parts.push(format!("target {}", config.target_label));
         }
     }
@@ -4544,10 +4633,12 @@ mod tests {
             poll_seconds: 5,
             started_at: "2026-02-17T00:00:00Z".to_string(),
             last_seen: "2026-02-17T00:00:00Z".to_string(),
+            version: LOOPMUX_VERSION.to_string(),
         };
         let active = FleetListedRun {
             record: base.clone(),
             stale: false,
+            version_mismatch: false,
         };
         let stale = FleetListedRun {
             record: FleetRunRecord {
@@ -4556,14 +4647,64 @@ mod tests {
                 ..base
             },
             stale: true,
+            version_mismatch: false,
         };
 
-        let hidden = fleet_manager_visible_runs(&vec![active.clone(), stale.clone()], false);
+        let hidden = fleet_manager_visible_runs(&vec![active.clone(), stale.clone()], false, false);
         assert_eq!(hidden.len(), 1);
         assert_eq!(hidden[0].record.id, "run-1");
 
-        let all = fleet_manager_visible_runs(&vec![active, stale], true);
+        let all = fleet_manager_visible_runs(&vec![active, stale], true, false);
         assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn version_mismatch_detection_uses_local_version() {
+        assert!(!is_version_mismatch(LOOPMUX_VERSION));
+        assert!(is_version_mismatch("0.0.1"));
+        assert!(is_version_mismatch(""));
+    }
+
+    #[test]
+    fn fleet_manager_mismatch_filter_works() {
+        let run_match = FleetListedRun {
+            record: FleetRunRecord {
+                id: "run-1".to_string(),
+                name: "alpha".to_string(),
+                pid: 1,
+                host: "local".to_string(),
+                target: "ai:1.0".to_string(),
+                state: "waiting".to_string(),
+                sends: 1,
+                poll_seconds: 5,
+                started_at: "2026-02-17T00:00:00Z".to_string(),
+                last_seen: "2026-02-17T00:00:00Z".to_string(),
+                version: LOOPMUX_VERSION.to_string(),
+            },
+            stale: false,
+            version_mismatch: false,
+        };
+        let run_mismatch = FleetListedRun {
+            record: FleetRunRecord {
+                id: "run-2".to_string(),
+                name: "beta".to_string(),
+                pid: 2,
+                host: "local".to_string(),
+                target: "ai:2.0".to_string(),
+                state: "holding".to_string(),
+                sends: 2,
+                poll_seconds: 5,
+                started_at: "2026-02-17T00:00:00Z".to_string(),
+                last_seen: "2026-02-17T00:00:00Z".to_string(),
+                version: "0.0.1".to_string(),
+            },
+            stale: false,
+            version_mismatch: true,
+        };
+        let filtered =
+            fleet_manager_visible_runs(&vec![run_match, run_mismatch.clone()], true, true);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].record.id, run_mismatch.record.id);
     }
 }
 

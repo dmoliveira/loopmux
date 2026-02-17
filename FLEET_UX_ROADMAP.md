@@ -17,10 +17,10 @@ Status legend: `pending`, `in_progress`, `completed`, `blocked`.
 
 | ID | Task | Status | Notes |
 |---|---|---|---|
-| E1-T1 | Show version in top-level help and subcommand help sections used most (`run`, `runs`) | pending | keep discoverable in operator workflows |
-| E1-T2 | Show local version in run TUI header | pending | quick visual parity check |
-| E1-T3 | Show local version in fleet TUI header | pending | compare manager vs runs |
-| E1-T4 | Add docs section for version checks (`--version`, help, TUI header) | pending | reduce operator ambiguity |
+| E1-T1 | Show version in top-level help and subcommand help sections used most (`run`, `runs`) | completed | run/runs help now include version line |
+| E1-T2 | Show local version in run TUI header | completed | run status bar now displays current version |
+| E1-T3 | Show local version in fleet TUI header | completed | fleet header includes local version |
+| E1-T4 | Add docs section for version checks (`--version`, help, TUI header) | completed | README version checks section added |
 
 ## Epic 1b - Embedded fleet manager in run TUI
 
@@ -35,10 +35,10 @@ Status legend: `pending`, `in_progress`, `completed`, `blocked`.
 
 | ID | Task | Status | Notes |
 |---|---|---|---|
-| E2-T1 | Persist run binary version in registry state record | pending | include in `~/.loopmux/runs/state/*.json` |
-| E2-T2 | Show run version in `loopmux runs ls` output | pending | compact format |
-| E2-T3 | Highlight mismatches in fleet TUI list/details | pending | visual warning when versions differ |
-| E2-T4 | Add optional filter for mismatches or same-version-only view | pending | operator triage |
+| E2-T1 | Persist run binary version in registry state record | completed | stored in each run state entry |
+| E2-T2 | Show run version in `loopmux runs ls` output | completed | output includes run/local version state |
+| E2-T3 | Highlight mismatches in fleet TUI list/details | completed | mismatch marker shown in list/header counters |
+| E2-T4 | Add optional filter for mismatches or same-version-only view | completed | `v` toggles mismatch-only fleet view |
 
 ## Epic 3 - Fleet TUI UX upgrades
 
