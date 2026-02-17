@@ -219,7 +219,7 @@ loopmux run -t ai:5.0 -n 5 \
   loopmux runs tui
   ```
   - On wide terminals, fleet manager uses a split layout (runs list on left, selected-run details on right).
-  - Controls: `<`/`Left` previous, `>`/`Right` next, `x` toggle stale visibility (hidden by default), `v` mismatch-only filter, `Enter` jump to selected tmux target, `h` hold, `r` resume, `n` next, `R` renew, `s` stop selected run, `q`/`Esc` quit manager.
+  - Controls: `<`/`Left` previous, `>`/`Right` next, `x` toggle stale visibility (hidden by default), `v` mismatch-only filter, `f` cycle state filter (`all/active/holding/stale`), `/` search mode (name/id/target/state/version), `Enter` jump to selected tmux target, `h` hold, `r` resume, `n` next, `R` renew, `s` stop selected run, `q`/`Esc` quit manager.
   - When opened from `run --tui` via `f`, `q`/`Esc` returns to the run view.
   - Header includes local version plus counts (`active`, `holding`, `stale`, `mismatch`).
 
