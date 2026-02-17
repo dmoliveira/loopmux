@@ -927,6 +927,8 @@ fn fleet_detail_lines(
     lines.push("/ enter search mode (name/id/target/state/ver)".to_string());
     lines.push("f cycles state filter all/active/holding/stale".to_string());
     lines.push("enter jump to selected target".to_string());
+    lines.push("i copy selected run id".to_string());
+    lines.push("y copy `loopmux runs stop <id>` snippet".to_string());
     lines.push("h/r/n/R/s control selected run".to_string());
     lines.push("x toggle stale, v mismatch filter".to_string());
     lines
@@ -1206,7 +1208,7 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
         );
 
         let footer = format!(
-            "< / <- prev · > / -> next · x stale · v mismatch-only · f state-filter · / search · enter jump/confirm stop · h hold · r resume · n next · R renew · s arm stop · c cancel stop · q/esc {} · {}",
+            "< / <- prev · > / -> next · x stale · v mismatch-only · f state-filter · / search · enter jump/confirm stop · i copy id · y copy stop cmd · h hold · r resume · n next · R renew · s arm stop · c cancel stop · q/esc {} · {}",
             if embedded {
                 "return to run"
             } else {
@@ -1373,6 +1375,14 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
                             pending_stop_run_id = None;
                             message = "stop confirmation cleared".to_string();
                         }
+                        KeyCode::Char('i') => {
+                            pending_stop_run_id = None;
+                            message = copy_selected_run_id(&runs, selected);
+                        }
+                        KeyCode::Char('y') => {
+                            pending_stop_run_id = None;
+                            message = copy_selected_run_command(&runs, selected);
+                        }
                         KeyCode::Char('h') => {
                             pending_stop_run_id = None;
                             message = apply_selected_fleet_command(
@@ -1441,6 +1451,51 @@ fn apply_selected_fleet_jump(runs: &[FleetListedRun], selected: usize) -> String
         Ok(()) => format!("jumped to {} ({})", run.record.target, run.record.name),
         Err(err) => format!("jump failed: {err}"),
     }
+}
+
+fn copy_selected_run_id(runs: &[FleetListedRun], selected: usize) -> String {
+    let Some(run) = runs.get(selected) else {
+        return "no run selected".to_string();
+    };
+    match copy_to_clipboard(&run.record.id) {
+        Ok(()) => format!("copied run id: {}", run.record.id),
+        Err(err) => format!("copy failed: {err}"),
+    }
+}
+
+fn copy_selected_run_command(runs: &[FleetListedRun], selected: usize) -> String {
+    let Some(run) = runs.get(selected) else {
+        return "no run selected".to_string();
+    };
+    let snippet = fleet_stop_snippet(&run.record.id);
+    match copy_to_clipboard(&snippet) {
+        Ok(()) => format!("copied snippet: {}", snippet),
+        Err(err) => format!("copy failed: {err}"),
+    }
+}
+
+fn fleet_stop_snippet(run_id: &str) -> String {
+    format!("loopmux runs stop {run_id}")
+}
+
+fn copy_to_clipboard(value: &str) -> Result<()> {
+    let mut child = std::process::Command::new("pbcopy")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("failed to start pbcopy")?;
+    let Some(stdin) = child.stdin.as_mut() else {
+        bail!("failed to open pbcopy stdin");
+    };
+    stdin
+        .write_all(value.as_bytes())
+        .context("failed to write clipboard value")?;
+    let status = child.wait().context("failed to wait for pbcopy")?;
+    if !status.success() {
+        bail!("pbcopy exited with status {status}");
+    }
+    Ok(())
 }
 
 fn jump_to_tmux_target(target: &str) -> Result<()> {
@@ -5049,6 +5104,12 @@ mod tests {
         let by_target =
             fleet_manager_visible_runs(&vec![run], true, false, FleetStateFilter::All, "ai:7");
         assert_eq!(by_target.len(), 1);
+    }
+
+    #[test]
+    fn fleet_stop_snippet_uses_run_id() {
+        let snippet = fleet_stop_snippet("run-123");
+        assert_eq!(snippet, "loopmux runs stop run-123");
     }
 }
 
