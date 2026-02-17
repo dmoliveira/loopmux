@@ -804,6 +804,61 @@ fn fleet_manager_counts(runs: &[FleetListedRun]) -> (usize, usize, usize, usize)
     (active, holding, stale, mismatch)
 }
 
+fn fleet_detail_lines(
+    selected_run: Option<&FleetListedRun>,
+    show_stale: bool,
+    mismatch_only: bool,
+    counts: (usize, usize, usize, usize),
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push("Details".to_string());
+    lines.push(format!(
+        "filters stale={} mismatch_only={}",
+        if show_stale { "on" } else { "off" },
+        if mismatch_only { "on" } else { "off" }
+    ));
+    lines.push(format!(
+        "summary active={} holding={} stale={} mismatch={}",
+        counts.0, counts.1, counts.2, counts.3
+    ));
+    lines.push(String::new());
+
+    if let Some(run) = selected_run {
+        let version = if run.record.version.is_empty() {
+            "unknown"
+        } else {
+            run.record.version.as_str()
+        };
+        lines.push(format!("name: {}", run.record.name));
+        lines.push(format!("id: {}", run.record.id));
+        lines.push(format!("pid: {}", run.record.pid));
+        lines.push(format!("host: {}", run.record.host));
+        lines.push(format!("state: {}", run.record.state));
+        lines.push(format!("target: {}", run.record.target));
+        lines.push(format!("sends: {}", run.record.sends));
+        lines.push(format!(
+            "version: {} ({})",
+            version,
+            if run.version_mismatch {
+                "mismatch"
+            } else {
+                "match"
+            }
+        ));
+        lines.push(format!("started: {}", run.record.started_at));
+        lines.push(format!("last_seen: {}", run.record.last_seen));
+    } else {
+        lines.push("no run selected".to_string());
+    }
+
+    lines.push(String::new());
+    lines.push("actions".to_string());
+    lines.push("enter jump to selected target".to_string());
+    lines.push("h/r/n/R/s control selected run".to_string());
+    lines.push("x toggle stale, v mismatch filter".to_string());
+    lines
+}
+
 fn resolve_fleet_target(target: &str, runs: &[FleetListedRun]) -> Result<FleetListedRun> {
     if let Some(run) = runs
         .iter()
@@ -1024,9 +1079,9 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
             }
         );
 
-        let max_rows = height.saturating_sub(3) as usize;
+        let content_rows = height.saturating_sub(2) as usize;
         let mut lines = Vec::new();
-        for (idx, run) in runs.iter().take(max_rows).enumerate() {
+        for (idx, run) in runs.iter().take(content_rows).enumerate() {
             let marker = if idx == selected { ">" } else { " " };
             let stale = if run.stale { "stale" } else { "active" };
             let version = if run.record.version.is_empty() {
@@ -1050,6 +1105,14 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
             lines.push(line);
         }
 
+        let selected_run = runs.get(selected);
+        let details = fleet_detail_lines(
+            selected_run,
+            show_stale,
+            mismatch_only,
+            (active_count, holding_count, stale_count, mismatch_count),
+        );
+
         let footer = format!(
             "< / <- prev · > / -> next · x stale · v mismatch-only · enter jump · h hold · r resume · n next · R renew · s stop · q/esc {} · {}",
             if embedded {
@@ -1060,12 +1123,14 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
             truncate_text(&message, width.saturating_sub(70) as usize, true)
         );
 
+        let split_mode = width >= 120;
         let frame = format!(
-            "{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}",
             width,
             height,
             header,
             lines.join("\n"),
+            details.join("\n"),
             footer
         );
         if frame != last_frame {
@@ -1074,9 +1139,26 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
             let _ = out.queue(MoveTo(0, 0));
             let _ = out.queue(Clear(ClearType::All));
             let _ = writeln!(out, "{}", fit_line(&header, width as usize, true));
-            for idx in 0..max_rows {
-                let line = lines.get(idx).map(|value| value.as_str()).unwrap_or("");
-                let _ = writeln!(out, "{}", fit_line(line, width as usize, true));
+            if split_mode {
+                let left_width = ((width as usize) * 58 / 100)
+                    .max(52)
+                    .min((width as usize) - 20);
+                let right_width = (width as usize).saturating_sub(left_width + 1);
+                for idx in 0..content_rows {
+                    let left = lines.get(idx).map(|value| value.as_str()).unwrap_or("");
+                    let right = details.get(idx).map(|value| value.as_str()).unwrap_or("");
+                    let row = format!(
+                        "{} {}",
+                        pad_to_width(&fit_line(left, left_width, true), left_width),
+                        fit_line(right, right_width, true)
+                    );
+                    let _ = writeln!(out, "{row}");
+                }
+            } else {
+                for idx in 0..content_rows {
+                    let line = lines.get(idx).map(|value| value.as_str()).unwrap_or("");
+                    let _ = writeln!(out, "{}", fit_line(line, width as usize, true));
+                }
             }
             let footer_row = height.saturating_sub(1);
             let _ = out.queue(MoveTo(0, footer_row));

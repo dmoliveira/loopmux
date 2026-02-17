@@ -44,7 +44,7 @@ Status legend: `pending`, `in_progress`, `completed`, `blocked`.
 
 | ID | Task | Status | Notes |
 |---|---|---|---|
-| E3-T1 | Split layout into list panel + details panel | pending | clearer at-a-glance context |
+| E3-T1 | Split layout into list panel + details panel | completed | wide terminal now renders list+details split view |
 | E3-T2 | Add search/filter controls by name/id/target/state | pending | faster navigation with many runs |
 | E3-T3 | Add safer destructive flow (stop confirmation) | pending | reduce accidental stops |
 | E3-T4 | Add copy helpers (`id`, command snippet) | pending | operator speed |
