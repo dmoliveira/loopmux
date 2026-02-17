@@ -179,6 +179,7 @@ loopmux run -t ai:5.0 -n 5 \
 - `--tail N`: number of capture-pane lines (default 1, last non-blank line).
 - `--single-line`: update status output on a single line.
 - `--poll N`: polling interval in seconds while waiting for matches (default 5).
+- `--log-preview-lines N`: number of captured lines shown in folded sent-log previews (default 3).
 - `--no-trigger-edge`: opt out of edge-guard (default guard is ON to avoid repeated queue injections while trigger stays true).
 - `--fanout matched|broadcast`: send to matched panes only (default) or broadcast to all panes in scope.
 - `--tui`: enable the interactive terminal UI.
@@ -190,6 +191,7 @@ loopmux run -t ai:5.0 -n 5 \
 - Entries are stored in `~/.loopmux/history.json`, newest first, deduplicated by command shape.
 - TUI controls: `h` hold/resume (non-consuming, alias `p`/`r`), `f` open fleet manager view, `R` renew counter, `n` next, `s`/`Ctrl+C` stop run, `q` quit run view.
 - When `--duration` is set, the TUI status bar shows remaining time (`rem ...`) and it freezes while HOLD is active.
+- Sent logs are compact and include a folded trigger preview (`N` lines from capture tail) to keep long prompts readable.
 
 ### Fleet manager (local)
 - Every running `loopmux run` writes a local registry entry under `~/.loopmux/runs/state/`.
