@@ -213,7 +213,7 @@ loopmux run -t ai:5.0 -n 5 \
   ```bash
   loopmux runs tui
   ```
-  - Controls: `<`/`Left` previous, `>`/`Right` next, `Enter` jump to selected tmux target, `h` hold, `r` resume, `n` next, `R` renew, `s` stop selected run, `q`/`Esc` quit manager.
+  - Controls: `<`/`Left` previous, `>`/`Right` next, `x` toggle stale visibility (hidden by default), `Enter` jump to selected tmux target, `h` hold, `r` resume, `n` next, `R` renew, `s` stop selected run, `q`/`Esc` quit manager.
   - When opened from `run --tui` via `f`, `q`/`Esc` returns to the run view.
 
 ### Common flags

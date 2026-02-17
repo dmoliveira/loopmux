@@ -739,9 +739,16 @@ fn is_fleet_record_stale(record: &FleetRunRecord) -> bool {
 fn pid_alive(pid: u32) -> bool {
     std::process::Command::new("kill")
         .args(["-0", &pid.to_string()])
-        .status()
-        .map(|status| status.success())
+        .output()
+        .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+fn fleet_manager_visible_runs(runs: &[FleetListedRun], show_stale: bool) -> Vec<FleetListedRun> {
+    if show_stale {
+        return runs.to_vec();
+    }
+    runs.iter().filter(|run| !run.stale).cloned().collect()
 }
 
 fn resolve_fleet_target(target: &str, runs: &[FleetListedRun]) -> Result<FleetListedRun> {
@@ -914,19 +921,23 @@ fn run_fleet_manager_tui_embedded() -> Result<()> {
 fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
     let mut selected: usize = 0;
     let mut message = String::from("fleet manager ready");
+    let mut show_stale = false;
+    let mut last_frame = String::new();
     loop {
-        let runs = load_fleet_runs()?;
+        let all_runs = load_fleet_runs()?;
+        let runs = fleet_manager_visible_runs(&all_runs, show_stale);
         if !runs.is_empty() && selected >= runs.len() {
             selected = runs.len() - 1;
+        } else if runs.is_empty() {
+            selected = 0;
         }
 
         let (width, height) = crossterm::terminal::size().unwrap_or((120, 30));
-        let mut out = std::io::stdout();
-        let _ = out.queue(MoveTo(0, 0));
-        let _ = out.queue(Clear(ClearType::All));
         let header = format!(
-            "loopmux fleet manager | runs={} | selected={} | q/esc {}",
+            "loopmux fleet manager | runs={}/{}{} | selected={} | q/esc {}",
             runs.len(),
+            all_runs.len(),
+            if show_stale { "" } else { " (hide stale)" },
             if runs.is_empty() { 0 } else { selected + 1 },
             if embedded {
                 "return to run"
@@ -934,9 +945,9 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
                 "quit manager"
             }
         );
-        let _ = writeln!(out, "{}", fit_line(&header, width as usize, true));
 
         let max_rows = height.saturating_sub(3) as usize;
+        let mut lines = Vec::new();
         for (idx, run) in runs.iter().take(max_rows).enumerate() {
             let marker = if idx == selected { ">" } else { " " };
             let stale = if run.stale { "stale" } else { "active" };
@@ -950,13 +961,11 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
                 run.record.sends,
                 truncate_text(&run.record.target, 28, true)
             );
-            let _ = writeln!(out, "{}", fit_line(&line, width as usize, true));
+            lines.push(line);
         }
 
-        let footer_row = height.saturating_sub(1);
-        let _ = out.queue(MoveTo(0, footer_row));
         let footer = format!(
-            "< / <- prev · > / -> next · enter jump · h hold · r resume · n next · R renew · s stop · q/esc {} · {}",
+            "< / <- prev · > / -> next · x stale · enter jump · h hold · r resume · n next · R renew · s stop · q/esc {} · {}",
             if embedded {
                 "return to run"
             } else {
@@ -964,8 +973,30 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
             },
             truncate_text(&message, width.saturating_sub(70) as usize, true)
         );
-        let _ = write!(out, "{}", fit_line(&footer, width as usize, true));
-        let _ = out.flush();
+
+        let frame = format!(
+            "{}\n{}\n{}\n{}\n{}",
+            width,
+            height,
+            header,
+            lines.join("\n"),
+            footer
+        );
+        if frame != last_frame {
+            last_frame = frame;
+            let mut out = std::io::stdout();
+            let _ = out.queue(MoveTo(0, 0));
+            let _ = out.queue(Clear(ClearType::All));
+            let _ = writeln!(out, "{}", fit_line(&header, width as usize, true));
+            for idx in 0..max_rows {
+                let line = lines.get(idx).map(|value| value.as_str()).unwrap_or("");
+                let _ = writeln!(out, "{}", fit_line(line, width as usize, true));
+            }
+            let footer_row = height.saturating_sub(1);
+            let _ = out.queue(MoveTo(0, footer_row));
+            let _ = write!(out, "{}", fit_line(&footer, width as usize, true));
+            let _ = out.flush();
+        }
 
         if event::poll(Duration::from_millis(200)).context("fleet manager poll failed")? {
             match event::read()? {
@@ -988,6 +1019,15 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
                         if !runs.is_empty() {
                             selected = (selected + 1) % runs.len();
                         }
+                    }
+                    KeyCode::Char('x') => {
+                        show_stale = !show_stale;
+                        selected = 0;
+                        message = if show_stale {
+                            "showing stale + active runs".to_string()
+                        } else {
+                            "showing active runs only".to_string()
+                        };
                     }
                     KeyCode::Char('s') => {
                         message = apply_selected_fleet_command(
@@ -4355,6 +4395,41 @@ mod tests {
         )
         .unwrap();
         assert_eq!(log_line_color_at("23:11:04 > ai:7.0", now), 249);
+    }
+
+    #[test]
+    fn fleet_manager_hides_stale_by_default() {
+        let base = FleetRunRecord {
+            id: "run-1".to_string(),
+            name: "alpha".to_string(),
+            pid: 1,
+            host: "local".to_string(),
+            target: "ai:1.0".to_string(),
+            state: "waiting".to_string(),
+            sends: 1,
+            poll_seconds: 5,
+            started_at: "2026-02-17T00:00:00Z".to_string(),
+            last_seen: "2026-02-17T00:00:00Z".to_string(),
+        };
+        let active = FleetListedRun {
+            record: base.clone(),
+            stale: false,
+        };
+        let stale = FleetListedRun {
+            record: FleetRunRecord {
+                id: "run-2".to_string(),
+                name: "beta".to_string(),
+                ..base
+            },
+            stale: true,
+        };
+
+        let hidden = fleet_manager_visible_runs(&vec![active.clone(), stale.clone()], false);
+        assert_eq!(hidden.len(), 1);
+        assert_eq!(hidden[0].record.id, "run-1");
+
+        let all = fleet_manager_visible_runs(&vec![active, stale], true);
+        assert_eq!(all.len(), 2);
     }
 }
 
