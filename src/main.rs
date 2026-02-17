@@ -47,7 +47,7 @@ enum Command {
 
 #[derive(Debug, Parser)]
 #[command(
-    after_help = "Examples:\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n  loopmux run --config loop.yaml --duration 2h\n  loopmux run --tui\n\nDefaults:\n  tail=1 (last non-blank line)\n  poll=5s\n  history-limit=50\n  log-preview-lines=3\n  trigger-edge=on\n\nDuration units: s, m, h, d, w, mon (30d), y (365d)\n"
+    after_help = "Examples:\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n  loopmux run --config loop.yaml --duration 2h\n  loopmux run --tui\n\nDefaults:\n  tail=1 (last non-blank line)\n  poll=5s\n  trigger-confirm-seconds=5\n  history-limit=50\n  log-preview-lines=3\n  trigger-edge=on\n\nDuration units: s, m, h, d, w, mon (30d), y (365d)\n"
 )]
 struct RunArgs {
     /// Path to the YAML config file.
@@ -92,6 +92,9 @@ struct RunArgs {
     /// Poll interval in seconds when waiting for changes.
     #[arg(long)]
     poll: Option<u64>,
+    /// Seconds a trigger must remain matched before send (default 5).
+    #[arg(long)]
+    trigger_confirm_seconds: Option<u64>,
     /// Number of captured lines to show in folded trigger preview logs.
     #[arg(long)]
     log_preview_lines: Option<usize>,
@@ -113,6 +116,7 @@ struct RunArgs {
 }
 
 const DEFAULT_HISTORY_LIMIT: usize = 50;
+const DEFAULT_TRIGGER_CONFIRM_SECONDS: u64 = 5;
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 struct RunHistory {
@@ -132,6 +136,7 @@ struct HistoryEntry {
     tail: Option<usize>,
     once: bool,
     poll: Option<u64>,
+    trigger_confirm_seconds: Option<u64>,
     log_preview_lines: Option<usize>,
     trigger_edge: Option<bool>,
     fanout: Option<FanoutMode>,
@@ -204,6 +209,7 @@ struct Config {
     iterations: Option<u32>,
     infinite: Option<bool>,
     poll: Option<u64>,
+    trigger_confirm_seconds: Option<u64>,
     log_preview_lines: Option<usize>,
     trigger_edge: Option<bool>,
     fanout: Option<FanoutMode>,
@@ -273,6 +279,7 @@ struct Rule {
     exclude: Option<MatchCriteria>,
     action: Option<Action>,
     delay: Option<DelayConfig>,
+    confirm_seconds: Option<u64>,
     next: Option<String>,
     priority: Option<i32>,
 }
@@ -502,6 +509,9 @@ fn hydrate_run_args_from_history(mut args: RunArgs) -> Result<RunArgs> {
     }
     if args.poll.is_none() {
         args.poll = entry.poll;
+    }
+    if args.trigger_confirm_seconds.is_none() {
+        args.trigger_confirm_seconds = entry.trigger_confirm_seconds;
     }
     if args.log_preview_lines.is_none() {
         args.log_preview_lines = entry.log_preview_lines;
@@ -1199,7 +1209,7 @@ fn history_signature(args: &RunArgs) -> Option<String> {
     let prompt = args.prompt.as_ref()?;
     let trigger = args.trigger.as_ref()?;
     Some(format!(
-        "target={target}|prompt={prompt}|trigger={trigger}|exclude={}|pre={}|post={}|iterations={}|tail={}|once={}|poll={}|log_preview_lines={}|trigger_edge={}|fanout={}|duration={}",
+        "target={target}|prompt={prompt}|trigger={trigger}|exclude={}|pre={}|post={}|iterations={}|tail={}|once={}|poll={}|trigger_confirm_seconds={}|log_preview_lines={}|trigger_edge={}|fanout={}|duration={}",
         args.exclude.as_deref().unwrap_or(""),
         args.pre.as_deref().unwrap_or(""),
         args.post.as_deref().unwrap_or(""),
@@ -1207,6 +1217,9 @@ fn history_signature(args: &RunArgs) -> Option<String> {
         args.tail.map(|v| v.to_string()).unwrap_or_default(),
         args.once,
         args.poll.map(|v| v.to_string()).unwrap_or_default(),
+        args.trigger_confirm_seconds
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
         args.log_preview_lines
             .map(|v| v.to_string())
             .unwrap_or_default(),
@@ -1243,6 +1256,7 @@ fn store_run_history(args: &RunArgs) -> Result<()> {
             tail: args.tail,
             once: args.once,
             poll: args.poll,
+            trigger_confirm_seconds: args.trigger_confirm_seconds,
             log_preview_lines: args.log_preview_lines,
             trigger_edge: Some(!args.no_trigger_edge),
             fanout: Some(args.fanout),
@@ -1257,7 +1271,7 @@ fn store_run_history(args: &RunArgs) -> Result<()> {
 
 fn history_entry_signature(entry: &HistoryEntry) -> Option<String> {
     Some(format!(
-        "target={}|prompt={}|trigger={}|exclude={}|pre={}|post={}|iterations={}|tail={}|once={}|poll={}|log_preview_lines={}|trigger_edge={}|fanout={}|duration={}",
+        "target={}|prompt={}|trigger={}|exclude={}|pre={}|post={}|iterations={}|tail={}|once={}|poll={}|trigger_confirm_seconds={}|log_preview_lines={}|trigger_edge={}|fanout={}|duration={}",
         entry.target,
         entry.prompt,
         entry.trigger,
@@ -1268,6 +1282,10 @@ fn history_entry_signature(entry: &HistoryEntry) -> Option<String> {
         entry.tail.map(|v| v.to_string()).unwrap_or_default(),
         entry.once,
         entry.poll.map(|v| v.to_string()).unwrap_or_default(),
+        entry
+            .trigger_confirm_seconds
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
         entry
             .log_preview_lines
             .map(|v| v.to_string())
@@ -1331,6 +1349,8 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
     let mut last_hash_by_target: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     let mut trigger_edge_active: HashSet<String> = HashSet::new();
+    let mut trigger_confirm_pending_since: std::collections::HashMap<String, std::time::Instant> =
+        std::collections::HashMap::new();
     let mut active_rule_by_target: std::collections::HashMap<String, Option<String>> =
         std::collections::HashMap::new();
     let mut active_rule: Option<String> = None;
@@ -1488,6 +1508,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                         TuiAction::Next => {
                             last_hash_by_target.clear();
                             trigger_edge_active.clear();
+                            trigger_confirm_pending_since.clear();
                             active_rule = None;
                             active_rule_by_target.clear();
                             backoff_state.clear();
@@ -1498,6 +1519,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                             send_count = 0;
                             last_hash_by_target.clear();
                             trigger_edge_active.clear();
+                            trigger_confirm_pending_since.clear();
                             active_rule = None;
                             active_rule_by_target.clear();
                             backoff_state.clear();
@@ -1592,6 +1614,11 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                     &matched_edge_keys,
                     config.trigger_edge,
                 );
+                refresh_trigger_confirm_for_target(
+                    &mut trigger_confirm_pending_since,
+                    target,
+                    &matched_edge_keys,
+                );
 
                 if rule_matches.is_empty() {
                     continue;
@@ -1601,6 +1628,15 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                 for rule_match in rule_matches {
                     let edge_key = trigger_edge_key(target, &rule_match);
                     if !edge_guard_allows(&trigger_edge_active, &edge_key, config.trigger_edge) {
+                        continue;
+                    }
+                    if !confirm_window_elapsed(
+                        config.trigger_confirm_seconds,
+                        rule_match.rule.confirm_seconds,
+                        &edge_key,
+                        &mut trigger_confirm_pending_since,
+                        std::time::Instant::now(),
+                    ) {
                         continue;
                     }
 
@@ -1918,6 +1954,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                         TuiAction::Next => {
                             last_hash_by_target.clear();
                             trigger_edge_active.clear();
+                            trigger_confirm_pending_since.clear();
                             active_rule = None;
                             active_rule_by_target.clear();
                             backoff_state.clear();
@@ -1928,6 +1965,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                             send_count = 0;
                             last_hash_by_target.clear();
                             trigger_edge_active.clear();
+                            trigger_confirm_pending_since.clear();
                             active_rule = None;
                             active_rule_by_target.clear();
                             backoff_state.clear();
@@ -2023,6 +2061,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                             TuiAction::Next => {
                                 last_hash_by_target.clear();
                                 trigger_edge_active.clear();
+                                trigger_confirm_pending_since.clear();
                                 active_rule = None;
                                 active_rule_by_target.clear();
                                 backoff_state.clear();
@@ -2034,6 +2073,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                 send_count = 0;
                                 last_hash_by_target.clear();
                                 trigger_edge_active.clear();
+                                trigger_confirm_pending_since.clear();
                                 active_rule = None;
                                 active_rule_by_target.clear();
                                 backoff_state.clear();
@@ -2263,6 +2303,40 @@ fn refresh_trigger_edges_for_target(
 
 fn edge_guard_allows(active_edges: &HashSet<String>, edge_key: &str, enabled: bool) -> bool {
     !enabled || !active_edges.contains(edge_key)
+}
+
+fn refresh_trigger_confirm_for_target(
+    pending_since: &mut std::collections::HashMap<String, std::time::Instant>,
+    target: &str,
+    matched_keys: &HashSet<String>,
+) {
+    let prefix = format!("{target}|");
+    pending_since.retain(|key, _| !key.starts_with(&prefix) || matched_keys.contains(key));
+}
+
+fn confirm_window_elapsed(
+    global_seconds: u64,
+    rule_override_seconds: Option<u64>,
+    edge_key: &str,
+    pending_since: &mut std::collections::HashMap<String, std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    let seconds = rule_override_seconds.unwrap_or(global_seconds);
+    if seconds == 0 {
+        pending_since.remove(edge_key);
+        return true;
+    }
+
+    let wait = std::time::Duration::from_secs(seconds);
+    let Some(first_seen) = pending_since.get(edge_key).copied() else {
+        pending_since.insert(edge_key.to_string(), now);
+        return false;
+    };
+    if now.duration_since(first_seen) >= wait {
+        pending_since.remove(edge_key);
+        return true;
+    }
+    false
 }
 
 fn should_skip_scan_by_hash(trigger_edge_enabled: bool, hash: &str, last_hash: &str) -> bool {
@@ -2514,6 +2588,7 @@ fn resolve_run_config(args: &RunArgs) -> Result<Config> {
         }),
         action: None,
         delay: None,
+        confirm_seconds: None,
         next: None,
         priority: None,
     };
@@ -2523,6 +2598,7 @@ fn resolve_run_config(args: &RunArgs) -> Result<Config> {
         iterations: args.iterations,
         infinite: None,
         poll: args.poll,
+        trigger_confirm_seconds: args.trigger_confirm_seconds,
         log_preview_lines: args.log_preview_lines,
         trigger_edge: Some(!args.no_trigger_edge),
         fanout: Some(args.fanout),
@@ -2544,6 +2620,7 @@ struct ResolvedConfig {
     infinite: bool,
     has_prompt: bool,
     poll: u64,
+    trigger_confirm_seconds: u64,
     log_preview_lines: usize,
     trigger_edge: bool,
     fanout: FanoutMode,
@@ -3277,6 +3354,9 @@ fn resolve_config(
     }
 
     let poll = config.poll.unwrap_or(5).max(1);
+    let trigger_confirm_seconds = config
+        .trigger_confirm_seconds
+        .unwrap_or(DEFAULT_TRIGGER_CONFIRM_SECONDS);
     let trigger_edge = trigger_edge_override.unwrap_or(config.trigger_edge.unwrap_or(true));
     let log_preview_lines = config.log_preview_lines.unwrap_or(3).max(1);
 
@@ -3294,6 +3374,7 @@ fn resolve_config(
         infinite,
         has_prompt,
         poll,
+        trigger_confirm_seconds,
         log_preview_lines,
         trigger_edge,
         fanout,
@@ -3346,6 +3427,10 @@ fn print_validation(config: &ResolvedConfig) {
     }
     println!("- tail: {}", config.tail);
     println!("- poll: {}s", config.poll);
+    println!(
+        "- trigger_confirm_seconds: {}s",
+        config.trigger_confirm_seconds
+    );
     println!("- log_preview_lines: {}", config.log_preview_lines);
     println!(
         "- trigger_edge: {}",
@@ -3944,6 +4029,7 @@ mod tests {
             exclude,
             action: None,
             delay: None,
+            confirm_seconds: None,
             next: None,
             priority: None,
         }
@@ -4033,6 +4119,7 @@ mod tests {
             single_line: false,
             tui: false,
             poll: None,
+            trigger_confirm_seconds: None,
             log_preview_lines: None,
             no_trigger_edge: false,
             fanout: FanoutMode::Matched,
@@ -4060,6 +4147,7 @@ mod tests {
             single_line: false,
             tui: false,
             poll: None,
+            trigger_confirm_seconds: None,
             log_preview_lines: None,
             no_trigger_edge: false,
             fanout: FanoutMode::Matched,
@@ -4075,6 +4163,10 @@ mod tests {
         assert_eq!(resolved.tail, 123);
         assert!(resolved.once);
         assert_eq!(resolved.rules.len(), 1);
+        assert_eq!(
+            resolved.trigger_confirm_seconds,
+            DEFAULT_TRIGGER_CONFIRM_SECONDS
+        );
         assert_eq!(
             resolved.rules[0].match_.as_ref().unwrap().regex.as_deref(),
             Some("Done")
@@ -4204,6 +4296,7 @@ mod tests {
             rule_eval: RuleEval::FirstMatch,
             rules: Vec::new(),
             delay: None,
+            trigger_confirm_seconds: DEFAULT_TRIGGER_CONFIRM_SECONDS,
             prompt_placeholders: Vec::new(),
             template_vars: Vec::new(),
             default_action: Action {
@@ -4259,6 +4352,7 @@ mod tests {
             rule_eval: RuleEval::FirstMatch,
             rules: Vec::new(),
             delay: None,
+            trigger_confirm_seconds: DEFAULT_TRIGGER_CONFIRM_SECONDS,
             prompt_placeholders: Vec::new(),
             template_vars: Vec::new(),
             default_action: Action {
@@ -4331,6 +4425,46 @@ mod tests {
         assert!(should_skip_scan_by_hash(true, "same", "same"));
         assert!(!should_skip_scan_by_hash(false, "same", "same"));
         assert!(!should_skip_scan_by_hash(true, "new", "old"));
+    }
+
+    #[test]
+    fn confirm_window_elapsed_requires_persisted_match() {
+        let mut pending = std::collections::HashMap::new();
+        let now = std::time::Instant::now();
+        assert!(!confirm_window_elapsed(
+            5,
+            None,
+            "ai:7.0|inline|0",
+            &mut pending,
+            now
+        ));
+        assert!(!confirm_window_elapsed(
+            5,
+            Some(3),
+            "ai:7.0|inline|0",
+            &mut pending,
+            now + std::time::Duration::from_secs(2),
+        ));
+        assert!(confirm_window_elapsed(
+            5,
+            Some(3),
+            "ai:7.0|inline|0",
+            &mut pending,
+            now + std::time::Duration::from_secs(3),
+        ));
+    }
+
+    #[test]
+    fn confirm_window_elapsed_zero_is_immediate() {
+        let mut pending = std::collections::HashMap::new();
+        assert!(confirm_window_elapsed(
+            5,
+            Some(0),
+            "ai:7.0|inline|0",
+            &mut pending,
+            std::time::Instant::now(),
+        ));
+        assert!(pending.is_empty());
     }
 
     #[test]
@@ -4501,6 +4635,7 @@ fn default_template() -> String {
     let template = r#"target: "ai:5.0"
 iterations: 10
 poll: 5
+trigger_confirm_seconds: 5
 log_preview_lines: 3
 trigger_edge: true
 duration: 2h

@@ -1,5 +1,6 @@
 target: "ai:5.0"
 iterations: 20
+trigger_confirm_seconds: 5
 
 rule_eval: first_match
 
@@ -29,6 +30,7 @@ rules:
   - id: review-path
     match:
       regex: "(Ready for review|PR created)"
+    confirm_seconds: 3
     delay:
       mode: fixed
       value: 300
