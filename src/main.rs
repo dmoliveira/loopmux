@@ -417,6 +417,43 @@ struct FleetListedRun {
     version_mismatch: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FleetStateFilter {
+    All,
+    Active,
+    Holding,
+    Stale,
+}
+
+impl FleetStateFilter {
+    fn next(self) -> Self {
+        match self {
+            FleetStateFilter::All => FleetStateFilter::Active,
+            FleetStateFilter::Active => FleetStateFilter::Holding,
+            FleetStateFilter::Holding => FleetStateFilter::Stale,
+            FleetStateFilter::Stale => FleetStateFilter::All,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            FleetStateFilter::All => "all",
+            FleetStateFilter::Active => "active",
+            FleetStateFilter::Holding => "holding",
+            FleetStateFilter::Stale => "stale",
+        }
+    }
+
+    fn allows(self, run: &FleetListedRun) -> bool {
+        match self {
+            FleetStateFilter::All => true,
+            FleetStateFilter::Active => !run.stale,
+            FleetStateFilter::Holding => !run.stale && run.record.state == "holding",
+            FleetStateFilter::Stale => run.stale,
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -775,12 +812,34 @@ fn fleet_manager_visible_runs(
     runs: &[FleetListedRun],
     show_stale: bool,
     mismatch_only: bool,
+    state_filter: FleetStateFilter,
+    search_query: &str,
 ) -> Vec<FleetListedRun> {
+    let search = search_query.trim().to_ascii_lowercase();
     runs.iter()
         .filter(|run| show_stale || !run.stale)
         .filter(|run| !mismatch_only || run.version_mismatch)
+        .filter(|run| state_filter.allows(run))
+        .filter(|run| search.is_empty() || run_matches_query(run, &search))
         .cloned()
         .collect()
+}
+
+fn run_matches_query(run: &FleetListedRun, query: &str) -> bool {
+    let version = if run.record.version.is_empty() {
+        "unknown"
+    } else {
+        run.record.version.as_str()
+    };
+    [
+        run.record.name.as_str(),
+        run.record.id.as_str(),
+        run.record.target.as_str(),
+        run.record.state.as_str(),
+        version,
+    ]
+    .iter()
+    .any(|value| value.to_ascii_lowercase().contains(query))
 }
 
 fn fleet_manager_counts(runs: &[FleetListedRun]) -> (usize, usize, usize, usize) {
@@ -808,14 +867,22 @@ fn fleet_detail_lines(
     selected_run: Option<&FleetListedRun>,
     show_stale: bool,
     mismatch_only: bool,
+    state_filter: FleetStateFilter,
+    search_query: &str,
     counts: (usize, usize, usize, usize),
 ) -> Vec<String> {
     let mut lines = Vec::new();
     lines.push("Details".to_string());
     lines.push(format!(
-        "filters stale={} mismatch_only={}",
+        "filters stale={} mismatch_only={} state={} search={}",
         if show_stale { "on" } else { "off" },
-        if mismatch_only { "on" } else { "off" }
+        if mismatch_only { "on" } else { "off" },
+        state_filter.label(),
+        if search_query.trim().is_empty() {
+            "<none>"
+        } else {
+            search_query.trim()
+        }
     ));
     lines.push(format!(
         "summary active={} holding={} stale={} mismatch={}",
@@ -853,6 +920,8 @@ fn fleet_detail_lines(
 
     lines.push(String::new());
     lines.push("actions".to_string());
+    lines.push("/ enter search mode (name/id/target/state/ver)".to_string());
+    lines.push("f cycles state filter all/active/holding/stale".to_string());
     lines.push("enter jump to selected target".to_string());
     lines.push("h/r/n/R/s control selected run".to_string());
     lines.push("x toggle stale, v mismatch filter".to_string());
@@ -1043,10 +1112,19 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
     let mut message = String::from("fleet manager ready");
     let mut show_stale = false;
     let mut mismatch_only = false;
+    let mut state_filter = FleetStateFilter::All;
+    let mut search_query = String::new();
+    let mut search_mode = false;
     let mut last_frame = String::new();
     loop {
         let all_runs = load_fleet_runs()?;
-        let runs = fleet_manager_visible_runs(&all_runs, show_stale, mismatch_only);
+        let runs = fleet_manager_visible_runs(
+            &all_runs,
+            show_stale,
+            mismatch_only,
+            state_filter,
+            &search_query,
+        );
         let (active_count, holding_count, stale_count, mismatch_count) =
             fleet_manager_counts(&all_runs);
         if !runs.is_empty() && selected >= runs.len() {
@@ -1057,7 +1135,7 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
 
         let (width, height) = crossterm::terminal::size().unwrap_or((120, 30));
         let header = format!(
-            "loopmux v{} fleet manager | runs={}/{}{}{} | active={} holding={} stale={} mismatch={} | selected={} | q/esc {}",
+            "loopmux v{} fleet manager | runs={}/{}{}{} | filter={} search={} | active={} holding={} stale={} mismatch={} | selected={} | q/esc {}",
             LOOPMUX_VERSION,
             runs.len(),
             all_runs.len(),
@@ -1066,6 +1144,12 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
                 " (mismatch only)"
             } else {
                 ""
+            },
+            state_filter.label(),
+            if search_query.is_empty() {
+                "<none>"
+            } else {
+                search_query.as_str()
             },
             active_count,
             holding_count,
@@ -1110,11 +1194,13 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
             selected_run,
             show_stale,
             mismatch_only,
+            state_filter,
+            &search_query,
             (active_count, holding_count, stale_count, mismatch_count),
         );
 
         let footer = format!(
-            "< / <- prev · > / -> next · x stale · v mismatch-only · enter jump · h hold · r resume · n next · R renew · s stop · q/esc {} · {}",
+            "< / <- prev · > / -> next · x stale · v mismatch-only · f state-filter · / search · enter jump · h hold · r resume · n next · R renew · s stop · q/esc {} · {}",
             if embedded {
                 "return to run"
             } else {
@@ -1169,80 +1255,120 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
         if event::poll(Duration::from_millis(200)).context("fleet manager poll failed")? {
             match event::read()? {
                 Event::Resize(_, _) => {}
-                Event::Key(KeyEvent { code, .. }) => match code {
-                    KeyCode::Esc | KeyCode::Char('q') => break,
-                    KeyCode::Enter => {
-                        message = apply_selected_fleet_jump(&runs, selected);
+                Event::Key(KeyEvent { code, .. }) => {
+                    if search_mode {
+                        match code {
+                            KeyCode::Esc => {
+                                search_mode = false;
+                                message = "search cancelled".to_string();
+                            }
+                            KeyCode::Enter => {
+                                search_mode = false;
+                                message = if search_query.is_empty() {
+                                    "search cleared".to_string()
+                                } else {
+                                    format!("search applied: {}", search_query)
+                                };
+                            }
+                            KeyCode::Backspace => {
+                                search_query.pop();
+                                selected = 0;
+                                message = format!("search: {}", search_query);
+                            }
+                            KeyCode::Char(c) => {
+                                search_query.push(c);
+                                selected = 0;
+                                message = format!("search: {}", search_query);
+                            }
+                            _ => {}
+                        }
+                        continue;
                     }
-                    KeyCode::Char('<') | KeyCode::Left => {
-                        if !runs.is_empty() {
-                            selected = if selected == 0 {
-                                runs.len() - 1
+
+                    match code {
+                        KeyCode::Esc | KeyCode::Char('q') => break,
+                        KeyCode::Enter => {
+                            message = apply_selected_fleet_jump(&runs, selected);
+                        }
+                        KeyCode::Char('<') | KeyCode::Left => {
+                            if !runs.is_empty() {
+                                selected = if selected == 0 {
+                                    runs.len() - 1
+                                } else {
+                                    selected - 1
+                                };
+                            }
+                        }
+                        KeyCode::Char('>') | KeyCode::Right => {
+                            if !runs.is_empty() {
+                                selected = (selected + 1) % runs.len();
+                            }
+                        }
+                        KeyCode::Char('x') => {
+                            show_stale = !show_stale;
+                            selected = 0;
+                            message = if show_stale {
+                                "showing stale + active runs".to_string()
                             } else {
-                                selected - 1
+                                "showing active runs only".to_string()
                             };
                         }
-                    }
-                    KeyCode::Char('>') | KeyCode::Right => {
-                        if !runs.is_empty() {
-                            selected = (selected + 1) % runs.len();
+                        KeyCode::Char('v') => {
+                            mismatch_only = !mismatch_only;
+                            selected = 0;
+                            message = if mismatch_only {
+                                "showing version mismatches only".to_string()
+                            } else {
+                                "showing all version states".to_string()
+                            };
                         }
+                        KeyCode::Char('f') => {
+                            state_filter = state_filter.next();
+                            selected = 0;
+                            message = format!("state filter={}", state_filter.label());
+                        }
+                        KeyCode::Char('/') => {
+                            search_mode = true;
+                            message = format!("search: {}", search_query);
+                        }
+                        KeyCode::Char('s') => {
+                            message = apply_selected_fleet_command(
+                                &runs,
+                                selected,
+                                FleetControlCommand::Stop,
+                            );
+                        }
+                        KeyCode::Char('h') => {
+                            message = apply_selected_fleet_command(
+                                &runs,
+                                selected,
+                                FleetControlCommand::Hold,
+                            );
+                        }
+                        KeyCode::Char('r') => {
+                            message = apply_selected_fleet_command(
+                                &runs,
+                                selected,
+                                FleetControlCommand::Resume,
+                            );
+                        }
+                        KeyCode::Char('n') => {
+                            message = apply_selected_fleet_command(
+                                &runs,
+                                selected,
+                                FleetControlCommand::Next,
+                            );
+                        }
+                        KeyCode::Char('R') => {
+                            message = apply_selected_fleet_command(
+                                &runs,
+                                selected,
+                                FleetControlCommand::Renew,
+                            );
+                        }
+                        _ => {}
                     }
-                    KeyCode::Char('x') => {
-                        show_stale = !show_stale;
-                        selected = 0;
-                        message = if show_stale {
-                            "showing stale + active runs".to_string()
-                        } else {
-                            "showing active runs only".to_string()
-                        };
-                    }
-                    KeyCode::Char('v') => {
-                        mismatch_only = !mismatch_only;
-                        selected = 0;
-                        message = if mismatch_only {
-                            "showing version mismatches only".to_string()
-                        } else {
-                            "showing all version states".to_string()
-                        };
-                    }
-                    KeyCode::Char('s') => {
-                        message = apply_selected_fleet_command(
-                            &runs,
-                            selected,
-                            FleetControlCommand::Stop,
-                        );
-                    }
-                    KeyCode::Char('h') => {
-                        message = apply_selected_fleet_command(
-                            &runs,
-                            selected,
-                            FleetControlCommand::Hold,
-                        );
-                    }
-                    KeyCode::Char('r') => {
-                        message = apply_selected_fleet_command(
-                            &runs,
-                            selected,
-                            FleetControlCommand::Resume,
-                        );
-                    }
-                    KeyCode::Char('n') => {
-                        message = apply_selected_fleet_command(
-                            &runs,
-                            selected,
-                            FleetControlCommand::Next,
-                        );
-                    }
-                    KeyCode::Char('R') => {
-                        message = apply_selected_fleet_command(
-                            &runs,
-                            selected,
-                            FleetControlCommand::Renew,
-                        );
-                    }
-                    _ => {}
-                },
+                }
                 _ => {}
             }
         }
@@ -4732,11 +4858,23 @@ mod tests {
             version_mismatch: false,
         };
 
-        let hidden = fleet_manager_visible_runs(&vec![active.clone(), stale.clone()], false, false);
+        let hidden = fleet_manager_visible_runs(
+            &vec![active.clone(), stale.clone()],
+            false,
+            false,
+            FleetStateFilter::All,
+            "",
+        );
         assert_eq!(hidden.len(), 1);
         assert_eq!(hidden[0].record.id, "run-1");
 
-        let all = fleet_manager_visible_runs(&vec![active, stale], true, false);
+        let all = fleet_manager_visible_runs(
+            &vec![active, stale],
+            true,
+            false,
+            FleetStateFilter::All,
+            "",
+        );
         assert_eq!(all.len(), 2);
     }
 
@@ -4783,10 +4921,95 @@ mod tests {
             stale: false,
             version_mismatch: true,
         };
-        let filtered =
-            fleet_manager_visible_runs(&vec![run_match, run_mismatch.clone()], true, true);
+        let filtered = fleet_manager_visible_runs(
+            &vec![run_match, run_mismatch.clone()],
+            true,
+            true,
+            FleetStateFilter::All,
+            "",
+        );
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].record.id, run_mismatch.record.id);
+    }
+
+    #[test]
+    fn fleet_manager_state_filter_holding_only() {
+        let waiting = FleetListedRun {
+            record: FleetRunRecord {
+                id: "run-1".to_string(),
+                name: "alpha".to_string(),
+                pid: 1,
+                host: "local".to_string(),
+                target: "ai:1.0".to_string(),
+                state: "waiting".to_string(),
+                sends: 1,
+                poll_seconds: 5,
+                started_at: "2026-02-17T00:00:00Z".to_string(),
+                last_seen: "2026-02-17T00:00:00Z".to_string(),
+                version: LOOPMUX_VERSION.to_string(),
+            },
+            stale: false,
+            version_mismatch: false,
+        };
+        let holding = FleetListedRun {
+            record: FleetRunRecord {
+                id: "run-2".to_string(),
+                name: "beta".to_string(),
+                pid: 2,
+                host: "local".to_string(),
+                target: "ai:2.0".to_string(),
+                state: "holding".to_string(),
+                sends: 2,
+                poll_seconds: 5,
+                started_at: "2026-02-17T00:00:00Z".to_string(),
+                last_seen: "2026-02-17T00:00:00Z".to_string(),
+                version: LOOPMUX_VERSION.to_string(),
+            },
+            stale: false,
+            version_mismatch: false,
+        };
+        let filtered = fleet_manager_visible_runs(
+            &vec![waiting, holding.clone()],
+            true,
+            false,
+            FleetStateFilter::Holding,
+            "",
+        );
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].record.id, holding.record.id);
+    }
+
+    #[test]
+    fn fleet_manager_search_matches_name_or_target() {
+        let run = FleetListedRun {
+            record: FleetRunRecord {
+                id: "run-1".to_string(),
+                name: "planner-a".to_string(),
+                pid: 1,
+                host: "local".to_string(),
+                target: "ai:7.0".to_string(),
+                state: "waiting".to_string(),
+                sends: 1,
+                poll_seconds: 5,
+                started_at: "2026-02-17T00:00:00Z".to_string(),
+                last_seen: "2026-02-17T00:00:00Z".to_string(),
+                version: LOOPMUX_VERSION.to_string(),
+            },
+            stale: false,
+            version_mismatch: false,
+        };
+        let by_name = fleet_manager_visible_runs(
+            &vec![run.clone()],
+            true,
+            false,
+            FleetStateFilter::All,
+            "planner",
+        );
+        assert_eq!(by_name.len(), 1);
+
+        let by_target =
+            fleet_manager_visible_runs(&vec![run], true, false, FleetStateFilter::All, "ai:7");
+        assert_eq!(by_target.len(), 1);
     }
 }
 
