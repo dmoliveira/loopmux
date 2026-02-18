@@ -66,6 +66,47 @@ loopmux run -t ai:5.0 -n 5 \
   --once
 ```
 
+### Config-first startup (no subcommand)
+- Run `loopmux` with no subcommand to auto-start matching profiles from `~/.config/loopmux/config.yaml`.
+- Profiles in `runs:` (or `events:` alias) can be enabled/disabled and filtered by current directory.
+- Multiple matching profiles are started together (each as an independent run process).
+
+Example:
+
+```yaml
+imports:
+  - ~/.config/loopmux/runs/work.yaml
+
+id: main
+enabled: true
+when:
+  cwd_matches:
+    - ~/Codes/Projects/*
+target: "ai:8.1"
+iterations: 50
+tail: 3
+poll: 5
+default_action:
+  prompt: "Do the next iteration."
+rules:
+  - id: continue
+    match:
+      regex: "Concluded|What is next"
+
+runs:
+  - id: docs
+    enabled: false
+    target: "ai:6.1"
+    iterations: 20
+    default_action:
+      prompt: "Polish docs and examples."
+```
+
+Notes:
+- Imported files can contribute extra `runs`/`events` profiles.
+- Each profile uses the same run-config schema as normal YAML runs (`target`, `rules`, `poll`, `tail`, etc.).
+- Startup validates all selected profiles before launch and prints clear per-profile errors.
+
 ## Configuration
 
 ### Minimal example
