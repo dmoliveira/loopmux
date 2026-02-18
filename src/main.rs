@@ -66,8 +66,11 @@ struct RunArgs {
     /// Inline trigger regex (requires --prompt).
     #[arg(long, requires = "prompt", conflicts_with = "config")]
     trigger: Option<String>,
+    /// Inline trigger expression (requires --prompt).
+    #[arg(long, requires = "prompt", conflicts_with_all = ["config", "trigger"])]
+    trigger_expr: Option<String>,
     /// Treat --trigger as an exact line match (trimmed comparison).
-    #[arg(long, requires = "trigger", conflicts_with = "config")]
+    #[arg(long, requires = "trigger", conflicts_with_all = ["config", "trigger_expr"])]
     trigger_exact_line: bool,
     /// Inline exclude regex.
     #[arg(long, requires = "prompt", conflicts_with = "config")]
@@ -154,6 +157,7 @@ struct HistoryEntry {
     target: String,
     prompt: String,
     trigger: String,
+    trigger_expr: Option<String>,
     trigger_exact_line: Option<bool>,
     exclude: Option<String>,
     pre: Option<String>,
@@ -334,6 +338,7 @@ struct Rule {
 #[derive(Debug, Deserialize)]
 struct MatchCriteria {
     regex: Option<String>,
+    trigger_expr: Option<String>,
     exact_line: Option<String>,
     contains: Option<String>,
     starts_with: Option<String>,
@@ -820,8 +825,11 @@ fn runs(args: RunsArgs) -> Result<()> {
 }
 
 fn hydrate_run_args_from_history(mut args: RunArgs) -> Result<RunArgs> {
-    let needs_history =
-        args.tui && args.config.is_none() && args.prompt.is_none() && args.trigger.is_none();
+    let needs_history = args.tui
+        && args.config.is_none()
+        && args.prompt.is_none()
+        && args.trigger.is_none()
+        && args.trigger_expr.is_none();
     if !needs_history {
         return Ok(args);
     }
@@ -831,7 +839,10 @@ fn hydrate_run_args_from_history(mut args: RunArgs) -> Result<RunArgs> {
         args.target = vec![entry.target];
     }
     args.prompt = Some(entry.prompt);
-    args.trigger = Some(entry.trigger);
+    if !entry.trigger.trim().is_empty() {
+        args.trigger = Some(entry.trigger);
+    }
+    args.trigger_expr = entry.trigger_expr;
     if !args.trigger_exact_line {
         args.trigger_exact_line = entry.trigger_exact_line.unwrap_or(false);
     }
@@ -2378,9 +2389,13 @@ fn save_run_history(history: &RunHistory) -> Result<()> {
 fn history_signature(args: &RunArgs) -> Option<String> {
     let target = args.target.first()?;
     let prompt = args.prompt.as_ref()?;
-    let trigger = args.trigger.as_ref()?;
+    let trigger = args.trigger.as_deref().unwrap_or("");
+    let trigger_expr = args.trigger_expr.as_deref().unwrap_or("");
+    if trigger.is_empty() && trigger_expr.is_empty() {
+        return None;
+    }
     Some(format!(
-        "target={target}|prompt={prompt}|trigger={trigger}|trigger_exact_line={}|exclude={}|pre={}|post={}|iterations={}|tail={}|head={}|once={}|poll={}|trigger_confirm_seconds={}|log_preview_lines={}|trigger_edge={}|recheck_before_send={}|fanout={}|duration={}",
+        "target={target}|prompt={prompt}|trigger={trigger}|trigger_expr={trigger_expr}|trigger_exact_line={}|exclude={}|pre={}|post={}|iterations={}|tail={}|head={}|once={}|poll={}|trigger_confirm_seconds={}|log_preview_lines={}|trigger_edge={}|recheck_before_send={}|fanout={}|duration={}",
         args.trigger_exact_line,
         args.exclude.as_deref().unwrap_or(""),
         args.pre.as_deref().unwrap_or(""),
@@ -2423,6 +2438,7 @@ fn store_run_history(args: &RunArgs) -> Result<()> {
             target: args.target.first().cloned().unwrap_or_default(),
             prompt: args.prompt.clone().unwrap_or_default(),
             trigger: args.trigger.clone().unwrap_or_default(),
+            trigger_expr: args.trigger_expr.clone(),
             trigger_exact_line: Some(args.trigger_exact_line),
             exclude: args.exclude.clone(),
             pre: args.pre.clone(),
@@ -2448,10 +2464,11 @@ fn store_run_history(args: &RunArgs) -> Result<()> {
 
 fn history_entry_signature(entry: &HistoryEntry) -> Option<String> {
     Some(format!(
-        "target={}|prompt={}|trigger={}|trigger_exact_line={}|exclude={}|pre={}|post={}|iterations={}|tail={}|head={}|once={}|poll={}|trigger_confirm_seconds={}|log_preview_lines={}|trigger_edge={}|recheck_before_send={}|fanout={}|duration={}",
+        "target={}|prompt={}|trigger={}|trigger_expr={}|trigger_exact_line={}|exclude={}|pre={}|post={}|iterations={}|tail={}|head={}|once={}|poll={}|trigger_confirm_seconds={}|log_preview_lines={}|trigger_edge={}|recheck_before_send={}|fanout={}|duration={}",
         entry.target,
         entry.prompt,
         entry.trigger,
+        entry.trigger_expr.as_deref().unwrap_or(""),
         entry.trigger_exact_line.unwrap_or(false),
         entry.exclude.as_deref().unwrap_or(""),
         entry.pre.as_deref().unwrap_or(""),
@@ -2490,12 +2507,17 @@ fn select_history_entry(limit: usize) -> Result<HistoryEntry> {
         .collect::<Vec<_>>();
     for (idx, entry) in visible.iter().enumerate() {
         let prompt = truncate_text(&entry.prompt, 70, true);
+        let trigger = if let Some(expr) = &entry.trigger_expr {
+            format!("expr:{expr}")
+        } else {
+            entry.trigger.clone()
+        };
         println!(
             "{}. [{}] target={} trigger={} prompt={}",
             idx + 1,
             entry.last_run,
             entry.target,
-            entry.trigger,
+            trigger,
             prompt
         );
     }
@@ -3703,6 +3725,11 @@ fn matches_rule(rule: &Rule, output: &str) -> Result<bool> {
 }
 
 fn matches_criteria(criteria: &MatchCriteria, output: &str) -> Result<bool> {
+    if let Some(trigger_expr) = &criteria.trigger_expr {
+        if eval_trigger_expr(&parse_trigger_expr(trigger_expr)?, output) {
+            return Ok(true);
+        }
+    }
     if let Some(exact_line) = &criteria.exact_line {
         let expected = exact_line.trim();
         if output.lines().any(|line| line.trim() == expected) {
@@ -3845,6 +3872,7 @@ fn eval_trigger_expr(expr: &TriggerExpr, output: &str) -> bool {
     eval_node(&expr.ast, &expr.terms, output)
 }
 
+#[cfg(test)]
 fn matches_trigger_expr(expr: &str, output: &str) -> Result<bool> {
     let parsed = parse_trigger_expr(expr)?;
     Ok(eval_trigger_expr(&parsed, output))
@@ -3990,8 +4018,8 @@ fn resolve_run_config(args: &RunArgs) -> Result<Config> {
     let Some(prompt) = args.prompt.as_ref() else {
         bail!("--config or --prompt is required");
     };
-    let Some(trigger) = args.trigger.as_ref() else {
-        bail!("--trigger is required when using --prompt");
+    if args.trigger.is_none() && args.trigger_expr.is_none() {
+        bail!("--trigger or --trigger-expr is required when using --prompt");
     };
 
     let default_action = Action {
@@ -4008,13 +4036,14 @@ fn resolve_run_config(args: &RunArgs) -> Result<Config> {
     let rule = Rule {
         id: Some("inline".to_string()),
         match_: Some(MatchCriteria {
-            regex: if args.trigger_exact_line {
+            regex: if args.trigger_expr.is_some() || args.trigger_exact_line {
                 None
             } else {
-                Some(trigger.clone())
+                args.trigger.clone()
             },
-            exact_line: if args.trigger_exact_line {
-                Some(trigger.clone())
+            trigger_expr: args.trigger_expr.clone(),
+            exact_line: if args.trigger_expr.is_none() && args.trigger_exact_line {
+                args.trigger.clone()
             } else {
                 None
             },
@@ -4023,6 +4052,7 @@ fn resolve_run_config(args: &RunArgs) -> Result<Config> {
         }),
         exclude: args.exclude.as_ref().map(|value| MatchCriteria {
             regex: Some(value.clone()),
+            trigger_expr: None,
             exact_line: None,
             contains: None,
             starts_with: None,
@@ -5130,6 +5160,7 @@ fn validate_rules(rules: &[Rule]) -> Result<()> {
 
 fn has_match(criteria: &MatchCriteria) -> bool {
     has_text(&criteria.regex)
+        || has_text(&criteria.trigger_expr)
         || has_text(&criteria.exact_line)
         || has_text(&criteria.contains)
         || has_text(&criteria.starts_with)
@@ -5676,6 +5707,7 @@ mod tests {
     fn match_regex(pattern: &str) -> MatchCriteria {
         MatchCriteria {
             regex: Some(pattern.to_string()),
+            trigger_expr: None,
             exact_line: None,
             contains: None,
             starts_with: None,
@@ -5685,6 +5717,7 @@ mod tests {
     fn match_contains(value: &str) -> MatchCriteria {
         MatchCriteria {
             regex: None,
+            trigger_expr: None,
             exact_line: None,
             contains: Some(value.to_string()),
             starts_with: None,
@@ -5748,12 +5781,26 @@ mod tests {
     fn matches_criteria_exact_line() {
         let criteria = MatchCriteria {
             regex: None,
+            trigger_expr: None,
             exact_line: Some("<CONTINUE-LOOP>".to_string()),
             contains: None,
             starts_with: None,
         };
         assert!(matches_criteria(&criteria, "foo\n  <CONTINUE-LOOP>  \nbar").unwrap());
         assert!(!matches_criteria(&criteria, "foo <CONTINUE-LOOP> bar").unwrap());
+    }
+
+    #[test]
+    fn matches_criteria_trigger_expr() {
+        let criteria = MatchCriteria {
+            regex: None,
+            trigger_expr: Some("(READY || DONE) && GO".to_string()),
+            exact_line: None,
+            contains: None,
+            starts_with: None,
+        };
+        assert!(matches_criteria(&criteria, "READY GO").unwrap());
+        assert!(!matches_criteria(&criteria, "READY").unwrap());
     }
 
     #[test]
@@ -5805,6 +5852,7 @@ mod tests {
             config: None,
             prompt: Some("Do it".to_string()),
             trigger: None,
+            trigger_expr: None,
             trigger_exact_line: false,
             exclude: None,
             pre: None,
@@ -5839,6 +5887,7 @@ mod tests {
             config: None,
             prompt: Some("Do it".to_string()),
             trigger: Some("Done".to_string()),
+            trigger_expr: None,
             trigger_exact_line: false,
             exclude: Some("PROD".to_string()),
             pre: Some("pre".to_string()),
@@ -5887,11 +5936,52 @@ mod tests {
     }
 
     #[test]
+    fn resolve_run_config_inline_trigger_expr_mode() {
+        let args = RunArgs {
+            config: None,
+            prompt: Some("Do it".to_string()),
+            trigger: None,
+            trigger_expr: Some("READY && GO".to_string()),
+            trigger_exact_line: false,
+            exclude: None,
+            pre: None,
+            post: None,
+            target: vec!["ai:5.0".to_string()],
+            targets_file: Vec::new(),
+            file: Vec::new(),
+            files_file: Vec::new(),
+            iterations: Some(1),
+            tail: Some(1),
+            head: None,
+            once: false,
+            dry_run: false,
+            single_line: false,
+            tui: false,
+            poll: None,
+            trigger_confirm_seconds: None,
+            log_preview_lines: None,
+            no_trigger_edge: false,
+            no_recheck_before_send: false,
+            fanout: FanoutMode::Matched,
+            duration: None,
+            history_limit: None,
+            name: None,
+        };
+        let config = resolve_run_config(&args).unwrap();
+        let mut rules = config.rules.unwrap();
+        let matcher = rules.remove(0).match_.unwrap();
+        assert!(matcher.regex.is_none());
+        assert_eq!(matcher.trigger_expr.as_deref(), Some("READY && GO"));
+        assert!(matcher.exact_line.is_none());
+    }
+
+    #[test]
     fn resolve_run_config_inline_exact_line_mode() {
         let args = RunArgs {
             config: None,
             prompt: Some("Do it".to_string()),
             trigger: Some("<CONTINUE-LOOP>".to_string()),
+            trigger_expr: None,
             trigger_exact_line: true,
             exclude: None,
             pre: None,
@@ -5931,6 +6021,7 @@ mod tests {
             config: None,
             prompt: Some("Do it".to_string()),
             trigger: Some("Done".to_string()),
+            trigger_expr: None,
             trigger_exact_line: false,
             exclude: None,
             pre: None,
@@ -5970,6 +6061,7 @@ mod tests {
             config: None,
             prompt: Some("Do it".to_string()),
             trigger: Some("Done".to_string()),
+            trigger_expr: None,
             trigger_exact_line: false,
             exclude: None,
             pre: None,
