@@ -339,6 +339,153 @@ struct MatchCriteria {
     starts_with: Option<String>,
 }
 
+#[derive(Debug)]
+struct TriggerExpr {
+    ast: TriggerExprNode,
+    terms: Vec<Regex>,
+}
+
+#[derive(Debug)]
+enum TriggerExprNode {
+    Term(usize),
+    And(Box<TriggerExprNode>, Box<TriggerExprNode>),
+    Or(Box<TriggerExprNode>, Box<TriggerExprNode>),
+}
+
+#[derive(Debug)]
+enum TriggerExprRawNode {
+    Term { pattern: String, pos: usize },
+    And(Box<TriggerExprRawNode>, Box<TriggerExprRawNode>),
+    Or(Box<TriggerExprRawNode>, Box<TriggerExprRawNode>),
+}
+
+#[derive(Debug)]
+enum TriggerExprToken {
+    Term { pattern: String, pos: usize },
+    And { pos: usize },
+    Or { pos: usize },
+    LParen { pos: usize },
+    RParen { pos: usize },
+}
+
+impl TriggerExprToken {
+    fn pos(&self) -> usize {
+        match self {
+            Self::Term { pos, .. }
+            | Self::And { pos }
+            | Self::Or { pos }
+            | Self::LParen { pos }
+            | Self::RParen { pos } => *pos,
+        }
+    }
+}
+
+struct TriggerExprParser<'a> {
+    tokens: &'a [TriggerExprToken],
+    index: usize,
+    source_len: usize,
+}
+
+impl<'a> TriggerExprParser<'a> {
+    fn parse(mut self) -> Result<TriggerExprRawNode> {
+        let expr = self.parse_expr(0)?;
+        if let Some(token) = self.peek() {
+            bail!(
+                "invalid trigger expression at pos {}: unexpected token",
+                token.pos()
+            );
+        }
+        Ok(expr)
+    }
+
+    fn parse_expr(&mut self, min_prec: u8) -> Result<TriggerExprRawNode> {
+        let mut left = self.parse_primary()?;
+        while let Some((op, pos, precedence)) = self.peek_operator() {
+            if precedence < min_prec {
+                break;
+            }
+            self.index += 1;
+            if let Some(next) = self.peek() {
+                if matches!(
+                    next,
+                    TriggerExprToken::And { .. }
+                        | TriggerExprToken::Or { .. }
+                        | TriggerExprToken::RParen { .. }
+                ) {
+                    bail!("invalid trigger expression at pos {pos}: expected term after '{op}'");
+                }
+            } else {
+                bail!("invalid trigger expression at pos {pos}: trailing operator '{op}'");
+            }
+            let right = self.parse_expr(precedence + 1)?;
+            left = match op {
+                "&&" => TriggerExprRawNode::And(Box::new(left), Box::new(right)),
+                "||" => TriggerExprRawNode::Or(Box::new(left), Box::new(right)),
+                _ => unreachable!(),
+            };
+        }
+        Ok(left)
+    }
+
+    fn parse_primary(&mut self) -> Result<TriggerExprRawNode> {
+        let Some(token) = self.next() else {
+            bail!(
+                "invalid trigger expression at pos {}: expected term",
+                self.source_len
+            );
+        };
+        match token {
+            TriggerExprToken::Term { pattern, pos } => Ok(TriggerExprRawNode::Term {
+                pattern: pattern.clone(),
+                pos: *pos,
+            }),
+            TriggerExprToken::LParen { .. } => {
+                let expr = self.parse_expr(0)?;
+                match self.next() {
+                    Some(TriggerExprToken::RParen { .. }) => Ok(expr),
+                    Some(next) => bail!(
+                        "invalid trigger expression at pos {}: missing right parenthesis",
+                        next.pos()
+                    ),
+                    None => bail!(
+                        "invalid trigger expression at pos {}: missing right parenthesis",
+                        self.source_len
+                    ),
+                }
+            }
+            TriggerExprToken::And { pos } => {
+                bail!("invalid trigger expression at pos {pos}: expected term after '&&'")
+            }
+            TriggerExprToken::Or { pos } => {
+                bail!("invalid trigger expression at pos {pos}: expected term after '||'")
+            }
+            TriggerExprToken::RParen { pos } => {
+                bail!("invalid trigger expression at pos {pos}: unexpected token")
+            }
+        }
+    }
+
+    fn peek_operator(&self) -> Option<(&'static str, usize, u8)> {
+        match self.peek() {
+            Some(TriggerExprToken::And { pos }) => Some(("&&", *pos, 2)),
+            Some(TriggerExprToken::Or { pos }) => Some(("||", *pos, 1)),
+            _ => None,
+        }
+    }
+
+    fn peek(&self) -> Option<&'a TriggerExprToken> {
+        self.tokens.get(self.index)
+    }
+
+    fn next(&mut self) -> Option<&'a TriggerExprToken> {
+        let token = self.tokens.get(self.index);
+        if token.is_some() {
+            self.index += 1;
+        }
+        token
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct DelayConfig {
     mode: DelayMode,
@@ -3581,6 +3728,128 @@ fn matches_criteria(criteria: &MatchCriteria, output: &str) -> Result<bool> {
     Ok(false)
 }
 
+fn tokenize_trigger_expr(input: &str) -> Result<Vec<TriggerExprToken>> {
+    let mut tokens = Vec::new();
+    let mut idx = 0;
+    while idx < input.len() {
+        let rest = &input[idx..];
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
+        if ch.is_whitespace() {
+            idx += ch.len_utf8();
+            continue;
+        }
+        if rest.starts_with("&&") {
+            tokens.push(TriggerExprToken::And { pos: idx });
+            idx += 2;
+            continue;
+        }
+        if rest.starts_with("||") {
+            tokens.push(TriggerExprToken::Or { pos: idx });
+            idx += 2;
+            continue;
+        }
+        if ch == '(' {
+            tokens.push(TriggerExprToken::LParen { pos: idx });
+            idx += 1;
+            continue;
+        }
+        if ch == ')' {
+            tokens.push(TriggerExprToken::RParen { pos: idx });
+            idx += 1;
+            continue;
+        }
+
+        let start = idx;
+        while idx < input.len() {
+            let next = &input[idx..];
+            if next.starts_with("&&") || next.starts_with("||") {
+                break;
+            }
+            let Some(next_ch) = next.chars().next() else {
+                break;
+            };
+            if next_ch.is_whitespace() || next_ch == '(' || next_ch == ')' {
+                break;
+            }
+            idx += next_ch.len_utf8();
+        }
+        let term = input[start..idx].trim();
+        if term.is_empty() {
+            bail!("invalid trigger expression at pos {start}: unexpected token");
+        }
+        tokens.push(TriggerExprToken::Term {
+            pattern: term.to_string(),
+            pos: start,
+        });
+    }
+    Ok(tokens)
+}
+
+fn compile_trigger_expr(
+    node: TriggerExprRawNode,
+    compiled_terms: &mut Vec<Regex>,
+) -> Result<TriggerExprNode> {
+    match node {
+        TriggerExprRawNode::Term { pattern, pos } => {
+            let regex = Regex::new(&pattern).map_err(|err| {
+                anyhow::anyhow!(
+                    "invalid trigger expression at pos {pos}: invalid regex term: {err}"
+                )
+            })?;
+            let idx = compiled_terms.len();
+            compiled_terms.push(regex);
+            Ok(TriggerExprNode::Term(idx))
+        }
+        TriggerExprRawNode::And(left, right) => Ok(TriggerExprNode::And(
+            Box::new(compile_trigger_expr(*left, compiled_terms)?),
+            Box::new(compile_trigger_expr(*right, compiled_terms)?),
+        )),
+        TriggerExprRawNode::Or(left, right) => Ok(TriggerExprNode::Or(
+            Box::new(compile_trigger_expr(*left, compiled_terms)?),
+            Box::new(compile_trigger_expr(*right, compiled_terms)?),
+        )),
+    }
+}
+
+fn parse_trigger_expr(input: &str) -> Result<TriggerExpr> {
+    let tokens = tokenize_trigger_expr(input)?;
+    if tokens.is_empty() {
+        bail!("invalid trigger expression at pos 0: expected term");
+    }
+    let parser = TriggerExprParser {
+        tokens: &tokens,
+        index: 0,
+        source_len: input.len(),
+    };
+    let raw = parser.parse()?;
+    let mut terms = Vec::new();
+    let ast = compile_trigger_expr(raw, &mut terms)?;
+    Ok(TriggerExpr { ast, terms })
+}
+
+fn eval_trigger_expr(expr: &TriggerExpr, output: &str) -> bool {
+    fn eval_node(node: &TriggerExprNode, terms: &[Regex], output: &str) -> bool {
+        match node {
+            TriggerExprNode::Term(idx) => terms[*idx].is_match(output),
+            TriggerExprNode::And(left, right) => {
+                eval_node(left, terms, output) && eval_node(right, terms, output)
+            }
+            TriggerExprNode::Or(left, right) => {
+                eval_node(left, terms, output) || eval_node(right, terms, output)
+            }
+        }
+    }
+
+    eval_node(&expr.ast, &expr.terms, output)
+}
+
+fn matches_trigger_expr(expr: &str, output: &str) -> Result<bool> {
+    let parsed = parse_trigger_expr(expr)?;
+    Ok(eval_trigger_expr(&parsed, output))
+}
+
 fn build_prompt(action: &Action) -> String {
     let mut parts = Vec::new();
     push_block(&mut parts, action.pre.as_ref());
@@ -5420,6 +5689,51 @@ mod tests {
             contains: Some(value.to_string()),
             starts_with: None,
         }
+    }
+
+    #[test]
+    fn trigger_expr_respects_precedence() {
+        let expr = "A || B && C";
+        assert!(matches_trigger_expr(expr, "A only").unwrap());
+        assert!(!matches_trigger_expr(expr, "B only").unwrap());
+        assert!(matches_trigger_expr(expr, "B C").unwrap());
+    }
+
+    #[test]
+    fn trigger_expr_respects_parentheses() {
+        let expr = "(A || B) && C";
+        assert!(!matches_trigger_expr(expr, "B only").unwrap());
+        assert!(matches_trigger_expr(expr, "B C").unwrap());
+    }
+
+    #[test]
+    fn trigger_expr_trailing_operator_error() {
+        let err = parse_trigger_expr("READY &&").unwrap_err();
+        assert!(err.to_string().contains("trailing operator"));
+    }
+
+    #[test]
+    fn trigger_expr_empty_term_error() {
+        let err = parse_trigger_expr("READY && || DONE").unwrap_err();
+        assert!(err.to_string().contains("expected term after '&&'"));
+    }
+
+    #[test]
+    fn trigger_expr_missing_paren_error() {
+        let err = parse_trigger_expr("(READY || DONE").unwrap_err();
+        assert!(err.to_string().contains("missing right parenthesis"));
+    }
+
+    #[test]
+    fn trigger_expr_unexpected_token_error() {
+        let err = parse_trigger_expr(") READY").unwrap_err();
+        assert!(err.to_string().contains("unexpected token"));
+    }
+
+    #[test]
+    fn trigger_expr_invalid_regex_error() {
+        let err = parse_trigger_expr("[").unwrap_err();
+        assert!(err.to_string().contains("invalid regex term"));
     }
 
     #[test]
