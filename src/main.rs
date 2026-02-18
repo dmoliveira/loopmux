@@ -2009,7 +2009,14 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                 };
                 let hash = hash_output(&output);
                 let last_hash = last_hash_by_target.get(target).cloned().unwrap_or_default();
-                if should_skip_scan_by_hash(config.trigger_edge, &hash, &last_hash) {
+                let has_pending_confirm =
+                    has_pending_confirm_for_target(&trigger_confirm_pending_since, target);
+                if should_skip_scan_by_hash(
+                    config.trigger_edge,
+                    &hash,
+                    &last_hash,
+                    has_pending_confirm,
+                ) {
                     continue;
                 }
 
@@ -2788,8 +2795,21 @@ fn confirm_window_elapsed(
     false
 }
 
-fn should_skip_scan_by_hash(trigger_edge_enabled: bool, hash: &str, last_hash: &str) -> bool {
-    trigger_edge_enabled && hash == last_hash
+fn has_pending_confirm_for_target(
+    pending_since: &std::collections::HashMap<String, std::time::Instant>,
+    target: &str,
+) -> bool {
+    let prefix = format!("{target}|");
+    pending_since.keys().any(|key| key.starts_with(&prefix))
+}
+
+fn should_skip_scan_by_hash(
+    trigger_edge_enabled: bool,
+    hash: &str,
+    last_hash: &str,
+    has_pending_confirm: bool,
+) -> bool {
+    trigger_edge_enabled && hash == last_hash && !has_pending_confirm
 }
 
 fn extract_trigger_preview(output: &str, max_lines: usize, use_unicode: bool) -> (usize, String) {
@@ -4963,9 +4983,21 @@ mod tests {
 
     #[test]
     fn hash_skip_depends_on_trigger_edge_mode() {
-        assert!(should_skip_scan_by_hash(true, "same", "same"));
-        assert!(!should_skip_scan_by_hash(false, "same", "same"));
-        assert!(!should_skip_scan_by_hash(true, "new", "old"));
+        assert!(should_skip_scan_by_hash(true, "same", "same", false));
+        assert!(!should_skip_scan_by_hash(true, "same", "same", true));
+        assert!(!should_skip_scan_by_hash(false, "same", "same", false));
+        assert!(!should_skip_scan_by_hash(true, "new", "old", false));
+    }
+
+    #[test]
+    fn pending_confirm_detected_per_target() {
+        let mut pending = std::collections::HashMap::new();
+        let now = std::time::Instant::now();
+        pending.insert("ai:7.0|inline|0".to_string(), now);
+        pending.insert("other:1.0|inline|0".to_string(), now);
+        assert!(has_pending_confirm_for_target(&pending, "ai:7.0"));
+        assert!(has_pending_confirm_for_target(&pending, "other:1.0"));
+        assert!(!has_pending_confirm_for_target(&pending, "ai:8.0"));
     }
 
     #[test]
