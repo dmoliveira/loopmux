@@ -106,6 +106,7 @@ Notes:
 - Imported files can contribute extra `runs`/`events` profiles.
 - Each profile uses the same run-config schema as normal YAML runs (`target`, `rules`, `poll`, `tail`, etc.).
 - Startup validates all selected profiles before launch and prints clear per-profile errors.
+- Migration guide: `docs/specs/config-first-migration.md`.
 
 ## Configuration
 
