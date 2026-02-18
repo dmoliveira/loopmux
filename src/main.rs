@@ -80,7 +80,16 @@ struct RunArgs {
     post: Option<String>,
     /// tmux target scope (session, session:window, or session:window.pane), overrides config.
     #[arg(long, short = 't')]
-    target: Option<String>,
+    target: Vec<String>,
+    /// File containing tmux targets (one per line, '#' comments ignored).
+    #[arg(long)]
+    targets_file: Vec<PathBuf>,
+    /// File source to scan (planned for mixed-source loop support).
+    #[arg(long)]
+    file: Vec<PathBuf>,
+    /// File containing file sources (one path per line, '#' comments ignored).
+    #[arg(long)]
+    files_file: Vec<PathBuf>,
     /// Iterations to run, overrides config.
     #[arg(long, short = 'n')]
     iterations: Option<u32>,
@@ -165,7 +174,16 @@ struct ValidateArgs {
     config: Option<PathBuf>,
     /// tmux target scope (session, session:window, or session:window.pane), overrides config.
     #[arg(long, short = 't')]
-    target: Option<String>,
+    target: Vec<String>,
+    /// File containing tmux targets (one per line, '#' comments ignored).
+    #[arg(long)]
+    targets_file: Vec<PathBuf>,
+    /// File source to validate (planned for mixed-source loop support).
+    #[arg(long)]
+    file: Vec<PathBuf>,
+    /// File containing file sources (one path per line, '#' comments ignored).
+    #[arg(long)]
+    files_file: Vec<PathBuf>,
     /// Iterations to run, overrides config.
     #[arg(long, short = 'n')]
     iterations: Option<u32>,
@@ -222,6 +240,8 @@ enum RunsAction {
 #[derive(Debug, Deserialize)]
 struct Config {
     target: Option<String>,
+    targets: Option<Vec<String>>,
+    files: Option<Vec<String>>,
     iterations: Option<u32>,
     infinite: Option<bool>,
     poll: Option<u64>,
@@ -237,6 +257,12 @@ struct Config {
     rules: Option<Vec<Rule>>,
     logging: Option<LoggingConfig>,
     template_vars: Option<TemplateVars>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct SourceInputs {
+    tmux_targets: Vec<String>,
+    file_paths: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -588,10 +614,23 @@ fn simulate(args: SimulateArgs) -> Result<()> {
 fn run(args: RunArgs) -> Result<()> {
     let args = hydrate_run_args_from_history(args)?;
     let identity = resolve_run_identity(args.name.as_deref());
-    let config = resolve_run_config(&args)?;
+    let mut config = resolve_run_config(&args)?;
+    let sources = collect_source_inputs(
+        &args.target,
+        &args.targets_file,
+        &args.file,
+        &args.files_file,
+    )?;
+    if !sources.tmux_targets.is_empty() {
+        config.target = sources.tmux_targets.first().cloned();
+        config.targets = Some(sources.tmux_targets.clone());
+    }
+    if !sources.file_paths.is_empty() {
+        config.files = Some(sources.file_paths);
+    }
     let resolved = resolve_config(
         config,
-        args.target.clone(),
+        None,
         args.iterations,
         false,
         args.tail,
@@ -636,7 +675,9 @@ fn hydrate_run_args_from_history(mut args: RunArgs) -> Result<RunArgs> {
     }
 
     let entry = select_history_entry(args.history_limit.unwrap_or(DEFAULT_HISTORY_LIMIT))?;
-    args.target = Some(entry.target);
+    if args.target.is_empty() {
+        args.target = vec![entry.target];
+    }
     args.prompt = Some(entry.prompt);
     args.trigger = Some(entry.trigger);
     if !args.trigger_exact_line {
@@ -2180,7 +2221,7 @@ fn save_run_history(history: &RunHistory) -> Result<()> {
 }
 
 fn history_signature(args: &RunArgs) -> Option<String> {
-    let target = args.target.as_ref()?;
+    let target = args.target.first()?;
     let prompt = args.prompt.as_ref()?;
     let trigger = args.trigger.as_ref()?;
     Some(format!(
@@ -2223,7 +2264,7 @@ fn store_run_history(args: &RunArgs) -> Result<()> {
         0,
         HistoryEntry {
             last_run: timestamp_now(),
-            target: args.target.clone().unwrap_or_default(),
+            target: args.target.first().cloned().unwrap_or_default(),
             prompt: args.prompt.clone().unwrap_or_default(),
             trigger: args.trigger.clone().unwrap_or_default(),
             trigger_exact_line: Some(args.trigger_exact_line),
@@ -3555,10 +3596,23 @@ fn random_between(min: u64, max: u64) -> Result<u64> {
 }
 
 fn validate(args: ValidateArgs) -> Result<()> {
-    let config = load_config(args.config.as_ref())?;
+    let mut config = load_config(args.config.as_ref())?;
+    let sources = collect_source_inputs(
+        &args.target,
+        &args.targets_file,
+        &args.file,
+        &args.files_file,
+    )?;
+    if !sources.tmux_targets.is_empty() {
+        config.target = sources.tmux_targets.first().cloned();
+        config.targets = Some(sources.tmux_targets.clone());
+    }
+    if !sources.file_paths.is_empty() {
+        config.files = Some(sources.file_paths);
+    }
     let resolved = resolve_config(
         config,
-        args.target,
+        None,
         args.iterations,
         args.skip_tmux,
         None,
@@ -3648,7 +3702,13 @@ fn resolve_run_config(args: &RunArgs) -> Result<Config> {
     };
 
     Ok(Config {
-        target: args.target.clone(),
+        target: args.target.first().cloned(),
+        targets: if args.target.is_empty() {
+            None
+        } else {
+            Some(args.target.clone())
+        },
+        files: None,
         iterations: args.iterations,
         infinite: None,
         poll: args.poll,
@@ -3664,6 +3724,63 @@ fn resolve_run_config(args: &RunArgs) -> Result<Config> {
         rules: Some(vec![rule]),
         logging: None,
         template_vars: None,
+    })
+}
+
+fn read_list_file_entries(path: &PathBuf) -> Result<Vec<String>> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read list file: {}", path.display()))?;
+    let mut values = Vec::new();
+    for (idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        values.push(trimmed.to_string());
+        if values.last().is_some_and(|value| value.is_empty()) {
+            bail!(
+                "invalid empty entry in {} at line {}",
+                path.display(),
+                idx + 1
+            );
+        }
+    }
+    Ok(values)
+}
+
+fn dedupe_preserve_order(values: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::new();
+    for value in values {
+        if seen.insert(value.clone()) {
+            deduped.push(value);
+        }
+    }
+    deduped
+}
+
+fn collect_source_inputs(
+    targets: &[String],
+    targets_file: &[PathBuf],
+    files: &[PathBuf],
+    files_file: &[PathBuf],
+) -> Result<SourceInputs> {
+    let mut merged_targets = targets.to_vec();
+    for path in targets_file {
+        merged_targets.extend(read_list_file_entries(path)?);
+    }
+
+    let mut merged_files = files
+        .iter()
+        .map(|value| value.display().to_string())
+        .collect::<Vec<_>>();
+    for path in files_file {
+        merged_files.extend(read_list_file_entries(path)?);
+    }
+
+    Ok(SourceInputs {
+        tmux_targets: dedupe_preserve_order(merged_targets),
+        file_paths: dedupe_preserve_order(merged_files),
     })
 }
 
@@ -4345,7 +4462,7 @@ struct BackoffState {
 
 fn resolve_config(
     mut config: Config,
-    target_override: Option<String>,
+    target_override: Option<Vec<String>>,
     iterations_override: Option<u32>,
     skip_tmux: bool,
     tail_override: Option<usize>,
@@ -4355,18 +4472,40 @@ fn resolve_config(
     trigger_edge_override: Option<bool>,
     recheck_before_send_override: Option<bool>,
 ) -> Result<ResolvedConfig> {
-    if let Some(target) = target_override {
-        config.target = Some(target);
+    if let Some(targets) = target_override {
+        if let Some(first) = targets.first() {
+            config.target = Some(first.clone());
+            config.targets = Some(targets);
+        }
     }
     if let Some(iterations) = iterations_override {
         config.iterations = Some(iterations);
         config.infinite = Some(false);
     }
 
+    let requested_targets = config
+        .targets
+        .clone()
+        .unwrap_or_else(|| config.target.clone().into_iter().collect());
+    if requested_targets.len() > 1 {
+        bail!(
+            "multiple tmux targets are parsed but not yet executable in a single run (got {}); this lands in bd-1l6",
+            requested_targets.len()
+        );
+    }
+    if let Some(files) = &config.files
+        && !files.is_empty()
+    {
+        bail!(
+            "file sources are parsed but not yet executable in run/validate; delivery continues in bd-1l6"
+        );
+    }
+
+    let target_input = requested_targets.first().map(String::as_str);
     let (target_scope, target_label) = if skip_tmux {
-        resolve_target_scope_offline(config.target.as_deref())?
+        resolve_target_scope_offline(target_input)?
     } else {
-        resolve_target_scope(config.target.as_deref())?
+        resolve_target_scope(target_input)?
     };
 
     let infinite = config.infinite.unwrap_or(false);
@@ -5200,7 +5339,10 @@ mod tests {
             exclude: None,
             pre: None,
             post: None,
-            target: Some("ai:5.0".to_string()),
+            target: vec!["ai:5.0".to_string()],
+            targets_file: Vec::new(),
+            file: Vec::new(),
+            files_file: Vec::new(),
             iterations: Some(1),
             tail: None,
             once: false,
@@ -5230,7 +5372,10 @@ mod tests {
             exclude: Some("PROD".to_string()),
             pre: Some("pre".to_string()),
             post: Some("post".to_string()),
-            target: Some("ai:5.0".to_string()),
+            target: vec!["ai:5.0".to_string()],
+            targets_file: Vec::new(),
+            file: Vec::new(),
+            files_file: Vec::new(),
             iterations: Some(2),
             tail: Some(123),
             once: true,
@@ -5279,7 +5424,10 @@ mod tests {
             exclude: None,
             pre: None,
             post: None,
-            target: Some("ai:5.0".to_string()),
+            target: vec!["ai:5.0".to_string()],
+            targets_file: Vec::new(),
+            file: Vec::new(),
+            files_file: Vec::new(),
             iterations: Some(2),
             tail: Some(1),
             once: true,
@@ -5355,6 +5503,52 @@ mod tests {
             matches!(scope, TargetScope::Window { ref session, ref window } if session == "ai" && window == "5")
         );
         assert_eq!(label, "ai:5.*");
+    }
+
+    #[test]
+    fn collect_source_inputs_merges_and_dedupes_in_order() {
+        let root = std::env::temp_dir().join(format!(
+            "loopmux-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+
+        let targets_file = root.join("targets.txt");
+        std::fs::write(&targets_file, "# comment\nai:5.0\nclaude:2.0\nai:5.0\n").unwrap();
+        let files_file = root.join("files.txt");
+        std::fs::write(
+            &files_file,
+            "# comment\n/tmp/a.log\n/tmp/b.log\n/tmp/a.log\n",
+        )
+        .unwrap();
+
+        let sources = collect_source_inputs(
+            &["codex:1.0".to_string(), "ai:5.0".to_string()],
+            std::slice::from_ref(&targets_file),
+            &[PathBuf::from("/tmp/a.log")],
+            std::slice::from_ref(&files_file),
+        )
+        .unwrap();
+
+        assert_eq!(
+            sources.tmux_targets,
+            vec!["codex:1.0", "ai:5.0", "claude:2.0"]
+        );
+        assert_eq!(sources.file_paths, vec!["/tmp/a.log", "/tmp/b.log"]);
+
+        let _ = std::fs::remove_file(targets_file);
+        let _ = std::fs::remove_file(files_file);
+        let _ = std::fs::remove_dir(root);
+    }
+
+    #[test]
+    fn collect_source_inputs_errors_for_missing_list_file() {
+        let missing = PathBuf::from("/tmp/loopmux-missing-targets-file.txt");
+        let err = collect_source_inputs(&[], &[missing], &[], &[]).unwrap_err();
+        assert!(err.to_string().contains("failed to read list file"));
     }
 
     #[test]
