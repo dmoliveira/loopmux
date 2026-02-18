@@ -267,6 +267,12 @@ enum ConfigAction {
         #[arg(long)]
         all: bool,
     },
+    /// Diagnose workspace profile setup and suggest fixes.
+    Doctor {
+        /// Diagnose all profiles (including disabled and non-matching cwd).
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -915,7 +921,103 @@ fn config_command(args: ConfigArgs) -> Result<()> {
     match action {
         ConfigAction::List { all } => config_list(args.config.as_ref(), all),
         ConfigAction::Validate { all } => config_validate(args.config.as_ref(), all),
+        ConfigAction::Doctor { all } => config_doctor(args.config.as_ref(), all),
     }
+}
+
+fn config_doctor(path_override: Option<&PathBuf>, all: bool) -> Result<()> {
+    let (config_path, profiles, cwd) = load_workspace_profile_context(path_override)?;
+    if profiles.is_empty() {
+        bail!(
+            "no runnable profiles found in {}; define a top-level profile or add `runs` entries with target/default_action/rules",
+            config_path.display()
+        );
+    }
+
+    let selected = selected_workspace_profiles(&profiles, &cwd, all);
+    let mut issues = Vec::new();
+    let mut warnings = Vec::new();
+
+    let mut seen_ids = HashSet::new();
+    for profile in &profiles {
+        if !seen_ids.insert(profile.id.clone()) {
+            issues.push(format!(
+                "duplicate profile id `{}`; give each profile a unique `id`",
+                profile.id
+            ));
+        }
+    }
+
+    let disabled_count = profiles.iter().filter(|profile| !profile.enabled).count();
+    if disabled_count > 0 {
+        warnings.push(format!(
+            "{} profile(s) are disabled; set `enabled: true` if they should auto-start",
+            disabled_count
+        ));
+    }
+
+    let enabled_unmatched = profiles
+        .iter()
+        .filter(|profile| profile.enabled)
+        .filter(|profile| !profile_matches_cwd(profile, &cwd))
+        .count();
+    if enabled_unmatched > 0 {
+        warnings.push(format!(
+            "{} enabled profile(s) do not match cwd `{}`; adjust `when.cwd_matches` or run from a matching folder",
+            enabled_unmatched,
+            cwd.display()
+        ));
+    }
+
+    if selected.is_empty() {
+        issues.push(format!(
+            "no selected profiles for startup (all={}): use `loopmux config list --all` to inspect selection",
+            yes_no(all)
+        ));
+    }
+
+    let mut tui_profiles = Vec::new();
+    for profile in &selected {
+        match validate_workspace_profile(profile) {
+            Ok(resolved) => {
+                if resolved.tui {
+                    tui_profiles.push(profile.id.clone());
+                }
+            }
+            Err(err) => issues.push(format!("profile={} invalid: {err}", profile.id)),
+        }
+    }
+    if tui_profiles.len() > 1 {
+        issues.push(format!(
+            "multiple selected profiles enable `tui` ({}); keep `tui: true` on only one profile",
+            tui_profiles.join(", ")
+        ));
+    }
+
+    println!("Workspace config: {}", config_path.display());
+    println!("Current cwd: {}", cwd.display());
+    println!("Profiles discovered: {}", profiles.len());
+    println!("Profiles selected: {}", selected.len());
+
+    if warnings.is_empty() {
+        println!("Warnings: none");
+    } else {
+        println!("Warnings:");
+        for warning in warnings {
+            println!("- {warning}");
+        }
+    }
+
+    if issues.is_empty() {
+        println!("Doctor result: healthy");
+        return Ok(());
+    }
+
+    bail!(
+        "doctor found {} issue(s):\n- {}",
+        issues.len(),
+        issues.join("\n- ")
+    )
 }
 
 fn config_list(path_override: Option<&PathBuf>, all: bool) -> Result<()> {
@@ -6402,6 +6504,73 @@ events:
         let path = PathBuf::from("/tmp/loopmux-custom.yaml");
         let resolved = resolve_workspace_config_path(Some(&path)).unwrap();
         assert_eq!(resolved, path);
+    }
+
+    #[test]
+    fn config_doctor_reports_duplicate_profile_ids() {
+        let root = std::env::temp_dir().join(format!(
+            "loopmux-doctor-dup-{}",
+            OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let config_path = root.join("config.yaml");
+        std::fs::write(
+            &config_path,
+            r#"
+runs:
+  - id: same
+    target: "ai:1.0"
+    iterations: 1
+    default_action:
+      prompt: "a"
+  - id: same
+    target: "ai:2.0"
+    iterations: 1
+    default_action:
+      prompt: "b"
+"#,
+        )
+        .unwrap();
+
+        let err = config_doctor(Some(&config_path), true).unwrap_err();
+        assert!(err.to_string().contains("duplicate profile id"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn config_doctor_reports_multiple_tui_profiles() {
+        let root = std::env::temp_dir().join(format!(
+            "loopmux-doctor-tui-{}",
+            OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let config_path = root.join("config.yaml");
+        std::fs::write(
+            &config_path,
+            r#"
+runs:
+  - id: one
+    target: "ai:1.0"
+    iterations: 1
+    tui: true
+    default_action:
+      prompt: "a"
+  - id: two
+    target: "ai:2.0"
+    iterations: 1
+    tui: true
+    default_action:
+      prompt: "b"
+"#,
+        )
+        .unwrap();
+
+        let err = config_doctor(Some(&config_path), true).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("multiple selected profiles enable `tui`")
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
