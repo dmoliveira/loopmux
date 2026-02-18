@@ -273,6 +273,12 @@ enum ConfigAction {
         #[arg(long)]
         all: bool,
     },
+    /// Dry-run one profile by id without launching a process.
+    Test {
+        /// Profile id to dry-run.
+        #[arg(long)]
+        profile: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -922,7 +928,61 @@ fn config_command(args: ConfigArgs) -> Result<()> {
         ConfigAction::List { all } => config_list(args.config.as_ref(), all),
         ConfigAction::Validate { all } => config_validate(args.config.as_ref(), all),
         ConfigAction::Doctor { all } => config_doctor(args.config.as_ref(), all),
+        ConfigAction::Test { profile } => config_test(args.config.as_ref(), &profile),
     }
+}
+
+fn config_test(path_override: Option<&PathBuf>, profile_id: &str) -> Result<()> {
+    let (config_path, profiles, cwd) = load_workspace_profile_context(path_override)?;
+    let matches = profiles
+        .iter()
+        .filter(|profile| profile.id == profile_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    if matches.is_empty() {
+        bail!(
+            "profile `{}` not found in {}; run `loopmux config list --all` to discover ids",
+            profile_id,
+            config_path.display()
+        );
+    }
+    if matches.len() > 1 {
+        bail!(
+            "profile id `{}` is duplicated ({} entries); fix ids before testing",
+            profile_id,
+            matches.len()
+        );
+    }
+
+    let profile = &matches[0];
+    let cwd_match = profile_matches_cwd(profile, &cwd);
+    let selected_for_startup = profile.enabled && cwd_match;
+
+    let resolved = validate_workspace_profile(profile).with_context(|| {
+        format!(
+            "profile `{}` failed validation; run `loopmux config doctor --all` for guidance",
+            profile_id
+        )
+    })?;
+
+    println!("Config file: {}", config_path.display());
+    println!("Profile id: {}", profile.id);
+    println!("Source: {}", profile.source_path.display());
+    println!("Enabled: {}", yes_no(profile.enabled));
+    println!("Cwd match: {} ({})", yes_no(cwd_match), cwd.display());
+    println!("Selected for startup: {}", yes_no(selected_for_startup));
+    println!("Target: {}", resolved.target_label);
+    println!("Rules: {}", resolved.rules.len());
+    println!("Mode: {}", if resolved.tui { "tui" } else { "plain" });
+    println!(
+        "Capture: {}",
+        match resolved.capture_window {
+            CaptureWindow::Tail(lines) => format!("tail({lines})"),
+            CaptureWindow::Head(lines) => format!("head({lines})"),
+        }
+    );
+    println!("Dry-run OK: profile is valid and ready.");
+    Ok(())
 }
 
 fn config_doctor(path_override: Option<&PathBuf>, all: bool) -> Result<()> {
@@ -6570,6 +6630,63 @@ runs:
             err.to_string()
                 .contains("multiple selected profiles enable `tui`")
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn config_test_reports_missing_profile() {
+        let root = std::env::temp_dir().join(format!(
+            "loopmux-config-test-missing-{}",
+            OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let config_path = root.join("config.yaml");
+        std::fs::write(
+            &config_path,
+            r#"
+runs:
+  - id: one
+    target: "ai:1.0"
+    iterations: 1
+    default_action:
+      prompt: "a"
+"#,
+        )
+        .unwrap();
+
+        let err = config_test(Some(&config_path), "missing").unwrap_err();
+        assert!(err.to_string().contains("not found"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn config_test_reports_duplicate_profile_ids() {
+        let root = std::env::temp_dir().join(format!(
+            "loopmux-config-test-dup-{}",
+            OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let config_path = root.join("config.yaml");
+        std::fs::write(
+            &config_path,
+            r#"
+runs:
+  - id: same
+    target: "ai:1.0"
+    iterations: 1
+    default_action:
+      prompt: "a"
+  - id: same
+    target: "ai:2.0"
+    iterations: 1
+    default_action:
+      prompt: "b"
+"#,
+        )
+        .unwrap();
+
+        let err = config_test(Some(&config_path), "same").unwrap_err();
+        assert!(err.to_string().contains("duplicated"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
