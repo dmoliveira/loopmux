@@ -201,6 +201,7 @@ loopmux init --output loop.yaml
 loopmux config list [--config ~/.config/loopmux/config.yaml] [--all]
 loopmux config validate [--config ~/.config/loopmux/config.yaml] [--all]
 loopmux config doctor [--config ~/.config/loopmux/config.yaml] [--all]
+loopmux config test --profile <id> [--config ~/.config/loopmux/config.yaml]
 loopmux runs ls
 loopmux runs tui
 loopmux runs stop <run-id-or-name>
