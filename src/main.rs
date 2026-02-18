@@ -3,12 +3,12 @@ use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use crossterm::QueueableCommand;
 use crossterm::cursor::MoveTo;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType};
-use crossterm::QueueableCommand;
+use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode};
 use regex::Regex;
 use serde::Deserialize;
 use serde::Serialize;
@@ -3672,11 +3672,7 @@ fn log_line_date(line: &str) -> Option<&str> {
     let close = line.find(']')?;
     let ts = line.get(1..close)?;
     let date = ts.split('T').next()?;
-    if date.len() == 10 {
-        Some(date)
-    } else {
-        None
-    }
+    if date.len() == 10 { Some(date) } else { None }
 }
 
 fn parse_log_timestamp(line: &str) -> Option<OffsetDateTime> {
