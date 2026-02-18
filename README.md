@@ -197,6 +197,8 @@ loopmux run --config loop.yaml [--target ai:5.0] [--iterations 10]
 loopmux run --config loop.yaml --dry-run
 loopmux validate --config loop.yaml [--skip-tmux]
 loopmux init --output loop.yaml
+loopmux config list [--config ~/.config/loopmux/config.yaml] [--all]
+loopmux config validate [--config ~/.config/loopmux/config.yaml] [--all]
 loopmux runs ls
 loopmux runs tui
 loopmux runs stop <run-id-or-name>

@@ -3,12 +3,12 @@ use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use crossterm::QueueableCommand;
 use crossterm::cursor::MoveTo;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType};
-use crossterm::QueueableCommand;
+use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode};
 use regex::Regex;
 use serde::Deserialize;
 use serde::Serialize;
@@ -45,6 +45,8 @@ enum Command {
     Simulate(SimulateArgs),
     /// Manage active local loopmux runs.
     Runs(RunsArgs),
+    /// Inspect and validate workspace startup profiles.
+    Config(ConfigArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -240,6 +242,31 @@ struct SimulateArgs {
 struct RunsArgs {
     #[command(subcommand)]
     action: Option<RunsAction>,
+}
+
+#[derive(Debug, Parser)]
+#[command(after_help = concat!("Version: ", env!("CARGO_PKG_VERSION"), "\n"))]
+struct ConfigArgs {
+    #[arg(long, short = 'c')]
+    config: Option<PathBuf>,
+    #[command(subcommand)]
+    action: Option<ConfigAction>,
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigAction {
+    /// List discovered profiles and startup selection status.
+    List {
+        /// Show all profiles (including disabled and non-matching cwd).
+        #[arg(long)]
+        all: bool,
+    },
+    /// Validate profiles and print actionable per-profile errors.
+    Validate {
+        /// Validate all profiles (including disabled and non-matching cwd).
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -795,6 +822,7 @@ fn main() -> Result<()> {
         Some(Command::Init(args)) => init(args),
         Some(Command::Simulate(args)) => simulate(args),
         Some(Command::Runs(args)) => runs(args),
+        Some(Command::Config(args)) => config_command(args),
         None => run_default_workspace_profiles(),
     }
 }
@@ -882,16 +910,153 @@ fn runs(args: RunsArgs) -> Result<()> {
     }
 }
 
-fn run_default_workspace_profiles() -> Result<()> {
-    let config_path = default_workspace_config_path()?;
-    if !config_path.exists() {
+fn config_command(args: ConfigArgs) -> Result<()> {
+    let action = args.action.unwrap_or(ConfigAction::List { all: false });
+    match action {
+        ConfigAction::List { all } => config_list(args.config.as_ref(), all),
+        ConfigAction::Validate { all } => config_validate(args.config.as_ref(), all),
+    }
+}
+
+fn config_list(path_override: Option<&PathBuf>, all: bool) -> Result<()> {
+    let (config_path, profiles, cwd) = load_workspace_profile_context(path_override)?;
+    if profiles.is_empty() {
+        println!("No profiles found in {}", config_path.display());
+        return Ok(());
+    }
+    let selected_ids = selected_workspace_profiles(&profiles, &cwd, all)
+        .into_iter()
+        .map(|profile| profile.id)
+        .collect::<HashSet<_>>();
+
+    println!("Workspace config: {}", config_path.display());
+    println!("Current cwd: {}", cwd.display());
+    println!(
+        "Profiles (all={}):",
+        if all { "yes" } else { "startup-selection" }
+    );
+    for profile in &profiles {
+        let cwd_match = profile_matches_cwd(profile, &cwd);
+        let selected = selected_ids.contains(&profile.id);
+        println!(
+            "- id={} enabled={} cwd_match={} selected={} source={}",
+            profile.id,
+            yes_no(profile.enabled),
+            yes_no(cwd_match),
+            yes_no(selected),
+            profile.source_path.display()
+        );
+    }
+    println!(
+        "Selected profiles: {} of {}",
+        selected_ids.len(),
+        profiles.len()
+    );
+    Ok(())
+}
+
+fn config_validate(path_override: Option<&PathBuf>, all: bool) -> Result<()> {
+    let (config_path, profiles, cwd) = load_workspace_profile_context(path_override)?;
+    let selected = selected_workspace_profiles(&profiles, &cwd, all);
+    if selected.is_empty() {
+        println!(
+            "No profiles selected for validation in {} (cwd={})",
+            config_path.display(),
+            cwd.display()
+        );
+        return Ok(());
+    }
+
+    let mut errors = Vec::new();
+    let mut validated = 0usize;
+    for profile in &selected {
+        match validate_workspace_profile(profile) {
+            Ok(resolved) => {
+                validated += 1;
+                println!(
+                    "OK profile={} target={} rules={} mode={}",
+                    profile.id,
+                    resolved.target_label,
+                    resolved.rules.len(),
+                    if resolved.tui { "tui" } else { "plain" }
+                );
+            }
+            Err(err) => errors.push(format!("profile={} error={err}", profile.id)),
+        }
+    }
+    if !errors.is_empty() {
         bail!(
-            "no command provided and default config not found at {}; run `loopmux run ...` or create that config",
-            config_path.display()
+            "validation failed for {}/{} selected profiles in {}:\n- {}",
+            errors.len(),
+            selected.len(),
+            config_path.display(),
+            errors.join("\n- ")
         );
     }
 
+    println!(
+        "Validation OK: {} profile(s) validated from {}",
+        validated,
+        config_path.display()
+    );
+    Ok(())
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
+
+fn load_workspace_profile_context(
+    path_override: Option<&PathBuf>,
+) -> Result<(PathBuf, Vec<ResolvedRunProfile>, PathBuf)> {
+    let config_path = resolve_workspace_config_path(path_override)?;
+    if !config_path.exists() {
+        bail!("workspace config not found at {}", config_path.display());
+    }
     let profiles = load_workspace_profiles(&config_path)?;
+    let cwd = std::env::current_dir().context("failed to read current working directory")?;
+    Ok((config_path, profiles, cwd))
+}
+
+fn resolve_workspace_config_path(path_override: Option<&PathBuf>) -> Result<PathBuf> {
+    if let Some(path) = path_override {
+        return Ok(path.clone());
+    }
+    default_workspace_config_path()
+}
+
+fn selected_workspace_profiles(
+    profiles: &[ResolvedRunProfile],
+    cwd: &PathBuf,
+    all: bool,
+) -> Vec<ResolvedRunProfile> {
+    profiles
+        .iter()
+        .filter(|profile| all || profile.enabled)
+        .filter(|profile| all || profile_matches_cwd(profile, cwd))
+        .cloned()
+        .collect()
+}
+
+fn validate_workspace_profile(profile: &ResolvedRunProfile) -> Result<ResolvedConfig> {
+    resolve_config(
+        profile.config.clone(),
+        None,
+        None,
+        false,
+        None,
+        None,
+        false,
+        false,
+        false,
+        None,
+        None,
+        Some(profile.id.clone()),
+    )
+}
+
+fn run_default_workspace_profiles() -> Result<()> {
+    let (config_path, profiles, cwd) = load_workspace_profile_context(None)?;
     if profiles.is_empty() {
         bail!(
             "default config loaded from {} but no runnable profiles were defined",
@@ -899,12 +1064,7 @@ fn run_default_workspace_profiles() -> Result<()> {
         );
     }
 
-    let cwd = std::env::current_dir().context("failed to read current working directory")?;
-    let selected = profiles
-        .into_iter()
-        .filter(|profile| profile.enabled)
-        .filter(|profile| profile_matches_cwd(profile, &cwd))
-        .collect::<Vec<_>>();
+    let selected = selected_workspace_profiles(&profiles, &cwd, false);
 
     if selected.is_empty() {
         println!(
@@ -919,20 +1079,7 @@ fn run_default_workspace_profiles() -> Result<()> {
     let mut validation_errors = Vec::new();
     let mut tui_profiles = Vec::new();
     for profile in &selected {
-        match resolve_config(
-            profile.config.clone(),
-            None,
-            None,
-            false,
-            None,
-            None,
-            false,
-            false,
-            false,
-            None,
-            None,
-            Some(profile.id.clone()),
-        ) {
+        match validate_workspace_profile(profile) {
             Ok(resolved) => {
                 if resolved.tui {
                     tui_profiles.push(profile.id.clone());
@@ -5119,11 +5266,7 @@ fn log_line_date(line: &str) -> Option<&str> {
     let close = line.find(']')?;
     let ts = line.get(1..close)?;
     let date = ts.split('T').next()?;
-    if date.len() == 10 {
-        Some(date)
-    } else {
-        None
-    }
+    if date.len() == 10 { Some(date) } else { None }
 }
 
 fn parse_log_timestamp(line: &str) -> Option<OffsetDateTime> {
@@ -6206,6 +6349,59 @@ events:
         assert!(ids.contains(&"imported-run".to_string()));
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn selected_workspace_profiles_respects_enabled_and_cwd() {
+        let cwd = PathBuf::from("/tmp/demo");
+        let profiles = vec![
+            ResolvedRunProfile {
+                id: "match-enabled".to_string(),
+                source_path: PathBuf::from("/tmp/config.yaml"),
+                config: Config::default(),
+                enabled: true,
+                when: RunProfileWhen {
+                    cwd_matches: Some(vec!["/tmp/*".to_string()]),
+                },
+            },
+            ResolvedRunProfile {
+                id: "match-disabled".to_string(),
+                source_path: PathBuf::from("/tmp/config.yaml"),
+                config: Config::default(),
+                enabled: false,
+                when: RunProfileWhen {
+                    cwd_matches: Some(vec!["/tmp/*".to_string()]),
+                },
+            },
+            ResolvedRunProfile {
+                id: "non-match-enabled".to_string(),
+                source_path: PathBuf::from("/tmp/config.yaml"),
+                config: Config::default(),
+                enabled: true,
+                when: RunProfileWhen {
+                    cwd_matches: Some(vec!["/repo/*".to_string()]),
+                },
+            },
+        ];
+
+        let startup = selected_workspace_profiles(&profiles, &cwd, false)
+            .into_iter()
+            .map(|profile| profile.id)
+            .collect::<Vec<_>>();
+        assert_eq!(startup, vec!["match-enabled".to_string()]);
+
+        let all = selected_workspace_profiles(&profiles, &cwd, true)
+            .into_iter()
+            .map(|profile| profile.id)
+            .collect::<Vec<_>>();
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn resolve_workspace_config_path_uses_override() {
+        let path = PathBuf::from("/tmp/loopmux-custom.yaml");
+        let resolved = resolve_workspace_config_path(Some(&path)).unwrap();
+        assert_eq!(resolved, path);
     }
 
     #[test]
