@@ -395,6 +395,15 @@ struct FleetRunRecord {
     last_seen: String,
     #[serde(default)]
     version: String,
+    #[serde(default)]
+    events: Vec<FleetRunEvent>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct FleetRunEvent {
+    timestamp: String,
+    kind: String,
+    detail: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -426,6 +435,81 @@ struct FleetListedRun {
     record: FleetRunRecord,
     stale: bool,
     version_mismatch: bool,
+    health_score: u8,
+    health_label: &'static str,
+    needs_attention: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FleetSortMode {
+    LastSeen,
+    Sends,
+    Health,
+    Name,
+    State,
+}
+
+impl FleetSortMode {
+    fn next(self) -> Self {
+        match self {
+            FleetSortMode::LastSeen => FleetSortMode::Sends,
+            FleetSortMode::Sends => FleetSortMode::Health,
+            FleetSortMode::Health => FleetSortMode::Name,
+            FleetSortMode::Name => FleetSortMode::State,
+            FleetSortMode::State => FleetSortMode::LastSeen,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            FleetSortMode::LastSeen => "last_seen",
+            FleetSortMode::Sends => "sends",
+            FleetSortMode::Health => "health",
+            FleetSortMode::Name => "name",
+            FleetSortMode::State => "state",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FleetViewPreset {
+    Default,
+    NeedsAttention,
+    MismatchOnly,
+    Holding,
+}
+
+impl FleetViewPreset {
+    fn next(self) -> Self {
+        match self {
+            FleetViewPreset::Default => FleetViewPreset::NeedsAttention,
+            FleetViewPreset::NeedsAttention => FleetViewPreset::MismatchOnly,
+            FleetViewPreset::MismatchOnly => FleetViewPreset::Holding,
+            FleetViewPreset::Holding => FleetViewPreset::Default,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            FleetViewPreset::Default => "default",
+            FleetViewPreset::NeedsAttention => "needs-attention",
+            FleetViewPreset::MismatchOnly => "mismatch-only",
+            FleetViewPreset::Holding => "holding-focus",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum PendingFleetAction {
+    SingleStop {
+        run_id: String,
+        run_name: String,
+    },
+    Bulk {
+        command: FleetControlCommand,
+        run_ids: Vec<String>,
+        run_names: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -691,18 +775,20 @@ impl FleetRunRegistry {
         let host = std::env::var("HOSTNAME")
             .or_else(|_| std::env::var("HOST"))
             .unwrap_or_else(|_| "localhost".to_string());
-        let record = FleetRunRecord {
+        let state_label = fleet_state_label(state).to_string();
+        let base_record = FleetRunRecord {
             id: self.identity.id.clone(),
             name: self.identity.name.clone(),
             pid: std::process::id(),
             host,
             target: target.to_string(),
-            state: fleet_state_label(state).to_string(),
+            state: state_label.clone(),
             sends,
             poll_seconds,
             started_at: now.clone(),
-            last_seen: now,
+            last_seen: now.clone(),
             version: LOOPMUX_VERSION.to_string(),
+            events: Vec::new(),
         };
 
         let mut record = if self.state_path.exists() {
@@ -710,16 +796,59 @@ impl FleetRunRegistry {
                 .ok()
                 .and_then(|raw| serde_json::from_str::<FleetRunRecord>(&raw).ok())
             {
-                Some(existing) => FleetRunRecord {
-                    started_at: existing.started_at,
-                    ..record
-                },
-                None => record,
+                Some(existing) => {
+                    let mut events = existing.events;
+                    if existing.state != state_label {
+                        events.push(FleetRunEvent {
+                            timestamp: now.clone(),
+                            kind: "state".to_string(),
+                            detail: format!("{} -> {}", existing.state, state_label),
+                        });
+                    }
+                    if sends > existing.sends {
+                        events.push(FleetRunEvent {
+                            timestamp: now.clone(),
+                            kind: "send".to_string(),
+                            detail: format!("+{} sends (total {})", sends - existing.sends, sends),
+                        });
+                    }
+                    if existing.target != target {
+                        events.push(FleetRunEvent {
+                            timestamp: now.clone(),
+                            kind: "target".to_string(),
+                            detail: format!("{} -> {}", existing.target, target),
+                        });
+                    }
+                    if events.len() > 24 {
+                        let keep_from = events.len() - 24;
+                        events.drain(0..keep_from);
+                    }
+                    FleetRunRecord {
+                        started_at: existing.started_at,
+                        events,
+                        ..base_record
+                    }
+                }
+                None => {
+                    let mut record = base_record;
+                    record.events.push(FleetRunEvent {
+                        timestamp: now.clone(),
+                        kind: "start".to_string(),
+                        detail: format!("run started on {}", target),
+                    });
+                    record
+                }
             }
         } else {
+            let mut record = base_record;
+            record.events.push(FleetRunEvent {
+                timestamp: now.clone(),
+                kind: "start".to_string(),
+                detail: format!("run started on {}", target),
+            });
             record
         };
-        record.last_seen = timestamp_now();
+        record.last_seen = now;
         let content = serde_json::to_string_pretty(&record)?;
         std::fs::write(&self.state_path, content)?;
         Ok(())
@@ -790,18 +919,79 @@ fn load_fleet_runs() -> Result<Vec<FleetListedRun>> {
         let Ok(record) = serde_json::from_str::<FleetRunRecord>(&raw) else {
             continue;
         };
+        let stale = is_fleet_record_stale(&record);
+        let version_mismatch = is_version_mismatch(&record.version);
+        let (health_score, health_label) = fleet_health(&record, stale, version_mismatch);
+        let needs_attention = stale
+            || version_mismatch
+            || health_score < 70
+            || record.state == "error"
+            || record.state == "stopped";
         runs.push(FleetListedRun {
-            stale: is_fleet_record_stale(&record),
-            version_mismatch: is_version_mismatch(&record.version),
+            stale,
+            version_mismatch,
+            health_score,
+            health_label,
+            needs_attention,
             record,
         });
     }
-    runs.sort_by(|a, b| b.record.last_seen.cmp(&a.record.last_seen));
     Ok(runs)
 }
 
 fn is_version_mismatch(run_version: &str) -> bool {
     run_version.trim().is_empty() || run_version.trim() != LOOPMUX_VERSION
+}
+
+fn fleet_health(
+    record: &FleetRunRecord,
+    stale: bool,
+    version_mismatch: bool,
+) -> (u8, &'static str) {
+    if stale {
+        return (20, "critical");
+    }
+
+    let mut score: i32 = 100;
+    if version_mismatch {
+        score -= 25;
+    }
+    if record.state == "holding" {
+        score -= 8;
+    }
+    if record.state == "error" {
+        score -= 35;
+    }
+
+    if let Some(age_seconds) = fleet_last_seen_age_seconds(record) {
+        let budget = (record.poll_seconds.max(1) * 3 + 5) as i64;
+        if age_seconds > budget {
+            score -= 25;
+        } else if age_seconds > budget / 2 {
+            score -= 10;
+        }
+    } else {
+        score -= 20;
+    }
+
+    let score = score.clamp(0, 100) as u8;
+    let label = if score >= 85 {
+        "healthy"
+    } else if score >= 65 {
+        "watch"
+    } else {
+        "critical"
+    };
+    (score, label)
+}
+
+fn fleet_last_seen_age_seconds(record: &FleetRunRecord) -> Option<i64> {
+    let last_seen = OffsetDateTime::parse(
+        &record.last_seen,
+        &time::format_description::well_known::Rfc3339,
+    )
+    .ok()?;
+    Some((OffsetDateTime::now_utc() - last_seen).whole_seconds())
 }
 
 fn is_fleet_record_stale(record: &FleetRunRecord) -> bool {
@@ -834,15 +1024,34 @@ fn fleet_manager_visible_runs(
     mismatch_only: bool,
     state_filter: FleetStateFilter,
     search_query: &str,
+    sort_mode: FleetSortMode,
+    view_preset: FleetViewPreset,
 ) -> Vec<FleetListedRun> {
     let search = search_query.trim().to_ascii_lowercase();
-    runs.iter()
+    let mut visible: Vec<FleetListedRun> = runs
+        .iter()
         .filter(|run| show_stale || !run.stale)
         .filter(|run| !mismatch_only || run.version_mismatch)
         .filter(|run| state_filter.allows(run))
+        .filter(|run| {
+            if view_preset == FleetViewPreset::NeedsAttention {
+                run.needs_attention
+            } else {
+                true
+            }
+        })
         .filter(|run| search.is_empty() || run_matches_query(run, &search))
         .cloned()
-        .collect()
+        .collect();
+
+    visible.sort_by(|a, b| match sort_mode {
+        FleetSortMode::LastSeen => b.record.last_seen.cmp(&a.record.last_seen),
+        FleetSortMode::Sends => b.record.sends.cmp(&a.record.sends),
+        FleetSortMode::Health => a.health_score.cmp(&b.health_score),
+        FleetSortMode::Name => a.record.name.cmp(&b.record.name),
+        FleetSortMode::State => a.record.state.cmp(&b.record.state),
+    });
+    visible
 }
 
 fn run_matches_query(run: &FleetListedRun, query: &str) -> bool {
@@ -890,15 +1099,20 @@ fn fleet_detail_lines(
     state_filter: FleetStateFilter,
     search_query: &str,
     counts: (usize, usize, usize, usize),
-    pending_stop_run_id: Option<&str>,
+    sort_mode: FleetSortMode,
+    view_preset: FleetViewPreset,
+    marked_count: usize,
+    pending_action: Option<&PendingFleetAction>,
 ) -> Vec<String> {
     let mut lines = Vec::new();
     lines.push("Details".to_string());
     lines.push(format!(
-        "filters stale={} mismatch_only={} state={} search={}",
+        "preset={} stale={} mismatch_only={} state={} sort={} search={}",
+        view_preset.label(),
         if show_stale { "on" } else { "off" },
         if mismatch_only { "on" } else { "off" },
         state_filter.label(),
+        sort_mode.label(),
         if search_query.trim().is_empty() {
             "<none>"
         } else {
@@ -906,11 +1120,31 @@ fn fleet_detail_lines(
         }
     ));
     lines.push(format!(
-        "summary active={} holding={} stale={} mismatch={}",
-        counts.0, counts.1, counts.2, counts.3
+        "summary active={} holding={} stale={} mismatch={} marked={}",
+        counts.0, counts.1, counts.2, counts.3, marked_count
     ));
-    if let Some(id) = pending_stop_run_id {
-        lines.push(format!("pending stop confirmation for id={id}"));
+
+    if let Some(action) = pending_action {
+        match action {
+            PendingFleetAction::SingleStop { run_name, .. } => lines.push(format!(
+                "pending: stop {} (press Enter to confirm, c to cancel)",
+                run_name
+            )),
+            PendingFleetAction::Bulk {
+                command, run_names, ..
+            } => {
+                lines.push(format!(
+                    "pending: bulk {} for {} run(s)",
+                    fleet_command_label(*command),
+                    run_names.len()
+                ));
+                lines.push(format!(
+                    "targets: {}",
+                    truncate_text(&run_names.join(", "), 70, true)
+                ));
+                lines.push("press Enter to confirm, c to cancel".to_string());
+            }
+        }
     }
     lines.push(String::new());
 
@@ -936,21 +1170,45 @@ fn fleet_detail_lines(
                 "match"
             }
         ));
+        lines.push(format!(
+            "health: {} ({}){}",
+            run.health_label,
+            run.health_score,
+            if run.needs_attention {
+                " attention"
+            } else {
+                ""
+            }
+        ));
         lines.push(format!("started: {}", run.record.started_at));
         lines.push(format!("last_seen: {}", run.record.last_seen));
+
+        lines.push(String::new());
+        lines.push("timeline (latest)".to_string());
+        if run.record.events.is_empty() {
+            lines.push("- no events yet".to_string());
+        } else {
+            for event in run.record.events.iter().rev().take(6) {
+                lines.push(format!(
+                    "- {} {} {}",
+                    truncate_text(&event.timestamp, 19, false),
+                    event.kind,
+                    truncate_text(&event.detail, 48, true)
+                ));
+            }
+        }
     } else {
         lines.push("no run selected".to_string());
     }
 
     lines.push(String::new());
     lines.push("actions".to_string());
+    lines.push("space mark/unmark selected run, a clears marks".to_string());
+    lines.push("S/H/P/N/U arm bulk stop/hold/resume/next/renew".to_string());
+    lines.push("1-4 presets, p cycles presets, o cycles sort".to_string());
     lines.push("/ enter search mode (name/id/target/state/ver)".to_string());
-    lines.push("f cycles state filter all/active/holding/stale".to_string());
-    lines.push("enter jump to selected target".to_string());
-    lines.push("i copy selected run id".to_string());
-    lines.push("y copy `loopmux runs stop <id>` snippet".to_string());
-    lines.push("h/r/n/R/s control selected run".to_string());
-    lines.push("x toggle stale, v mismatch filter".to_string());
+    lines.push("h/r/n/R single control, s safe stop, enter jump/confirm".to_string());
+    lines.push("i copy run id, y copy stop snippet, x/v/f filters".to_string());
     lines
 }
 
@@ -982,7 +1240,8 @@ fn resolve_fleet_target(target: &str, runs: &[FleetListedRun]) -> Result<FleetLi
 }
 
 fn print_fleet_runs() -> Result<()> {
-    let runs = load_fleet_runs()?;
+    let mut runs = load_fleet_runs()?;
+    runs.sort_by(|a, b| b.record.last_seen.cmp(&a.record.last_seen));
     if runs.is_empty() {
         println!("No local loopmux runs found.");
         return Ok(());
@@ -1135,34 +1394,67 @@ fn run_fleet_manager_tui_embedded() -> Result<()> {
 
 fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
     let mut selected: usize = 0;
+    let mut selected_run_id: Option<String> = None;
     let mut message = String::from("fleet manager ready");
     let mut show_stale = false;
     let mut mismatch_only = false;
     let mut state_filter = FleetStateFilter::All;
+    let mut sort_mode = FleetSortMode::LastSeen;
+    let mut view_preset = FleetViewPreset::Default;
     let mut search_query = String::new();
     let mut search_mode = false;
-    let mut pending_stop_run_id: Option<String> = None;
-    let mut last_frame = String::new();
+    let mut selected_ids: HashSet<String> = HashSet::new();
+    let mut pending_action: Option<PendingFleetAction> = None;
+    let mut last_lines: Vec<String> = Vec::new();
+    let mut force_full_redraw = true;
+    let mut last_refresh = std::time::Instant::now() - Duration::from_secs(1);
+    let refresh_interval = Duration::from_millis(450);
+    let mut needs_refresh = true;
+
+    let mut all_runs: Vec<FleetListedRun> = Vec::new();
+    let mut runs: Vec<FleetListedRun> = Vec::new();
+    let mut counts = (0, 0, 0, 0);
+
     loop {
-        let all_runs = load_fleet_runs()?;
-        let runs = fleet_manager_visible_runs(
-            &all_runs,
-            show_stale,
-            mismatch_only,
-            state_filter,
-            &search_query,
-        );
-        let (active_count, holding_count, stale_count, mismatch_count) =
-            fleet_manager_counts(&all_runs);
-        if !runs.is_empty() && selected >= runs.len() {
-            selected = runs.len() - 1;
-        } else if runs.is_empty() {
-            selected = 0;
+        if needs_refresh || last_refresh.elapsed() >= refresh_interval {
+            all_runs = load_fleet_runs()?;
+            runs = fleet_manager_visible_runs(
+                &all_runs,
+                show_stale,
+                mismatch_only,
+                state_filter,
+                &search_query,
+                sort_mode,
+                view_preset,
+            );
+            counts = fleet_manager_counts(&all_runs);
+            last_refresh = std::time::Instant::now();
+            needs_refresh = false;
+
+            let run_ids: HashSet<&str> =
+                all_runs.iter().map(|run| run.record.id.as_str()).collect();
+            selected_ids.retain(|id| run_ids.contains(id.as_str()));
+
+            if runs.is_empty() {
+                selected = 0;
+                selected_run_id = None;
+                pending_action = None;
+            } else if let Some(id) = selected_run_id.as_deref() {
+                if let Some(pos) = runs.iter().position(|run| run.record.id == id) {
+                    selected = pos;
+                } else {
+                    selected = selected.min(runs.len() - 1);
+                    selected_run_id = Some(runs[selected].record.id.clone());
+                }
+            } else {
+                selected = selected.min(runs.len() - 1);
+                selected_run_id = Some(runs[selected].record.id.clone());
+            }
         }
 
         let (width, height) = crossterm::terminal::size().unwrap_or((120, 30));
         let header = format!(
-            "loopmux v{} fleet manager | runs={}/{}{}{} | filter={} search={} | active={} holding={} stale={} mismatch={} | selected={} | q/esc {}",
+            "loopmux v{} fleet manager | runs={}/{}{}{} | preset={} filter={} sort={} search={} | active={} holding={} stale={} mismatch={} | selected={} | q/esc {}",
             LOOPMUX_VERSION,
             runs.len(),
             all_runs.len(),
@@ -1172,16 +1464,18 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
             } else {
                 ""
             },
+            view_preset.label(),
             state_filter.label(),
+            sort_mode.label(),
             if search_query.is_empty() {
                 "<none>"
             } else {
                 search_query.as_str()
             },
-            active_count,
-            holding_count,
-            stale_count,
-            mismatch_count,
+            counts.0,
+            counts.1,
+            counts.2,
+            counts.3,
             if runs.is_empty() { 0 } else { selected + 1 },
             if embedded {
                 "return to run"
@@ -1194,6 +1488,11 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
         let mut lines = Vec::new();
         for (idx, run) in runs.iter().take(content_rows).enumerate() {
             let marker = if idx == selected { ">" } else { " " };
+            let selected_mark = if selected_ids.contains(&run.record.id) {
+                "[x]"
+            } else {
+                "[ ]"
+            };
             let stale = if run.stale { "stale" } else { "active" };
             let version = if run.record.version.is_empty() {
                 "unknown"
@@ -1202,15 +1501,17 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
             };
             let mismatch = if run.version_mismatch { " !" } else { "" };
             let line = format!(
-                "{} {} [{}{}] id={} state={} sends={} ver={} target={}",
+                "{}{} {} [{}{} {}] sends={} ver={} health={}({}) target={}",
                 marker,
+                selected_mark,
                 run.record.name,
                 stale,
                 mismatch,
-                truncate_text(&run.record.id, 16, true),
                 run.record.state,
                 run.record.sends,
                 version,
+                run.health_label,
+                run.health_score,
                 truncate_text(&run.record.target, 28, true)
             );
             lines.push(line);
@@ -1223,66 +1524,83 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
             mismatch_only,
             state_filter,
             &search_query,
-            (active_count, holding_count, stale_count, mismatch_count),
-            pending_stop_run_id.as_deref(),
+            counts,
+            sort_mode,
+            view_preset,
+            selected_ids.len(),
+            pending_action.as_ref(),
         );
 
         let footer = format!(
-            "< / <- prev · > / -> next · x stale · v mismatch-only · f state-filter · / search · enter jump/confirm stop · i copy id · y copy stop cmd · h hold · r resume · n next · R renew · s arm stop · c cancel stop · q/esc {} · {}",
+            "<-/> nav · space mark · a clear-mark · p/1-4 presets · o sort · x stale · v mismatch · f state · / search · enter jump/confirm · i id · y stop-cmd · h/r/n/R single · S/H/P/N/U bulk · s arm stop · c cancel · q/esc {} · {}",
             if embedded {
                 "return to run"
             } else {
                 "quit manager"
             },
-            truncate_text(&message, width.saturating_sub(70) as usize, true)
+            truncate_text(&message, width.saturating_sub(80) as usize, true)
         );
 
         let split_mode = width >= 120;
-        let frame = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}",
-            width,
-            height,
-            header,
-            lines.join("\n"),
-            details.join("\n"),
-            footer
-        );
-        if frame != last_frame {
-            last_frame = frame;
-            let mut out = std::io::stdout();
-            let _ = out.queue(MoveTo(0, 0));
-            let _ = out.queue(Clear(ClearType::All));
-            let _ = writeln!(out, "{}", fit_line(&header, width as usize, true));
+        let left_width = ((width as usize) * 58 / 100)
+            .max(52)
+            .min((width as usize).saturating_sub(20));
+        let right_width = (width as usize).saturating_sub(left_width + 1);
+        let mut screen_lines = vec![String::new(); height as usize];
+        if !screen_lines.is_empty() {
+            screen_lines[0] = fit_line(&header, width as usize, true);
+        }
+        for idx in 0..content_rows {
+            let row = idx + 1;
+            if row >= screen_lines.len().saturating_sub(1) {
+                break;
+            }
             if split_mode {
-                let left_width = ((width as usize) * 58 / 100)
-                    .max(52)
-                    .min((width as usize) - 20);
-                let right_width = (width as usize).saturating_sub(left_width + 1);
-                for idx in 0..content_rows {
-                    let left = lines.get(idx).map(|value| value.as_str()).unwrap_or("");
-                    let right = details.get(idx).map(|value| value.as_str()).unwrap_or("");
-                    let row = format!(
+                let left = lines.get(idx).map(|value| value.as_str()).unwrap_or("");
+                let right = details.get(idx).map(|value| value.as_str()).unwrap_or("");
+                screen_lines[row] = fit_line(
+                    &format!(
                         "{} {}",
                         pad_to_width(&fit_line(left, left_width, true), left_width),
                         fit_line(right, right_width, true)
-                    );
-                    let _ = writeln!(out, "{row}");
-                }
+                    ),
+                    width as usize,
+                    true,
+                );
             } else {
-                for idx in 0..content_rows {
-                    let line = lines.get(idx).map(|value| value.as_str()).unwrap_or("");
-                    let _ = writeln!(out, "{}", fit_line(line, width as usize, true));
-                }
+                let line = lines.get(idx).map(|value| value.as_str()).unwrap_or("");
+                screen_lines[row] = fit_line(line, width as usize, true);
             }
-            let footer_row = height.saturating_sub(1);
-            let _ = out.queue(MoveTo(0, footer_row));
-            let _ = write!(out, "{}", fit_line(&footer, width as usize, true));
-            let _ = out.flush();
+        }
+        if height > 0 {
+            let footer_row = height.saturating_sub(1) as usize;
+            screen_lines[footer_row] = fit_line(&footer, width as usize, true);
         }
 
-        if event::poll(Duration::from_millis(200)).context("fleet manager poll failed")? {
+        if force_full_redraw || screen_lines != last_lines {
+            let mut out = std::io::stdout();
+            if force_full_redraw {
+                let _ = out.queue(MoveTo(0, 0));
+                let _ = out.queue(Clear(ClearType::All));
+            }
+            for (row, line) in screen_lines.iter().enumerate() {
+                if force_full_redraw || last_lines.get(row) != Some(line) {
+                    let _ = out.queue(MoveTo(0, row as u16));
+                    let _ = out.queue(Clear(ClearType::CurrentLine));
+                    let _ = write!(out, "{}", line);
+                }
+            }
+            let _ = out.flush();
+            last_lines = screen_lines;
+            force_full_redraw = false;
+        }
+
+        if event::poll(Duration::from_millis(80)).context("fleet manager poll failed")? {
             match event::read()? {
-                Event::Resize(_, _) => {}
+                Event::Resize(_, _) => {
+                    force_full_redraw = true;
+                    needs_refresh = true;
+                }
                 Event::Key(KeyEvent { code, .. }) => {
                     if search_mode {
                         match code {
@@ -1301,36 +1619,30 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
                             KeyCode::Backspace => {
                                 search_query.pop();
                                 selected = 0;
-                                pending_stop_run_id = None;
+                                selected_run_id = runs.first().map(|run| run.record.id.clone());
+                                pending_action = None;
                                 message = format!("search: {}", search_query);
                             }
                             KeyCode::Char(c) => {
                                 search_query.push(c);
                                 selected = 0;
-                                pending_stop_run_id = None;
+                                selected_run_id = runs.first().map(|run| run.record.id.clone());
+                                pending_action = None;
                                 message = format!("search: {}", search_query);
                             }
                             _ => {}
                         }
+                        needs_refresh = true;
                         continue;
                     }
 
                     match code {
                         KeyCode::Esc | KeyCode::Char('q') => break,
                         KeyCode::Enter => {
-                            if let Some(run) = runs.get(selected) {
-                                if pending_stop_run_id.as_deref() == Some(run.record.id.as_str()) {
-                                    message = apply_selected_fleet_command(
-                                        &runs,
-                                        selected,
-                                        FleetControlCommand::Stop,
-                                    );
-                                    pending_stop_run_id = None;
-                                } else {
-                                    message = apply_selected_fleet_jump(&runs, selected);
-                                }
+                            if let Some(action) = pending_action.take() {
+                                message = apply_pending_fleet_action(&action);
                             } else {
-                                message = "no run selected".to_string();
+                                message = apply_selected_fleet_jump(&runs, selected);
                             }
                         }
                         KeyCode::Char('<') | KeyCode::Left => {
@@ -1340,19 +1652,38 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
                                 } else {
                                     selected - 1
                                 };
+                                selected_run_id = Some(runs[selected].record.id.clone());
                             }
-                            pending_stop_run_id = None;
+                            pending_action = None;
                         }
                         KeyCode::Char('>') | KeyCode::Right => {
                             if !runs.is_empty() {
                                 selected = (selected + 1) % runs.len();
+                                selected_run_id = Some(runs[selected].record.id.clone());
                             }
-                            pending_stop_run_id = None;
+                            pending_action = None;
+                        }
+                        KeyCode::Char(' ') => {
+                            if let Some(run) = runs.get(selected) {
+                                if !selected_ids.insert(run.record.id.clone()) {
+                                    selected_ids.remove(&run.record.id);
+                                }
+                                message = format!("marked runs={}", selected_ids.len());
+                            } else {
+                                message = "no run selected".to_string();
+                            }
+                            pending_action = None;
+                        }
+                        KeyCode::Char('a') => {
+                            selected_ids.clear();
+                            pending_action = None;
+                            message = "cleared marked runs".to_string();
                         }
                         KeyCode::Char('x') => {
                             show_stale = !show_stale;
                             selected = 0;
-                            pending_stop_run_id = None;
+                            selected_run_id = None;
+                            pending_action = None;
                             message = if show_stale {
                                 "showing stale + active runs".to_string()
                             } else {
@@ -1362,7 +1693,8 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
                         KeyCode::Char('v') => {
                             mismatch_only = !mismatch_only;
                             selected = 0;
-                            pending_stop_run_id = None;
+                            selected_run_id = None;
+                            pending_action = None;
                             message = if mismatch_only {
                                 "showing version mismatches only".to_string()
                             } else {
@@ -1372,17 +1704,98 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
                         KeyCode::Char('f') => {
                             state_filter = state_filter.next();
                             selected = 0;
-                            pending_stop_run_id = None;
+                            selected_run_id = None;
+                            pending_action = None;
                             message = format!("state filter={}", state_filter.label());
+                        }
+                        KeyCode::Char('o') => {
+                            sort_mode = sort_mode.next();
+                            selected = 0;
+                            selected_run_id = None;
+                            pending_action = None;
+                            message = format!("sort={}", sort_mode.label());
+                        }
+                        KeyCode::Char('p') => {
+                            view_preset = view_preset.next();
+                            apply_view_preset(
+                                view_preset,
+                                &mut show_stale,
+                                &mut mismatch_only,
+                                &mut state_filter,
+                                &mut sort_mode,
+                            );
+                            selected = 0;
+                            selected_run_id = None;
+                            pending_action = None;
+                            message = format!("preset={}", view_preset.label());
+                        }
+                        KeyCode::Char('1') => {
+                            view_preset = FleetViewPreset::Default;
+                            apply_view_preset(
+                                view_preset,
+                                &mut show_stale,
+                                &mut mismatch_only,
+                                &mut state_filter,
+                                &mut sort_mode,
+                            );
+                            selected = 0;
+                            selected_run_id = None;
+                            pending_action = None;
+                            message = format!("preset={}", view_preset.label());
+                        }
+                        KeyCode::Char('2') => {
+                            view_preset = FleetViewPreset::NeedsAttention;
+                            apply_view_preset(
+                                view_preset,
+                                &mut show_stale,
+                                &mut mismatch_only,
+                                &mut state_filter,
+                                &mut sort_mode,
+                            );
+                            selected = 0;
+                            selected_run_id = None;
+                            pending_action = None;
+                            message = format!("preset={}", view_preset.label());
+                        }
+                        KeyCode::Char('3') => {
+                            view_preset = FleetViewPreset::MismatchOnly;
+                            apply_view_preset(
+                                view_preset,
+                                &mut show_stale,
+                                &mut mismatch_only,
+                                &mut state_filter,
+                                &mut sort_mode,
+                            );
+                            selected = 0;
+                            selected_run_id = None;
+                            pending_action = None;
+                            message = format!("preset={}", view_preset.label());
+                        }
+                        KeyCode::Char('4') => {
+                            view_preset = FleetViewPreset::Holding;
+                            apply_view_preset(
+                                view_preset,
+                                &mut show_stale,
+                                &mut mismatch_only,
+                                &mut state_filter,
+                                &mut sort_mode,
+                            );
+                            selected = 0;
+                            selected_run_id = None;
+                            pending_action = None;
+                            message = format!("preset={}", view_preset.label());
                         }
                         KeyCode::Char('/') => {
                             search_mode = true;
-                            pending_stop_run_id = None;
+                            pending_action = None;
                             message = format!("search: {}", search_query);
                         }
                         KeyCode::Char('s') => {
                             if let Some(run) = runs.get(selected) {
-                                pending_stop_run_id = Some(run.record.id.clone());
+                                pending_action = Some(PendingFleetAction::SingleStop {
+                                    run_id: run.record.id.clone(),
+                                    run_name: run.record.name.clone(),
+                                });
                                 message = format!(
                                     "confirm stop {}: press Enter, or c to cancel",
                                     run.record.name
@@ -1391,20 +1804,65 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
                                 message = "no run selected".to_string();
                             }
                         }
+                        KeyCode::Char('S') => {
+                            pending_action = arm_bulk_action(
+                                FleetControlCommand::Stop,
+                                &selected_ids,
+                                &runs,
+                                selected,
+                                &mut message,
+                            );
+                        }
+                        KeyCode::Char('H') => {
+                            pending_action = arm_bulk_action(
+                                FleetControlCommand::Hold,
+                                &selected_ids,
+                                &runs,
+                                selected,
+                                &mut message,
+                            );
+                        }
+                        KeyCode::Char('P') => {
+                            pending_action = arm_bulk_action(
+                                FleetControlCommand::Resume,
+                                &selected_ids,
+                                &runs,
+                                selected,
+                                &mut message,
+                            );
+                        }
+                        KeyCode::Char('N') => {
+                            pending_action = arm_bulk_action(
+                                FleetControlCommand::Next,
+                                &selected_ids,
+                                &runs,
+                                selected,
+                                &mut message,
+                            );
+                        }
+                        KeyCode::Char('U') => {
+                            pending_action = arm_bulk_action(
+                                FleetControlCommand::Renew,
+                                &selected_ids,
+                                &runs,
+                                selected,
+                                &mut message,
+                            );
+                        }
                         KeyCode::Char('c') => {
-                            pending_stop_run_id = None;
-                            message = "stop confirmation cleared".to_string();
+                            pending_action = None;
+                            message = "pending action cleared".to_string();
                         }
                         KeyCode::Char('i') => {
-                            pending_stop_run_id = None;
+                            pending_action = None;
                             message = copy_selected_run_id(&runs, selected);
                         }
                         KeyCode::Char('y') => {
-                            pending_stop_run_id = None;
+                            pending_action = None;
                             message = copy_selected_run_command(&runs, selected);
                         }
                         KeyCode::Char('h') => {
-                            pending_stop_run_id = None;
+                            pending_action = None;
                             message = apply_selected_fleet_command(
                                 &runs,
                                 selected,
@@ -1412,7 +1870,7 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
                             );
                         }
                         KeyCode::Char('r') => {
-                            pending_stop_run_id = None;
+                            pending_action = None;
                             message = apply_selected_fleet_command(
                                 &runs,
                                 selected,
@@ -1420,7 +1878,7 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
                             );
                         }
                         KeyCode::Char('n') => {
-                            pending_stop_run_id = None;
+                            pending_action = None;
                             message = apply_selected_fleet_command(
                                 &runs,
                                 selected,
@@ -1428,7 +1886,7 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
                             );
                         }
                         KeyCode::Char('R') => {
-                            pending_stop_run_id = None;
+                            pending_action = None;
                             message = apply_selected_fleet_command(
                                 &runs,
                                 selected,
@@ -1437,12 +1895,122 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
                         }
                         _ => {}
                     }
+                    needs_refresh = true;
                 }
                 _ => {}
             }
         }
     }
     Ok(())
+}
+
+fn apply_view_preset(
+    preset: FleetViewPreset,
+    show_stale: &mut bool,
+    mismatch_only: &mut bool,
+    state_filter: &mut FleetStateFilter,
+    sort_mode: &mut FleetSortMode,
+) {
+    match preset {
+        FleetViewPreset::Default => {
+            *show_stale = false;
+            *mismatch_only = false;
+            *state_filter = FleetStateFilter::All;
+            *sort_mode = FleetSortMode::LastSeen;
+        }
+        FleetViewPreset::NeedsAttention => {
+            *show_stale = true;
+            *mismatch_only = false;
+            *state_filter = FleetStateFilter::All;
+            *sort_mode = FleetSortMode::Health;
+        }
+        FleetViewPreset::MismatchOnly => {
+            *show_stale = true;
+            *mismatch_only = true;
+            *state_filter = FleetStateFilter::All;
+            *sort_mode = FleetSortMode::LastSeen;
+        }
+        FleetViewPreset::Holding => {
+            *show_stale = true;
+            *mismatch_only = false;
+            *state_filter = FleetStateFilter::Holding;
+            *sort_mode = FleetSortMode::Sends;
+        }
+    }
+}
+
+fn arm_bulk_action(
+    command: FleetControlCommand,
+    selected_ids: &HashSet<String>,
+    runs: &[FleetListedRun],
+    selected: usize,
+    message: &mut String,
+) -> Option<PendingFleetAction> {
+    let mut targets: Vec<&FleetListedRun> = if selected_ids.is_empty() {
+        runs.get(selected).map(|run| vec![run]).unwrap_or_default()
+    } else {
+        runs.iter()
+            .filter(|run| selected_ids.contains(&run.record.id))
+            .collect()
+    };
+    if targets.is_empty() {
+        *message = "no runs selected for bulk action".to_string();
+        return None;
+    }
+    targets.sort_by(|a, b| a.record.name.cmp(&b.record.name));
+    let run_ids = targets.iter().map(|run| run.record.id.clone()).collect();
+    let run_names: Vec<String> = targets.iter().map(|run| run.record.name.clone()).collect();
+    *message = format!(
+        "confirm bulk {} for {} run(s): press Enter, or c to cancel",
+        fleet_command_label(command),
+        run_names.len()
+    );
+    Some(PendingFleetAction::Bulk {
+        command,
+        run_ids,
+        run_names,
+    })
+}
+
+fn apply_pending_fleet_action(action: &PendingFleetAction) -> String {
+    match action {
+        PendingFleetAction::SingleStop { run_id, run_name } => {
+            match dispatch_fleet_command(run_id, FleetControlCommand::Stop) {
+                Ok(_) => format!("sent stop to {}", run_name),
+                Err(err) => format!("stop failed: {err}"),
+            }
+        }
+        PendingFleetAction::Bulk {
+            command,
+            run_ids,
+            run_names,
+        } => {
+            let mut ok = 0usize;
+            let mut errors = Vec::new();
+            for run_id in run_ids {
+                match dispatch_fleet_command(run_id, *command) {
+                    Ok(_) => ok += 1,
+                    Err(err) => errors.push(format!("{}: {}", run_id, err)),
+                }
+            }
+            if errors.is_empty() {
+                format!(
+                    "sent {} to {} run(s): {}",
+                    fleet_command_label(*command),
+                    ok,
+                    truncate_text(&run_names.join(", "), 100, true)
+                )
+            } else {
+                format!(
+                    "{} sent to {} run(s), {} failed ({})",
+                    fleet_command_label(*command),
+                    ok,
+                    errors.len(),
+                    truncate_text(&errors.join("; "), 100, true)
+                )
+            }
+        }
+    }
 }
 
 fn apply_selected_fleet_command(
@@ -5104,35 +5672,53 @@ mod tests {
         assert_eq!(log_line_color_at("23:11:04 > ai:7.0", now), 249);
     }
 
-    #[test]
-    fn fleet_manager_hides_stale_by_default() {
-        let base = FleetRunRecord {
-            id: "run-1".to_string(),
-            name: "alpha".to_string(),
+    fn fleet_test_record(
+        id: &str,
+        name: &str,
+        state: &str,
+        sends: u32,
+        version: &str,
+    ) -> FleetRunRecord {
+        FleetRunRecord {
+            id: id.to_string(),
+            name: name.to_string(),
             pid: 1,
             host: "local".to_string(),
             target: "ai:1.0".to_string(),
-            state: "waiting".to_string(),
-            sends: 1,
+            state: state.to_string(),
+            sends,
             poll_seconds: 5,
             started_at: "2026-02-17T00:00:00Z".to_string(),
             last_seen: "2026-02-17T00:00:00Z".to_string(),
-            version: LOOPMUX_VERSION.to_string(),
-        };
-        let active = FleetListedRun {
-            record: base.clone(),
-            stale: false,
-            version_mismatch: false,
-        };
-        let stale = FleetListedRun {
-            record: FleetRunRecord {
-                id: "run-2".to_string(),
-                name: "beta".to_string(),
-                ..base
-            },
-            stale: true,
-            version_mismatch: false,
-        };
+            version: version.to_string(),
+            events: Vec::new(),
+        }
+    }
+
+    fn fleet_listed(record: FleetRunRecord, stale: bool, version_mismatch: bool) -> FleetListedRun {
+        let (health_score, health_label) = fleet_health(&record, stale, version_mismatch);
+        FleetListedRun {
+            record,
+            stale,
+            version_mismatch,
+            health_score,
+            health_label,
+            needs_attention: stale || version_mismatch || health_score < 70,
+        }
+    }
+
+    #[test]
+    fn fleet_manager_hides_stale_by_default() {
+        let active = fleet_listed(
+            fleet_test_record("run-1", "alpha", "waiting", 1, LOOPMUX_VERSION),
+            false,
+            false,
+        );
+        let stale = fleet_listed(
+            fleet_test_record("run-2", "beta", "waiting", 1, LOOPMUX_VERSION),
+            true,
+            false,
+        );
 
         let hidden = fleet_manager_visible_runs(
             &vec![active.clone(), stale.clone()],
@@ -5140,6 +5726,8 @@ mod tests {
             false,
             FleetStateFilter::All,
             "",
+            FleetSortMode::LastSeen,
+            FleetViewPreset::Default,
         );
         assert_eq!(hidden.len(), 1);
         assert_eq!(hidden[0].record.id, "run-1");
@@ -5150,6 +5738,8 @@ mod tests {
             false,
             FleetStateFilter::All,
             "",
+            FleetSortMode::LastSeen,
+            FleetViewPreset::Default,
         );
         assert_eq!(all.len(), 2);
     }
@@ -5163,46 +5753,24 @@ mod tests {
 
     #[test]
     fn fleet_manager_mismatch_filter_works() {
-        let run_match = FleetListedRun {
-            record: FleetRunRecord {
-                id: "run-1".to_string(),
-                name: "alpha".to_string(),
-                pid: 1,
-                host: "local".to_string(),
-                target: "ai:1.0".to_string(),
-                state: "waiting".to_string(),
-                sends: 1,
-                poll_seconds: 5,
-                started_at: "2026-02-17T00:00:00Z".to_string(),
-                last_seen: "2026-02-17T00:00:00Z".to_string(),
-                version: LOOPMUX_VERSION.to_string(),
-            },
-            stale: false,
-            version_mismatch: false,
-        };
-        let run_mismatch = FleetListedRun {
-            record: FleetRunRecord {
-                id: "run-2".to_string(),
-                name: "beta".to_string(),
-                pid: 2,
-                host: "local".to_string(),
-                target: "ai:2.0".to_string(),
-                state: "holding".to_string(),
-                sends: 2,
-                poll_seconds: 5,
-                started_at: "2026-02-17T00:00:00Z".to_string(),
-                last_seen: "2026-02-17T00:00:00Z".to_string(),
-                version: "0.0.1".to_string(),
-            },
-            stale: false,
-            version_mismatch: true,
-        };
+        let run_match = fleet_listed(
+            fleet_test_record("run-1", "alpha", "waiting", 1, LOOPMUX_VERSION),
+            false,
+            false,
+        );
+        let run_mismatch = fleet_listed(
+            fleet_test_record("run-2", "beta", "holding", 2, "0.0.1"),
+            false,
+            true,
+        );
         let filtered = fleet_manager_visible_runs(
             &vec![run_match, run_mismatch.clone()],
             true,
             true,
             FleetStateFilter::All,
             "",
+            FleetSortMode::LastSeen,
+            FleetViewPreset::Default,
         );
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].record.id, run_mismatch.record.id);
@@ -5210,46 +5778,24 @@ mod tests {
 
     #[test]
     fn fleet_manager_state_filter_holding_only() {
-        let waiting = FleetListedRun {
-            record: FleetRunRecord {
-                id: "run-1".to_string(),
-                name: "alpha".to_string(),
-                pid: 1,
-                host: "local".to_string(),
-                target: "ai:1.0".to_string(),
-                state: "waiting".to_string(),
-                sends: 1,
-                poll_seconds: 5,
-                started_at: "2026-02-17T00:00:00Z".to_string(),
-                last_seen: "2026-02-17T00:00:00Z".to_string(),
-                version: LOOPMUX_VERSION.to_string(),
-            },
-            stale: false,
-            version_mismatch: false,
-        };
-        let holding = FleetListedRun {
-            record: FleetRunRecord {
-                id: "run-2".to_string(),
-                name: "beta".to_string(),
-                pid: 2,
-                host: "local".to_string(),
-                target: "ai:2.0".to_string(),
-                state: "holding".to_string(),
-                sends: 2,
-                poll_seconds: 5,
-                started_at: "2026-02-17T00:00:00Z".to_string(),
-                last_seen: "2026-02-17T00:00:00Z".to_string(),
-                version: LOOPMUX_VERSION.to_string(),
-            },
-            stale: false,
-            version_mismatch: false,
-        };
+        let waiting = fleet_listed(
+            fleet_test_record("run-1", "alpha", "waiting", 1, LOOPMUX_VERSION),
+            false,
+            false,
+        );
+        let holding = fleet_listed(
+            fleet_test_record("run-2", "beta", "holding", 2, LOOPMUX_VERSION),
+            false,
+            false,
+        );
         let filtered = fleet_manager_visible_runs(
             &vec![waiting, holding.clone()],
             true,
             false,
             FleetStateFilter::Holding,
             "",
+            FleetSortMode::LastSeen,
+            FleetViewPreset::Default,
         );
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].record.id, holding.record.id);
@@ -5257,34 +5803,31 @@ mod tests {
 
     #[test]
     fn fleet_manager_search_matches_name_or_target() {
-        let run = FleetListedRun {
-            record: FleetRunRecord {
-                id: "run-1".to_string(),
-                name: "planner-a".to_string(),
-                pid: 1,
-                host: "local".to_string(),
-                target: "ai:7.0".to_string(),
-                state: "waiting".to_string(),
-                sends: 1,
-                poll_seconds: 5,
-                started_at: "2026-02-17T00:00:00Z".to_string(),
-                last_seen: "2026-02-17T00:00:00Z".to_string(),
-                version: LOOPMUX_VERSION.to_string(),
-            },
-            stale: false,
-            version_mismatch: false,
-        };
+        let run = fleet_listed(
+            fleet_test_record("run-1", "planner-a", "waiting", 1, LOOPMUX_VERSION),
+            false,
+            false,
+        );
         let by_name = fleet_manager_visible_runs(
             &vec![run.clone()],
             true,
             false,
             FleetStateFilter::All,
             "planner",
+            FleetSortMode::LastSeen,
+            FleetViewPreset::Default,
         );
         assert_eq!(by_name.len(), 1);
 
-        let by_target =
-            fleet_manager_visible_runs(&vec![run], true, false, FleetStateFilter::All, "ai:7");
+        let by_target = fleet_manager_visible_runs(
+            &vec![run],
+            true,
+            false,
+            FleetStateFilter::All,
+            "ai:1",
+            FleetSortMode::LastSeen,
+            FleetViewPreset::Default,
+        );
         assert_eq!(by_target.len(), 1);
     }
 

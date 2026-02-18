@@ -222,7 +222,7 @@ loopmux run -t ai:5.0 -n 5 \
   loopmux runs tui
   ```
   - On wide terminals, fleet manager uses a split layout (runs list on left, selected-run details on right).
-  - Controls: `<`/`Left` previous, `>`/`Right` next, `x` toggle stale visibility (hidden by default), `v` mismatch-only filter, `f` cycle state filter (`all/active/holding/stale`), `/` search mode (name/id/target/state/version), `s` arm stop for selected run, `Enter` confirm armed stop (or jump when no stop is armed), `c` cancel armed stop, `i` copy selected run id, `y` copy `loopmux runs stop <id>` snippet, `h` hold, `r` resume, `n` next, `R` renew, `q`/`Esc` quit manager.
+  - Controls: `<`/`Left` previous, `>`/`Right` next, `space` mark/unmark selected run, `a` clear marks, `x` toggle stale visibility (hidden by default), `v` mismatch-only filter, `f` cycle state filter (`all/active/holding/stale`), `/` search mode (name/id/target/state/version), `p` cycle presets (`default`, `needs-attention`, `mismatch-only`, `holding-focus`), `1-4` jump directly to those presets, `o` cycle sort (`last_seen/sends/health/name/state`), `s` arm single-run stop, `S`/`H`/`P`/`N`/`U` arm bulk stop/hold/resume/next/renew for marked runs (or selected run when none are marked), `Enter` confirm pending action (or jump when no action is armed), `c` cancel pending action, `i` copy selected run id, `y` copy `loopmux runs stop <id>` snippet, `h` hold, `r` resume, `n` next, `R` renew, `q`/`Esc` quit manager.
   - When opened from `run --tui` via `f`, `q`/`Esc` returns to the run view.
   - Header includes local version plus counts (`active`, `holding`, `stale`, `mismatch`).
 
