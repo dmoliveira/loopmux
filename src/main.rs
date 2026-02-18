@@ -50,7 +50,7 @@ enum Command {
 #[derive(Debug, Parser)]
 #[command(
     after_help = concat!(
-        "Examples:\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n  loopmux run --config loop.yaml --duration 2h\n  loopmux run --tui\n\nDefaults:\n  tail=1 (last non-blank line)\n  poll=5s\n  trigger-confirm-seconds=5\n  history-limit=50\n  log-preview-lines=3\n  trigger-edge=on\n\nDuration units: s, m, h, d, w, mon (30d), y (365d)\n\n",
+        "Examples:\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n  loopmux run --config loop.yaml --duration 2h\n  loopmux run --tui\n\nDefaults:\n  tail=1 (last non-blank line)\n  poll=5s\n  trigger-confirm-seconds=5\n  history-limit=50\n  log-preview-lines=3\n  trigger-edge=on\n  recheck-before-send=on\n\nDuration units: s, m, h, d, w, mon (30d), y (365d)\n\n",
         "Version: ",
         env!("CARGO_PKG_VERSION"),
         "\n"
@@ -66,6 +66,9 @@ struct RunArgs {
     /// Inline trigger regex (requires --prompt).
     #[arg(long, requires = "prompt", conflicts_with = "config")]
     trigger: Option<String>,
+    /// Treat --trigger as an exact line match (trimmed comparison).
+    #[arg(long, requires = "trigger", conflicts_with = "config")]
+    trigger_exact_line: bool,
     /// Inline exclude regex.
     #[arg(long, requires = "prompt", conflicts_with = "config")]
     exclude: Option<String>,
@@ -108,6 +111,9 @@ struct RunArgs {
     /// Disable trigger edge-guard and allow repeated sends while trigger stays true.
     #[arg(long)]
     no_trigger_edge: bool,
+    /// Disable trigger recheck immediately before sending.
+    #[arg(long)]
+    no_recheck_before_send: bool,
     /// Fanout mode for matched panes.
     #[arg(long, default_value = "matched")]
     fanout: FanoutMode,
@@ -136,6 +142,7 @@ struct HistoryEntry {
     target: String,
     prompt: String,
     trigger: String,
+    trigger_exact_line: Option<bool>,
     exclude: Option<String>,
     pre: Option<String>,
     post: Option<String>,
@@ -146,6 +153,7 @@ struct HistoryEntry {
     trigger_confirm_seconds: Option<u64>,
     log_preview_lines: Option<usize>,
     trigger_edge: Option<bool>,
+    recheck_before_send: Option<bool>,
     fanout: Option<FanoutMode>,
     duration: Option<String>,
 }
@@ -220,6 +228,7 @@ struct Config {
     trigger_confirm_seconds: Option<u64>,
     log_preview_lines: Option<usize>,
     trigger_edge: Option<bool>,
+    recheck_before_send: Option<bool>,
     fanout: Option<FanoutMode>,
     duration: Option<String>,
     rule_eval: Option<RuleEval>,
@@ -295,6 +304,7 @@ struct Rule {
 #[derive(Debug, Deserialize)]
 struct MatchCriteria {
     regex: Option<String>,
+    exact_line: Option<String>,
     contains: Option<String>,
     starts_with: Option<String>,
 }
@@ -355,6 +365,7 @@ struct RuleMatch<'a> {
 struct SendPlan {
     source_target: String,
     rule_id: Option<String>,
+    rule_index: usize,
     next_rule: Option<String>,
     edge_key: String,
     prompt: String,
@@ -504,6 +515,7 @@ fn run(args: RunArgs) -> Result<()> {
         args.single_line,
         args.tui,
         args.no_trigger_edge.then_some(false),
+        args.no_recheck_before_send.then_some(false),
     )?;
 
     if args.dry_run {
@@ -543,6 +555,9 @@ fn hydrate_run_args_from_history(mut args: RunArgs) -> Result<RunArgs> {
     args.target = Some(entry.target);
     args.prompt = Some(entry.prompt);
     args.trigger = Some(entry.trigger);
+    if !args.trigger_exact_line {
+        args.trigger_exact_line = entry.trigger_exact_line.unwrap_or(false);
+    }
     args.exclude = entry.exclude;
     args.pre = entry.pre;
     args.post = entry.post;
@@ -567,6 +582,11 @@ fn hydrate_run_args_from_history(mut args: RunArgs) -> Result<RunArgs> {
     if !args.no_trigger_edge {
         if let Some(trigger_edge) = entry.trigger_edge {
             args.no_trigger_edge = !trigger_edge;
+        }
+    }
+    if !args.no_recheck_before_send {
+        if let Some(recheck_before_send) = entry.recheck_before_send {
+            args.no_recheck_before_send = !recheck_before_send;
         }
     }
     if args.fanout == FanoutMode::Matched {
@@ -1596,7 +1616,8 @@ fn history_signature(args: &RunArgs) -> Option<String> {
     let prompt = args.prompt.as_ref()?;
     let trigger = args.trigger.as_ref()?;
     Some(format!(
-        "target={target}|prompt={prompt}|trigger={trigger}|exclude={}|pre={}|post={}|iterations={}|tail={}|once={}|poll={}|trigger_confirm_seconds={}|log_preview_lines={}|trigger_edge={}|fanout={}|duration={}",
+        "target={target}|prompt={prompt}|trigger={trigger}|trigger_exact_line={}|exclude={}|pre={}|post={}|iterations={}|tail={}|once={}|poll={}|trigger_confirm_seconds={}|log_preview_lines={}|trigger_edge={}|recheck_before_send={}|fanout={}|duration={}",
+        args.trigger_exact_line,
         args.exclude.as_deref().unwrap_or(""),
         args.pre.as_deref().unwrap_or(""),
         args.post.as_deref().unwrap_or(""),
@@ -1611,6 +1632,7 @@ fn history_signature(args: &RunArgs) -> Option<String> {
             .map(|v| v.to_string())
             .unwrap_or_default(),
         !args.no_trigger_edge,
+        !args.no_recheck_before_send,
         fanout_label(args.fanout),
         args.duration.as_deref().unwrap_or("")
     ))
@@ -1636,6 +1658,7 @@ fn store_run_history(args: &RunArgs) -> Result<()> {
             target: args.target.clone().unwrap_or_default(),
             prompt: args.prompt.clone().unwrap_or_default(),
             trigger: args.trigger.clone().unwrap_or_default(),
+            trigger_exact_line: Some(args.trigger_exact_line),
             exclude: args.exclude.clone(),
             pre: args.pre.clone(),
             post: args.post.clone(),
@@ -1646,6 +1669,7 @@ fn store_run_history(args: &RunArgs) -> Result<()> {
             trigger_confirm_seconds: args.trigger_confirm_seconds,
             log_preview_lines: args.log_preview_lines,
             trigger_edge: Some(!args.no_trigger_edge),
+            recheck_before_send: Some(!args.no_recheck_before_send),
             fanout: Some(args.fanout),
             duration: args.duration.clone(),
         },
@@ -1658,10 +1682,11 @@ fn store_run_history(args: &RunArgs) -> Result<()> {
 
 fn history_entry_signature(entry: &HistoryEntry) -> Option<String> {
     Some(format!(
-        "target={}|prompt={}|trigger={}|exclude={}|pre={}|post={}|iterations={}|tail={}|once={}|poll={}|trigger_confirm_seconds={}|log_preview_lines={}|trigger_edge={}|fanout={}|duration={}",
+        "target={}|prompt={}|trigger={}|trigger_exact_line={}|exclude={}|pre={}|post={}|iterations={}|tail={}|once={}|poll={}|trigger_confirm_seconds={}|log_preview_lines={}|trigger_edge={}|recheck_before_send={}|fanout={}|duration={}",
         entry.target,
         entry.prompt,
         entry.trigger,
+        entry.trigger_exact_line.unwrap_or(false),
         entry.exclude.as_deref().unwrap_or(""),
         entry.pre.as_deref().unwrap_or(""),
         entry.post.as_deref().unwrap_or(""),
@@ -1678,6 +1703,7 @@ fn history_entry_signature(entry: &HistoryEntry) -> Option<String> {
             .map(|v| v.to_string())
             .unwrap_or_default(),
         entry.trigger_edge.unwrap_or(true),
+        entry.recheck_before_send.unwrap_or(true),
         fanout_label(entry.fanout.unwrap_or(FanoutMode::Matched)),
         entry.duration.as_deref().unwrap_or("")
     ))
@@ -2060,6 +2086,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                     plans.push(SendPlan {
                         source_target: target.clone(),
                         rule_id: rule_match.rule.id.clone(),
+                        rule_index: rule_match.index,
                         next_rule: rule_match.rule.next.clone(),
                         edge_key,
                         prompt,
@@ -2139,6 +2166,40 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
 
                 let mut sent_any_for_plan = false;
                 for target in recipients {
+                    if config.recheck_before_send {
+                        let output = capture_pane(&target, config.tail)?;
+                        let output = if config.tail == 1 {
+                            last_non_empty_line(&output)
+                        } else {
+                            output
+                        };
+                        let Some(rule) = config.rules.get(plan.rule_index) else {
+                            continue;
+                        };
+                        if !matches_rule(rule, &output)? {
+                            let (recheck_preview_lines, recheck_preview) = extract_trigger_preview(
+                                &output,
+                                config.log_preview_lines,
+                                log_use_unicode,
+                            );
+                            let detail = format!(
+                                "suppressed stale trigger target={} rule={} preview={}L {}",
+                                target,
+                                plan.rule_id.as_deref().unwrap_or("<unnamed>"),
+                                recheck_preview_lines,
+                                truncate_text(&recheck_preview, 70, log_use_unicode)
+                            );
+                            logger.log(LogEvent::status(&config, detail.clone()))?;
+                            if let Some(tui_state) = tui.as_mut() {
+                                tui_state.push_log(format!(
+                                    "[{}] {}",
+                                    timestamp_now(),
+                                    truncate_text(&detail, 120, log_use_unicode)
+                                ));
+                            }
+                            continue;
+                        }
+                    }
                     if ui_mode == UiMode::Tui {
                         loop_state = LoopState::Sending;
                     }
@@ -2803,6 +2864,12 @@ fn matches_rule(rule: &Rule, output: &str) -> Result<bool> {
 }
 
 fn matches_criteria(criteria: &MatchCriteria, output: &str) -> Result<bool> {
+    if let Some(exact_line) = &criteria.exact_line {
+        let expected = exact_line.trim();
+        if output.lines().any(|line| line.trim() == expected) {
+            return Ok(true);
+        }
+    }
     if let Some(regex) = &criteria.regex {
         let re = Regex::new(regex).context("invalid regex")?;
         if re.is_match(output) {
@@ -2911,6 +2978,7 @@ fn validate(args: ValidateArgs) -> Result<()> {
         false,
         false,
         None,
+        None,
     )?;
     print_validation(&resolved);
     Ok(())
@@ -2965,12 +3033,22 @@ fn resolve_run_config(args: &RunArgs) -> Result<Config> {
     let rule = Rule {
         id: Some("inline".to_string()),
         match_: Some(MatchCriteria {
-            regex: Some(trigger.clone()),
+            regex: if args.trigger_exact_line {
+                None
+            } else {
+                Some(trigger.clone())
+            },
+            exact_line: if args.trigger_exact_line {
+                Some(trigger.clone())
+            } else {
+                None
+            },
             contains: None,
             starts_with: None,
         }),
         exclude: args.exclude.as_ref().map(|value| MatchCriteria {
             regex: Some(value.clone()),
+            exact_line: None,
             contains: None,
             starts_with: None,
         }),
@@ -2989,6 +3067,7 @@ fn resolve_run_config(args: &RunArgs) -> Result<Config> {
         trigger_confirm_seconds: args.trigger_confirm_seconds,
         log_preview_lines: args.log_preview_lines,
         trigger_edge: Some(!args.no_trigger_edge),
+        recheck_before_send: Some(!args.no_recheck_before_send),
         fanout: Some(args.fanout),
         duration: args.duration.clone(),
         rule_eval: Some(RuleEval::FirstMatch),
@@ -3011,6 +3090,7 @@ struct ResolvedConfig {
     trigger_confirm_seconds: u64,
     log_preview_lines: usize,
     trigger_edge: bool,
+    recheck_before_send: bool,
     fanout: FanoutMode,
     duration: Option<Duration>,
     rule_eval: RuleEval,
@@ -3685,6 +3765,7 @@ fn resolve_config(
     single_line: bool,
     tui: bool,
     trigger_edge_override: Option<bool>,
+    recheck_before_send_override: Option<bool>,
 ) -> Result<ResolvedConfig> {
     if let Some(target) = target_override {
         config.target = Some(target);
@@ -3749,6 +3830,8 @@ fn resolve_config(
         .trigger_confirm_seconds
         .unwrap_or(DEFAULT_TRIGGER_CONFIRM_SECONDS);
     let trigger_edge = trigger_edge_override.unwrap_or(config.trigger_edge.unwrap_or(true));
+    let recheck_before_send =
+        recheck_before_send_override.unwrap_or(config.recheck_before_send.unwrap_or(true));
     let log_preview_lines = config.log_preview_lines.unwrap_or(3).max(1);
 
     let fanout = config.fanout.unwrap_or(FanoutMode::Matched);
@@ -3768,6 +3851,7 @@ fn resolve_config(
         trigger_confirm_seconds,
         log_preview_lines,
         trigger_edge,
+        recheck_before_send,
         fanout,
         duration,
         rule_eval,
@@ -3826,6 +3910,14 @@ fn print_validation(config: &ResolvedConfig) {
     println!(
         "- trigger_edge: {}",
         if config.trigger_edge { "yes" } else { "no" }
+    );
+    println!(
+        "- recheck_before_send: {}",
+        if config.recheck_before_send {
+            "yes"
+        } else {
+            "no"
+        }
     );
     println!("- fanout: {}", fanout_label(config.fanout));
     if let Some(duration) = config.duration {
@@ -3936,7 +4028,10 @@ fn validate_rules(rules: &[Rule]) -> Result<()> {
 }
 
 fn has_match(criteria: &MatchCriteria) -> bool {
-    has_text(&criteria.regex) || has_text(&criteria.contains) || has_text(&criteria.starts_with)
+    has_text(&criteria.regex)
+        || has_text(&criteria.exact_line)
+        || has_text(&criteria.contains)
+        || has_text(&criteria.starts_with)
 }
 
 fn has_text(value: &Option<String>) -> bool {
@@ -4429,6 +4524,7 @@ mod tests {
     fn match_regex(pattern: &str) -> MatchCriteria {
         MatchCriteria {
             regex: Some(pattern.to_string()),
+            exact_line: None,
             contains: None,
             starts_with: None,
         }
@@ -4437,6 +4533,7 @@ mod tests {
     fn match_contains(value: &str) -> MatchCriteria {
         MatchCriteria {
             regex: None,
+            exact_line: None,
             contains: Some(value.to_string()),
             starts_with: None,
         }
@@ -4448,6 +4545,18 @@ mod tests {
         assert!(matches_criteria(&match_regex("hello"), output).unwrap());
         assert!(matches_criteria(&match_contains("world"), output).unwrap());
         assert!(!matches_criteria(&match_contains("missing"), output).unwrap());
+    }
+
+    #[test]
+    fn matches_criteria_exact_line() {
+        let criteria = MatchCriteria {
+            regex: None,
+            exact_line: Some("<CONTINUE-LOOP>".to_string()),
+            contains: None,
+            starts_with: None,
+        };
+        assert!(matches_criteria(&criteria, "foo\n  <CONTINUE-LOOP>  \nbar").unwrap());
+        assert!(!matches_criteria(&criteria, "foo <CONTINUE-LOOP> bar").unwrap());
     }
 
     #[test]
@@ -4499,6 +4608,7 @@ mod tests {
             config: None,
             prompt: Some("Do it".to_string()),
             trigger: None,
+            trigger_exact_line: false,
             exclude: None,
             pre: None,
             post: None,
@@ -4513,6 +4623,7 @@ mod tests {
             trigger_confirm_seconds: None,
             log_preview_lines: None,
             no_trigger_edge: false,
+            no_recheck_before_send: false,
             fanout: FanoutMode::Matched,
             duration: None,
             history_limit: None,
@@ -4527,6 +4638,7 @@ mod tests {
             config: None,
             prompt: Some("Do it".to_string()),
             trigger: Some("Done".to_string()),
+            trigger_exact_line: false,
             exclude: Some("PROD".to_string()),
             pre: Some("pre".to_string()),
             post: Some("post".to_string()),
@@ -4541,6 +4653,7 @@ mod tests {
             trigger_confirm_seconds: None,
             log_preview_lines: None,
             no_trigger_edge: false,
+            no_recheck_before_send: false,
             fanout: FanoutMode::Matched,
             duration: None,
             history_limit: None,
@@ -4548,7 +4661,7 @@ mod tests {
         };
         let config = resolve_run_config(&args).unwrap();
         let resolved = resolve_config(
-            config, None, None, true, args.tail, args.once, false, false, None,
+            config, None, None, true, args.tail, args.once, false, false, None, None,
         )
         .unwrap();
         assert_eq!(resolved.tail, 123);
@@ -4566,6 +4679,41 @@ mod tests {
             resolved.rules[0].exclude.as_ref().unwrap().regex.as_deref(),
             Some("PROD")
         );
+    }
+
+    #[test]
+    fn resolve_run_config_inline_exact_line_mode() {
+        let args = RunArgs {
+            config: None,
+            prompt: Some("Do it".to_string()),
+            trigger: Some("<CONTINUE-LOOP>".to_string()),
+            trigger_exact_line: true,
+            exclude: None,
+            pre: None,
+            post: None,
+            target: Some("ai:5.0".to_string()),
+            iterations: Some(2),
+            tail: Some(1),
+            once: true,
+            dry_run: false,
+            single_line: false,
+            tui: false,
+            poll: None,
+            trigger_confirm_seconds: None,
+            log_preview_lines: None,
+            no_trigger_edge: false,
+            no_recheck_before_send: false,
+            fanout: FanoutMode::Matched,
+            duration: None,
+            history_limit: None,
+            name: None,
+        };
+        let config = resolve_run_config(&args).unwrap();
+        let mut rules = config.rules.unwrap();
+        let rule = rules.remove(0);
+        let matcher = rule.match_.unwrap();
+        assert!(matcher.regex.is_none());
+        assert_eq!(matcher.exact_line.as_deref(), Some("<CONTINUE-LOOP>"));
     }
 
     #[test]
@@ -4706,6 +4854,7 @@ mod tests {
             poll: 5,
             log_preview_lines: 3,
             trigger_edge: true,
+            recheck_before_send: true,
             fanout: FanoutMode::Matched,
             duration: None,
         };
@@ -4762,6 +4911,7 @@ mod tests {
             poll: 5,
             log_preview_lines: 3,
             trigger_edge: true,
+            recheck_before_send: true,
             fanout: FanoutMode::Matched,
             duration: None,
         };
@@ -5184,6 +5334,7 @@ poll: 5
 trigger_confirm_seconds: 5
 log_preview_lines: 3
 trigger_edge: true
+recheck_before_send: true
 duration: 2h
 
 template_vars:
