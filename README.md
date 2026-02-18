@@ -180,7 +180,12 @@ loopmux run -t ai:5.0 -n 5 \
 - `--exclude`: regex to skip matches (optional).
 - `--pre` / `--post`: optional prompt blocks.
 - `--once`: send a single prompt and exit.
-- `--tail N`: number of capture-pane lines (default 1, last non-blank line).
+- `-t, --target`: tmux target selector (repeatable).
+- `--targets-file PATH`: load tmux targets from a file (`#` comments and blank lines ignored).
+- `--file PATH`: add a file source to scan for triggers.
+- `--files-file PATH`: load file sources from a file (`#` comments and blank lines ignored).
+- `--tail N`: scan the last `N` lines from each source (default `1`, applies `last non-blank line` shortcut when `N=1`).
+- `--head N`: scan the first `N` lines from each source (mutually exclusive with `--tail`).
 - `--single-line`: update status output on a single line.
 - `--poll N`: polling interval in seconds while waiting for matches (default 5).
 - `--trigger-confirm-seconds N`: require trigger to stay matched for N seconds before send (default 5).
@@ -191,6 +196,36 @@ loopmux run -t ai:5.0 -n 5 \
 - `--tui`: enable the interactive terminal UI.
 - `--history-limit N`: max history entries to keep/show in TUI picker (default 50).
 - `--name`: optional codename for this run; auto-generated if omitted.
+
+### Mixed source examples
+Use tmux + files together:
+
+```bash
+loopmux run \
+  --target ai:5.0 \
+  --targets-file ./targets.txt \
+  --file ./logs/assistant.log \
+  --files-file ./watch-files.txt \
+  --head 20 \
+  --prompt "Continue iteration and summarize updates." \
+  --trigger "<CONTINUE-LOOP>|Ready for next step"
+```
+
+`targets.txt` format:
+
+```text
+# comments are ignored
+ai:5.0
+codex:1.0
+```
+
+`watch-files.txt` format:
+
+```text
+# comments are ignored
+./logs/assistant.log
+./logs/review.log
+```
 
 ### TUI history picker
 - Run `loopmux run --tui` with no prompt/config to pick from recent commands.
@@ -259,8 +294,15 @@ By default, loopmux also requires matches to remain present for `5s` before send
 
 ### No triggers firing
 - Check your match regex/contains.
-- Confirm the pane output actually includes the trigger text.
+- Confirm the source output actually includes the trigger text (`tmux` pane or file window).
+- If you use file sources, validate paths are readable regular files.
+- For sentinel lines, prefer `--trigger-exact-line` and a unique token.
 - Use `multi_match` if you expect more than one rule to fire.
+
+### File source gotchas
+- Use `--tail` for append-only logs and `--head` when the important marker stays near the top.
+- `--tail` and `--head` are mutually exclusive.
+- In `fanout matched` mode, a file match sends to configured tmux recipients.
 
 ### Too fast or too slow
 - Adjust `delay` (fixed/range/jitter/backoff).
