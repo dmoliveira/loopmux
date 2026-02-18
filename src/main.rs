@@ -232,6 +232,7 @@ struct SimulateArgs {
         "  loopmux runs next <id-or-name>\n",
         "  loopmux runs renew <id-or-name>\n",
         "  loopmux runs stop <id-or-name>\n",
+        "  loopmux runs --profile docs ls\n",
         "  loopmux runs tui\n\n",
         "Tip: use run names (`--name`) for easier targeting in fleet commands.\n\n",
         "Version: ",
@@ -240,6 +241,9 @@ struct SimulateArgs {
     )
 )]
 struct RunsArgs {
+    /// Filter runs by profile id/name.
+    #[arg(long)]
+    profile: Option<String>,
     #[command(subcommand)]
     action: Option<RunsAction>,
 }
@@ -661,6 +665,8 @@ struct RunIdentity {
 struct FleetRunRecord {
     id: String,
     name: String,
+    #[serde(default)]
+    profile_id: String,
     pid: u32,
     host: String,
     target: String,
@@ -701,6 +707,7 @@ enum FleetControlCommand {
 
 struct FleetRunRegistry {
     identity: RunIdentity,
+    profile_id: String,
     state_path: PathBuf,
     control_path: PathBuf,
     last_control_token: Option<String>,
@@ -911,9 +918,10 @@ fn run(args: RunArgs) -> Result<()> {
 }
 
 fn runs(args: RunsArgs) -> Result<()> {
+    let profile_filter = args.profile.as_deref();
     match args.action.unwrap_or(RunsAction::Ls) {
-        RunsAction::Ls => print_fleet_runs(),
-        RunsAction::Tui => run_fleet_manager_tui(),
+        RunsAction::Ls => print_fleet_runs(profile_filter),
+        RunsAction::Tui => run_fleet_manager_tui(profile_filter),
         RunsAction::Stop { target } => send_fleet_command(&target, FleetControlCommand::Stop),
         RunsAction::Hold { target } => send_fleet_command(&target, FleetControlCommand::Hold),
         RunsAction::Resume { target } => send_fleet_command(&target, FleetControlCommand::Resume),
@@ -1616,13 +1624,18 @@ fn auto_run_name() -> String {
 }
 
 impl FleetRunRegistry {
-    fn new(identity: RunIdentity) -> Result<Self> {
+    fn new(identity: RunIdentity, profile_id: Option<String>) -> Result<Self> {
         std::fs::create_dir_all(fleet_state_dir()?)?;
         std::fs::create_dir_all(fleet_control_dir()?)?;
+        let profile_id = profile_id
+            .unwrap_or_else(|| identity.name.clone())
+            .trim()
+            .to_string();
         Ok(Self {
             state_path: fleet_state_path(&identity.id)?,
             control_path: fleet_control_path(&identity.id)?,
             identity,
+            profile_id,
             last_control_token: None,
         })
     }
@@ -1636,6 +1649,7 @@ impl FleetRunRegistry {
         let base_record = FleetRunRecord {
             id: self.identity.id.clone(),
             name: self.identity.name.clone(),
+            profile_id: self.profile_id.clone(),
             pid: std::process::id(),
             host,
             target: target.to_string(),
@@ -1877,6 +1891,7 @@ fn pid_alive(pid: u32) -> bool {
 
 fn fleet_manager_visible_runs(
     runs: &[FleetListedRun],
+    profile_filter: Option<&str>,
     show_stale: bool,
     mismatch_only: bool,
     state_filter: FleetStateFilter,
@@ -1887,6 +1902,13 @@ fn fleet_manager_visible_runs(
     let search = search_query.trim().to_ascii_lowercase();
     let mut visible: Vec<FleetListedRun> = runs
         .iter()
+        .filter(|run| {
+            if let Some(profile_filter) = profile_filter {
+                run_matches_profile_filter(run, profile_filter)
+            } else {
+                true
+            }
+        })
         .filter(|run| show_stale || !run.stale)
         .filter(|run| !mismatch_only || run.version_mismatch)
         .filter(|run| state_filter.allows(run))
@@ -1920,12 +1942,22 @@ fn run_matches_query(run: &FleetListedRun, query: &str) -> bool {
     [
         run.record.name.as_str(),
         run.record.id.as_str(),
+        run.record.profile_id.as_str(),
         run.record.target.as_str(),
         run.record.state.as_str(),
         version,
     ]
     .iter()
     .any(|value| value.to_ascii_lowercase().contains(query))
+}
+
+fn run_matches_profile_filter(run: &FleetListedRun, profile_filter: &str) -> bool {
+    let needle = profile_filter.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return true;
+    }
+    run.record.profile_id.to_ascii_lowercase() == needle
+        || run.record.name.to_ascii_lowercase() == needle
 }
 
 fn fleet_manager_counts(runs: &[FleetListedRun]) -> (usize, usize, usize, usize) {
@@ -2096,11 +2128,21 @@ fn resolve_fleet_target(target: &str, runs: &[FleetListedRun]) -> Result<FleetLi
     Ok(matches[0].clone())
 }
 
-fn print_fleet_runs() -> Result<()> {
+fn print_fleet_runs(profile_filter: Option<&str>) -> Result<()> {
     let mut runs = load_fleet_runs()?;
+    if let Some(profile_filter) = profile_filter {
+        runs.retain(|run| run_matches_profile_filter(run, profile_filter));
+    }
     runs.sort_by(|a, b| b.record.last_seen.cmp(&a.record.last_seen));
     if runs.is_empty() {
-        println!("No local loopmux runs found.");
+        if let Some(profile_filter) = profile_filter {
+            println!(
+                "No local loopmux runs found for profile filter '{}'.",
+                profile_filter
+            );
+        } else {
+            println!("No local loopmux runs found.");
+        }
         return Ok(());
     }
     println!("Active local loopmux runs (local v{}):", LOOPMUX_VERSION);
@@ -2117,10 +2159,15 @@ fn print_fleet_runs() -> Result<()> {
             "match"
         };
         println!(
-            "- {} ({}) id={} pid={} state={} sends={} target={} version={} ({}) last_seen={}",
+            "- {} ({}) id={} profile={} pid={} state={} sends={} target={} version={} ({}) last_seen={}",
             run.record.name,
             stale,
             run.record.id,
+            if run.record.profile_id.trim().is_empty() {
+                "-"
+            } else {
+                run.record.profile_id.as_str()
+            },
             run.record.pid,
             run.record.state,
             run.record.sends,
@@ -2238,18 +2285,18 @@ fn sleep_with_heartbeat(
     Ok(())
 }
 
-fn run_fleet_manager_tui() -> Result<()> {
+fn run_fleet_manager_tui(profile_filter: Option<&str>) -> Result<()> {
     enable_raw_mode().context("failed to enable raw mode for fleet manager")?;
-    let result = run_fleet_manager_tui_inner(false);
+    let result = run_fleet_manager_tui_inner(false, profile_filter);
     let _ = disable_raw_mode();
     result
 }
 
 fn run_fleet_manager_tui_embedded() -> Result<()> {
-    run_fleet_manager_tui_inner(true)
+    run_fleet_manager_tui_inner(true, None)
 }
 
-fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
+fn run_fleet_manager_tui_inner(embedded: bool, profile_filter: Option<&str>) -> Result<()> {
     let mut selected: usize = 0;
     let mut selected_run_id: Option<String> = None;
     let mut message = String::from("fleet manager ready");
@@ -2277,6 +2324,7 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
             all_runs = load_fleet_runs()?;
             runs = fleet_manager_visible_runs(
                 &all_runs,
+                profile_filter,
                 show_stale,
                 mismatch_only,
                 state_filter,
@@ -2311,7 +2359,7 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
 
         let (width, height) = crossterm::terminal::size().unwrap_or((120, 30));
         let header = format!(
-            "loopmux v{} fleet manager | runs={}/{}{}{} | preset={} filter={} sort={} search={} | active={} holding={} stale={} mismatch={} | selected={} | q/esc {}",
+            "loopmux v{} fleet manager | runs={}/{}{}{}{} | preset={} filter={} sort={} search={} | active={} holding={} stale={} mismatch={} | selected={} | q/esc {}",
             LOOPMUX_VERSION,
             runs.len(),
             all_runs.len(),
@@ -2320,6 +2368,11 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
                 " (mismatch only)"
             } else {
                 ""
+            },
+            if let Some(profile_filter) = profile_filter {
+                format!(" (profile={profile_filter})")
+            } else {
+                String::new()
             },
             view_preset.label(),
             state_filter.label(),
@@ -2358,13 +2411,18 @@ fn run_fleet_manager_tui_inner(embedded: bool) -> Result<()> {
             };
             let mismatch = if run.version_mismatch { " !" } else { "" };
             let line = format!(
-                "{}{} {} [{}{} {}] sends={} ver={} health={}({}) target={}",
+                "{}{} {} [{}{} {}] profile={} sends={} ver={} health={}({}) target={}",
                 marker,
                 selected_mark,
                 run.record.name,
                 stale,
                 mismatch,
                 run.record.state,
+                if run.record.profile_id.trim().is_empty() {
+                    "-"
+                } else {
+                    run.record.profile_id.as_str()
+                },
                 run.record.sends,
                 version,
                 run.health_label,
@@ -3209,7 +3267,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
     let mut backoff_state: std::collections::HashMap<String, BackoffState> =
         std::collections::HashMap::new();
     let mut logger = Logger::new(config.logging.clone())?;
-    let mut fleet_registry = FleetRunRegistry::new(identity.clone())?;
+    let mut fleet_registry = FleetRunRegistry::new(identity.clone(), config.profile_id.clone())?;
     let tui_enabled = config.tui && std::io::stdout().is_terminal();
     let ui_mode = if tui_enabled {
         UiMode::Tui
@@ -7540,6 +7598,7 @@ runs:
         FleetRunRecord {
             id: id.to_string(),
             name: name.to_string(),
+            profile_id: name.to_string(),
             pid: 1,
             host: "local".to_string(),
             target: "ai:1.0".to_string(),
@@ -7580,6 +7639,7 @@ runs:
 
         let hidden = fleet_manager_visible_runs(
             &vec![active.clone(), stale.clone()],
+            None,
             false,
             false,
             FleetStateFilter::All,
@@ -7592,6 +7652,7 @@ runs:
 
         let all = fleet_manager_visible_runs(
             &vec![active, stale],
+            None,
             true,
             false,
             FleetStateFilter::All,
@@ -7623,6 +7684,7 @@ runs:
         );
         let filtered = fleet_manager_visible_runs(
             &vec![run_match, run_mismatch.clone()],
+            None,
             true,
             true,
             FleetStateFilter::All,
@@ -7648,6 +7710,7 @@ runs:
         );
         let filtered = fleet_manager_visible_runs(
             &vec![waiting, holding.clone()],
+            None,
             true,
             false,
             FleetStateFilter::Holding,
@@ -7668,6 +7731,7 @@ runs:
         );
         let by_name = fleet_manager_visible_runs(
             &vec![run.clone()],
+            None,
             true,
             false,
             FleetStateFilter::All,
@@ -7679,6 +7743,7 @@ runs:
 
         let by_target = fleet_manager_visible_runs(
             &vec![run],
+            None,
             true,
             false,
             FleetStateFilter::All,
@@ -7687,6 +7752,17 @@ runs:
             FleetViewPreset::Default,
         );
         assert_eq!(by_target.len(), 1);
+    }
+
+    #[test]
+    fn fleet_profile_filter_matches_profile_or_name() {
+        let run = fleet_listed(
+            fleet_test_record("run-1", "planner-a", "waiting", 1, LOOPMUX_VERSION),
+            false,
+            false,
+        );
+        assert!(run_matches_profile_filter(&run, "planner-a"));
+        assert!(!run_matches_profile_filter(&run, "docs"));
     }
 
     #[test]
