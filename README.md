@@ -207,6 +207,28 @@ loopmux runs [--profile <id>] tui
 loopmux runs stop <run-id-or-name>
 ```
 
+## Release Automation
+
+Automate bump/tag/release/tap/local verification:
+
+```bash
+make release VERSION=0.1.25
+```
+
+Optional Make variables:
+
+```bash
+make release VERSION=0.1.25 REPO=dmoliveira/loopmux TAP_REPO=dmoliveira/homebrew-tap NO_BREW=1
+```
+
+Direct script usage:
+
+```bash
+./release/ship.sh 0.1.25
+```
+
+Use `./release/ship.sh --help` for options (`--repo`, `--tap-repo`, `--no-brew`).
+
 ## Lean Mode (no YAML)
 
 Use inline flags to run a quick loop without a config file.
