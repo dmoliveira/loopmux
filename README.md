@@ -202,8 +202,8 @@ loopmux config list [--config ~/.config/loopmux/config.yaml] [--all]
 loopmux config validate [--config ~/.config/loopmux/config.yaml] [--all]
 loopmux config doctor [--config ~/.config/loopmux/config.yaml] [--all]
 loopmux config test --profile <id> [--config ~/.config/loopmux/config.yaml]
-loopmux runs ls
-loopmux runs tui
+loopmux runs [--profile <id>] ls
+loopmux runs [--profile <id>] tui
 loopmux runs stop <run-id-or-name>
 ```
 
@@ -318,6 +318,7 @@ codex:1.0
 - Quick command workflow:
   ```bash
   loopmux runs ls
+  loopmux runs --profile docs ls
   loopmux runs hold <id-or-name>
   loopmux runs resume <id-or-name>
   loopmux runs next <id-or-name>
@@ -330,6 +331,11 @@ codex:1.0
   loopmux runs ls
   ```
   - Output includes each run version and whether it matches local version.
+- Filter runs by profile id/name:
+  ```bash
+  loopmux runs --profile docs ls
+  loopmux runs --profile docs tui
+  ```
 - Send controls to a run by id or name:
   ```bash
   loopmux runs hold <id-or-name>
