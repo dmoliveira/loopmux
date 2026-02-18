@@ -168,14 +168,16 @@ Use inline flags to run a quick loop without a config file.
 ```bash
 loopmux run -t ai:5.0 -n 5 \
   --prompt "Do the next iteration." \
-  --trigger "Concluded|What is next" \
+  --trigger-expr "(Concluded || READY) && NEXT" \
   --exclude "PROD" \
   --once
 ```
 
 ### Lean flags
 - `--prompt`: required prompt body.
-- `--trigger`: regex to match tmux output (required).
+- `--trigger`: regex to match source output.
+- `--trigger-expr`: boolean expression trigger mode using regex atoms, `&&`, `||`, and parentheses.
+- `--trigger` and `--trigger-expr` are mutually exclusive; provide one of them.
 - `--trigger-exact-line`: treat `--trigger` as an exact trimmed line match (good for sentinel tokens like `<CONTINUE-LOOP>`).
 - `--exclude`: regex to skip matches (optional).
 - `--pre` / `--post`: optional prompt blocks.
@@ -197,6 +199,34 @@ loopmux run -t ai:5.0 -n 5 \
 - `--history-limit N`: max history entries to keep/show in TUI picker (default 50).
 - `--name`: optional codename for this run; auto-generated if omitted.
 
+### Trigger expression quick reference
+- Use regex terms joined by boolean operators:
+  - `&&` logical AND
+  - `||` logical OR
+  - `(` `)` grouping
+- Precedence: parentheses > `&&` > `||` (left-associative).
+- `--trigger-exact-line` applies only to `--trigger` (not `--trigger-expr`).
+
+Examples:
+
+```bash
+loopmux run -t ai:5.0 \
+  --prompt "Continue iteration" \
+  --trigger-expr "(READY || DONE) && NEXT"
+
+loopmux run -t ai:5.0 \
+  --prompt "Continue iteration" \
+  --trigger-expr "<CONTINUE-LOOP> && (LGTM || APPROVED)"
+```
+
+### Migration notes (`--trigger` -> `--trigger-expr`)
+- Keep `--trigger` when a single regex is enough.
+- Move to `--trigger-expr` when you need explicit boolean logic.
+- A direct migration pattern is to wrap existing regex terms as atoms and compose with operators:
+  - before: `--trigger "READY|DONE"`
+  - after: `--trigger-expr "READY || DONE"`
+- If you previously used `--trigger-exact-line`, keep that mode on `--trigger`; expression mode remains regex-atom based.
+
 ### Mixed source examples
 Use tmux + files together:
 
@@ -208,7 +238,7 @@ loopmux run \
   --files-file ./watch-files.txt \
   --head 20 \
   --prompt "Continue iteration and summarize updates." \
-  --trigger "<CONTINUE-LOOP>|Ready for next step"
+  --trigger-expr "<CONTINUE-LOOP> || Ready for next step"
 ```
 
 `targets.txt` format:
@@ -293,10 +323,11 @@ By default, loopmux also requires matches to remain present for `5s` before send
 - Confirm the assistant is running in the target pane.
 
 ### No triggers firing
-- Check your match regex/contains.
+- Check your regex terms or expression atoms.
 - Confirm the source output actually includes the trigger text (`tmux` pane or file window).
 - If you use file sources, validate paths are readable regular files.
 - For sentinel lines, prefer `--trigger-exact-line` and a unique token.
+- For expression mode, validate operator precedence (`&&` before `||`) and add parentheses when intent is ambiguous.
 - Use `multi_match` if you expect more than one rule to fire.
 
 ### File source gotchas
