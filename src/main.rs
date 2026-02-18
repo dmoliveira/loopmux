@@ -84,7 +84,7 @@ struct RunArgs {
     /// File containing tmux targets (one per line, '#' comments ignored).
     #[arg(long)]
     targets_file: Vec<PathBuf>,
-    /// File source to scan (planned for mixed-source loop support).
+    /// File source to scan for triggers.
     #[arg(long)]
     file: Vec<PathBuf>,
     /// File containing file sources (one path per line, '#' comments ignored).
@@ -182,7 +182,7 @@ struct ValidateArgs {
     /// File containing tmux targets (one per line, '#' comments ignored).
     #[arg(long)]
     targets_file: Vec<PathBuf>,
-    /// File source to validate (planned for mixed-source loop support).
+    /// File source to validate.
     #[arg(long)]
     file: Vec<PathBuf>,
     /// File containing file sources (one path per line, '#' comments ignored).
@@ -2600,9 +2600,9 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
 
         let mut plans: Vec<SendPlan> = Vec::new();
         let mut matched_sources: HashSet<String> = HashSet::new();
-        let mut poll_targets: Vec<String> = Vec::new();
+        let mut tmux_recipients: Vec<String> = Vec::new();
         if loop_state != LoopState::Holding {
-            poll_targets = if let Some(explicit) = &config.explicit_targets {
+            tmux_recipients = if let Some(explicit) = &config.explicit_targets {
                 explicit.clone()
             } else {
                 let panes = match list_tmux_panes() {
@@ -2615,10 +2615,12 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                 };
                 select_targets_for_scope(&config.target_scope, &panes)
             };
+            let mut poll_targets = tmux_recipients.clone();
+            poll_targets.extend(config.file_sources.iter().map(|path| file_source_key(path)));
             let mut broadcast_plan_keys: HashSet<String> = HashSet::new();
 
             for target in &poll_targets {
-                let output = match capture_pane(target, config.capture_window) {
+                let output = match capture_source(target, config.capture_window) {
                     Ok(output) => output,
                     Err(err) => {
                         let detail = err.to_string();
@@ -2789,8 +2791,14 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                 }
 
                 let recipients = match config.fanout {
-                    FanoutMode::Matched => vec![plan.source_target.clone()],
-                    FanoutMode::Broadcast => poll_targets.clone(),
+                    FanoutMode::Matched => {
+                        if file_source_path(&plan.source_target).is_some() {
+                            tmux_recipients.clone()
+                        } else {
+                            vec![plan.source_target.clone()]
+                        }
+                    }
+                    FanoutMode::Broadcast => tmux_recipients.clone(),
                 };
                 if recipients.is_empty() {
                     continue;
@@ -2799,7 +2807,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                 let mut sent_any_for_plan = false;
                 for target in recipients {
                     if config.recheck_before_send {
-                        let output = capture_pane(&target, config.capture_window)?;
+                        let output = capture_source(&target, config.capture_window)?;
                         let output = if config.capture_window.lines() == 1
                             && config.capture_window.is_tail()
                         {
@@ -3253,6 +3261,34 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
     }
     println!("loopmux: stopped after {send_count} sends (elapsed {elapsed})");
     Ok(())
+}
+
+fn capture_source(source: &str, window: CaptureWindow) -> Result<String> {
+    if let Some(path) = file_source_path(source) {
+        return capture_file(path, window);
+    }
+    capture_pane(source, window)
+}
+
+fn capture_file(path: &str, window: CaptureWindow) -> Result<String> {
+    let path_buf = PathBuf::from(path);
+    let content = std::fs::read_to_string(&path_buf)
+        .with_context(|| format!("failed to read file source: {}", path_buf.display()))?;
+    let lines = content.lines().collect::<Vec<_>>();
+    if lines.is_empty() {
+        return Ok(String::new());
+    }
+    let selected = match window {
+        CaptureWindow::Tail(count) => {
+            let start = lines.len().saturating_sub(count);
+            &lines[start..]
+        }
+        CaptureWindow::Head(count) => {
+            let end = lines.len().min(count);
+            &lines[..end]
+        }
+    };
+    Ok(selected.join("\n"))
 }
 
 fn capture_pane(target: &str, window: CaptureWindow) -> Result<String> {
@@ -3817,6 +3853,7 @@ struct ResolvedConfig {
     target_scope: TargetScope,
     target_label: String,
     explicit_targets: Option<Vec<String>>,
+    file_sources: Vec<String>,
     iterations: Option<u32>,
     infinite: bool,
     has_prompt: bool,
@@ -4542,12 +4579,8 @@ fn resolve_config(
         .targets
         .clone()
         .unwrap_or_else(|| config.target.clone().into_iter().collect());
-    if let Some(files) = &config.files
-        && !files.is_empty()
-    {
-        bail!(
-            "file sources are parsed but not yet executable in run/validate; delivery continues in bd-1l6"
-        );
+    if let Some(files) = &config.files {
+        validate_file_sources(files)?;
     }
 
     let explicit_targets = if requested_targets.len() > 1 {
@@ -4636,6 +4669,7 @@ fn resolve_config(
         target_scope,
         target_label,
         explicit_targets,
+        file_sources: config.files.unwrap_or_default(),
         iterations,
         infinite,
         has_prompt,
@@ -4663,6 +4697,9 @@ fn resolve_config(
 fn print_validation(config: &ResolvedConfig) {
     println!("Validation OK");
     println!("- target: {}", config.target_label);
+    if !config.file_sources.is_empty() {
+        println!("- file_sources: {}", config.file_sources.join(", "));
+    }
     if config.infinite {
         println!("- iterations: infinite");
     } else if let Some(iterations) = config.iterations {
@@ -4869,6 +4906,29 @@ fn validate_tmux_targets(targets: &[String]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn validate_file_sources(files: &[String]) -> Result<()> {
+    for file in files {
+        let path = PathBuf::from(file);
+        if !path.exists() {
+            bail!("file source not found: {}", path.display());
+        }
+        if !path.is_file() {
+            bail!("file source is not a regular file: {}", path.display());
+        }
+        std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read file source: {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn file_source_key(path: &str) -> String {
+    format!("file://{path}")
+}
+
+fn file_source_path(key: &str) -> Option<&str> {
+    key.strip_prefix("file://")
 }
 
 fn list_tmux_panes() -> Result<Vec<TmuxPane>> {
@@ -5633,6 +5693,49 @@ mod tests {
     }
 
     #[test]
+    fn resolve_config_rejects_missing_file_source() {
+        let config = Config {
+            target: Some("ai:5.0".to_string()),
+            targets: None,
+            files: Some(vec!["/tmp/loopmux-missing-source.log".to_string()]),
+            iterations: Some(1),
+            infinite: None,
+            poll: Some(1),
+            trigger_confirm_seconds: Some(0),
+            log_preview_lines: Some(1),
+            trigger_edge: Some(true),
+            recheck_before_send: Some(true),
+            fanout: Some(FanoutMode::Matched),
+            duration: None,
+            rule_eval: Some(RuleEval::FirstMatch),
+            default_action: Some(Action {
+                pre: None,
+                prompt: Some(PromptBlock::Single("go".to_string())),
+                post: None,
+            }),
+            delay: None,
+            rules: Some(vec![rule_with(Some(match_contains("ok")), None)]),
+            logging: None,
+            template_vars: None,
+        };
+        let err = resolve_config(
+            config,
+            None,
+            None,
+            true,
+            Some(1),
+            None,
+            false,
+            false,
+            false,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("file source not found"));
+    }
+
+    #[test]
     fn parse_target_valid() {
         let (session, window, pane) = parse_target("ai:5.0").unwrap();
         assert_eq!(session, "ai");
@@ -5743,6 +5846,36 @@ mod tests {
     }
 
     #[test]
+    fn capture_file_respects_head_and_tail_windows() {
+        let root = std::env::temp_dir().join(format!(
+            "loopmux-capture-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("sample.log");
+        std::fs::write(&file, "A\nB\nC\nD\n").unwrap();
+
+        let tail = capture_file(&file.display().to_string(), CaptureWindow::Tail(2)).unwrap();
+        let head = capture_file(&file.display().to_string(), CaptureWindow::Head(2)).unwrap();
+
+        assert_eq!(tail, "C\nD");
+        assert_eq!(head, "A\nB");
+
+        let _ = std::fs::remove_file(file);
+        let _ = std::fs::remove_dir(root);
+    }
+
+    #[test]
+    fn file_source_key_round_trip() {
+        let key = file_source_key("/tmp/a.log");
+        assert_eq!(file_source_path(&key), Some("/tmp/a.log"));
+        assert!(file_source_path("ai:5.0").is_none());
+    }
+
+    #[test]
     fn sanitize_run_name_normalizes_chars() {
         assert_eq!(sanitize_run_name(" My Run #1 "), "my-run--1");
         assert_eq!(sanitize_run_name("alpha_beta"), "alpha_beta");
@@ -5803,6 +5936,7 @@ mod tests {
             target_scope: TargetScope::Pane("ai:5.0".to_string()),
             target_label: "ai:5.0".to_string(),
             explicit_targets: None,
+            file_sources: Vec::new(),
             iterations: Some(10),
             infinite: false,
             has_prompt: true,
@@ -5861,6 +5995,7 @@ mod tests {
             target_scope: TargetScope::Pane("ai:5.0".to_string()),
             target_label: "ai:5.0".to_string(),
             explicit_targets: None,
+            file_sources: Vec::new(),
             iterations: Some(10),
             infinite: false,
             has_prompt: true,
