@@ -93,9 +93,12 @@ struct RunArgs {
     /// Iterations to run, overrides config.
     #[arg(long, short = 'n')]
     iterations: Option<u32>,
-    /// Tail lines from tmux capture (default 1).
+    /// Tail lines from source capture (default 1).
     #[arg(long, requires = "prompt", conflicts_with = "config")]
     tail: Option<usize>,
+    /// Head lines from source capture.
+    #[arg(long, requires = "prompt", conflicts_with_all = ["config", "tail"])]
+    head: Option<usize>,
     /// Run a single send and exit.
     #[arg(long, requires = "prompt", conflicts_with = "config")]
     once: bool,
@@ -157,6 +160,7 @@ struct HistoryEntry {
     post: Option<String>,
     iterations: Option<u32>,
     tail: Option<usize>,
+    head: Option<usize>,
     once: bool,
     poll: Option<u64>,
     trigger_confirm_seconds: Option<u64>,
@@ -634,6 +638,7 @@ fn run(args: RunArgs) -> Result<()> {
         args.iterations,
         false,
         args.tail,
+        args.head,
         args.once,
         args.single_line,
         args.tui,
@@ -691,6 +696,9 @@ fn hydrate_run_args_from_history(mut args: RunArgs) -> Result<RunArgs> {
     }
     if args.tail.is_none() {
         args.tail = entry.tail;
+    }
+    if args.head.is_none() {
+        args.head = entry.head;
     }
     if !args.once {
         args.once = entry.once;
@@ -2225,13 +2233,14 @@ fn history_signature(args: &RunArgs) -> Option<String> {
     let prompt = args.prompt.as_ref()?;
     let trigger = args.trigger.as_ref()?;
     Some(format!(
-        "target={target}|prompt={prompt}|trigger={trigger}|trigger_exact_line={}|exclude={}|pre={}|post={}|iterations={}|tail={}|once={}|poll={}|trigger_confirm_seconds={}|log_preview_lines={}|trigger_edge={}|recheck_before_send={}|fanout={}|duration={}",
+        "target={target}|prompt={prompt}|trigger={trigger}|trigger_exact_line={}|exclude={}|pre={}|post={}|iterations={}|tail={}|head={}|once={}|poll={}|trigger_confirm_seconds={}|log_preview_lines={}|trigger_edge={}|recheck_before_send={}|fanout={}|duration={}",
         args.trigger_exact_line,
         args.exclude.as_deref().unwrap_or(""),
         args.pre.as_deref().unwrap_or(""),
         args.post.as_deref().unwrap_or(""),
         args.iterations.map(|v| v.to_string()).unwrap_or_default(),
         args.tail.map(|v| v.to_string()).unwrap_or_default(),
+        args.head.map(|v| v.to_string()).unwrap_or_default(),
         args.once,
         args.poll.map(|v| v.to_string()).unwrap_or_default(),
         args.trigger_confirm_seconds
@@ -2273,6 +2282,7 @@ fn store_run_history(args: &RunArgs) -> Result<()> {
             post: args.post.clone(),
             iterations: args.iterations,
             tail: args.tail,
+            head: args.head,
             once: args.once,
             poll: args.poll,
             trigger_confirm_seconds: args.trigger_confirm_seconds,
@@ -2291,7 +2301,7 @@ fn store_run_history(args: &RunArgs) -> Result<()> {
 
 fn history_entry_signature(entry: &HistoryEntry) -> Option<String> {
     Some(format!(
-        "target={}|prompt={}|trigger={}|trigger_exact_line={}|exclude={}|pre={}|post={}|iterations={}|tail={}|once={}|poll={}|trigger_confirm_seconds={}|log_preview_lines={}|trigger_edge={}|recheck_before_send={}|fanout={}|duration={}",
+        "target={}|prompt={}|trigger={}|trigger_exact_line={}|exclude={}|pre={}|post={}|iterations={}|tail={}|head={}|once={}|poll={}|trigger_confirm_seconds={}|log_preview_lines={}|trigger_edge={}|recheck_before_send={}|fanout={}|duration={}",
         entry.target,
         entry.prompt,
         entry.trigger,
@@ -2301,6 +2311,7 @@ fn history_entry_signature(entry: &HistoryEntry) -> Option<String> {
         entry.post.as_deref().unwrap_or(""),
         entry.iterations.map(|v| v.to_string()).unwrap_or_default(),
         entry.tail.map(|v| v.to_string()).unwrap_or_default(),
+        entry.head.map(|v| v.to_string()).unwrap_or_default(),
         entry.once,
         entry.poll.map(|v| v.to_string()).unwrap_or_default(),
         entry
@@ -2591,19 +2602,23 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
         let mut matched_sources: HashSet<String> = HashSet::new();
         let mut poll_targets: Vec<String> = Vec::new();
         if loop_state != LoopState::Holding {
-            let panes = match list_tmux_panes() {
-                Ok(value) => value,
-                Err(err) => {
-                    let detail = err.to_string();
-                    logger.log(LogEvent::error(&config, detail))?;
-                    return Err(err);
-                }
+            poll_targets = if let Some(explicit) = &config.explicit_targets {
+                explicit.clone()
+            } else {
+                let panes = match list_tmux_panes() {
+                    Ok(value) => value,
+                    Err(err) => {
+                        let detail = err.to_string();
+                        logger.log(LogEvent::error(&config, detail))?;
+                        return Err(err);
+                    }
+                };
+                select_targets_for_scope(&config.target_scope, &panes)
             };
-            poll_targets = select_targets_for_scope(&config.target_scope, &panes);
             let mut broadcast_plan_keys: HashSet<String> = HashSet::new();
 
             for target in &poll_targets {
-                let output = match capture_pane(target, config.tail) {
+                let output = match capture_pane(target, config.capture_window) {
                     Ok(output) => output,
                     Err(err) => {
                         let detail = err.to_string();
@@ -2611,11 +2626,12 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                         return Err(err);
                     }
                 };
-                let output = if config.tail == 1 {
-                    last_non_empty_line(&output)
-                } else {
-                    output
-                };
+                let output =
+                    if config.capture_window.lines() == 1 && config.capture_window.is_tail() {
+                        last_non_empty_line(&output)
+                    } else {
+                        output
+                    };
                 let hash = hash_output(&output);
                 let last_hash = last_hash_by_target.get(target).cloned().unwrap_or_default();
                 let has_pending_confirm =
@@ -2783,8 +2799,10 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                 let mut sent_any_for_plan = false;
                 for target in recipients {
                     if config.recheck_before_send {
-                        let output = capture_pane(&target, config.tail)?;
-                        let output = if config.tail == 1 {
+                        let output = capture_pane(&target, config.capture_window)?;
+                        let output = if config.capture_window.lines() == 1
+                            && config.capture_window.is_tail()
+                        {
                             last_non_empty_line(&output)
                         } else {
                             output
@@ -3237,10 +3255,19 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
     Ok(())
 }
 
-fn capture_pane(target: &str, lines: usize) -> Result<String> {
-    let output = std::process::Command::new("tmux")
-        .args(["capture-pane", "-p", "-S"])
-        .arg(format!("-{lines}"))
+fn capture_pane(target: &str, window: CaptureWindow) -> Result<String> {
+    let mut command = std::process::Command::new("tmux");
+    command.arg("capture-pane").arg("-p");
+    match window {
+        CaptureWindow::Tail(lines) => {
+            command.arg("-S").arg(format!("-{lines}"));
+        }
+        CaptureWindow::Head(lines) => {
+            let end = lines.saturating_sub(1);
+            command.arg("-S").arg("0").arg("-E").arg(end.to_string());
+        }
+    }
+    let output = command
         .args(["-t", target])
         .output()
         .context("failed to capture tmux pane")?;
@@ -3616,6 +3643,7 @@ fn validate(args: ValidateArgs) -> Result<()> {
         args.iterations,
         args.skip_tmux,
         None,
+        None,
         false,
         false,
         false,
@@ -3788,6 +3816,7 @@ fn collect_source_inputs(
 struct ResolvedConfig {
     target_scope: TargetScope,
     target_label: String,
+    explicit_targets: Option<Vec<String>>,
     iterations: Option<u32>,
     infinite: bool,
     has_prompt: bool,
@@ -3805,10 +3834,35 @@ struct ResolvedConfig {
     template_vars: Vec<String>,
     default_action: Action,
     logging: LoggingConfigResolved,
-    tail: usize,
+    capture_window: CaptureWindow,
     once: bool,
     single_line: bool,
     tui: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CaptureWindow {
+    Tail(usize),
+    Head(usize),
+}
+
+impl CaptureWindow {
+    fn from_overrides(tail: Option<usize>, head: Option<usize>) -> Self {
+        if let Some(lines) = head {
+            return Self::Head(lines.max(1));
+        }
+        Self::Tail(tail.unwrap_or(1).max(1))
+    }
+
+    fn lines(self) -> usize {
+        match self {
+            Self::Tail(lines) | Self::Head(lines) => lines,
+        }
+    }
+
+    fn is_tail(self) -> bool {
+        matches!(self, Self::Tail(_))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4466,6 +4520,7 @@ fn resolve_config(
     iterations_override: Option<u32>,
     skip_tmux: bool,
     tail_override: Option<usize>,
+    head_override: Option<usize>,
     once: bool,
     single_line: bool,
     tui: bool,
@@ -4487,12 +4542,6 @@ fn resolve_config(
         .targets
         .clone()
         .unwrap_or_else(|| config.target.clone().into_iter().collect());
-    if requested_targets.len() > 1 {
-        bail!(
-            "multiple tmux targets are parsed but not yet executable in a single run (got {}); this lands in bd-1l6",
-            requested_targets.len()
-        );
-    }
     if let Some(files) = &config.files
         && !files.is_empty()
     {
@@ -4501,11 +4550,20 @@ fn resolve_config(
         );
     }
 
-    let target_input = requested_targets.first().map(String::as_str);
-    let (target_scope, target_label) = if skip_tmux {
-        resolve_target_scope_offline(target_input)?
+    let explicit_targets = if requested_targets.len() > 1 {
+        Some(resolve_explicit_targets(&requested_targets, skip_tmux)?)
     } else {
-        resolve_target_scope(target_input)?
+        None
+    };
+    let (target_scope, target_label) = if let Some(targets) = explicit_targets.as_ref() {
+        (TargetScope::All, targets.join(","))
+    } else {
+        let target_input = requested_targets.first().map(String::as_str);
+        if skip_tmux {
+            resolve_target_scope_offline(target_input)?
+        } else {
+            resolve_target_scope(target_input)?
+        }
     };
 
     let infinite = config.infinite.unwrap_or(false);
@@ -4564,13 +4622,20 @@ fn resolve_config(
     let fanout = config.fanout.unwrap_or(FanoutMode::Matched);
 
     if !skip_tmux {
+        if let Some(targets) = explicit_targets.as_ref() {
+            validate_tmux_targets(targets)?;
+        }
         validate_tmux_scope(&target_scope)?;
     }
 
-    let tail = tail_override.unwrap_or(1);
+    if tail_override.is_some() && head_override.is_some() {
+        bail!("--tail and --head are mutually exclusive");
+    }
+    let window = CaptureWindow::from_overrides(tail_override, head_override);
     Ok(ResolvedConfig {
         target_scope,
         target_label,
+        explicit_targets,
         iterations,
         infinite,
         has_prompt,
@@ -4588,7 +4653,7 @@ fn resolve_config(
         template_vars: template_var_keys,
         default_action,
         logging,
-        tail,
+        capture_window: window,
         once,
         single_line,
         tui,
@@ -4627,7 +4692,10 @@ fn print_validation(config: &ResolvedConfig) {
             log_format_label(config.logging.format)
         );
     }
-    println!("- tail: {}", config.tail);
+    match config.capture_window {
+        CaptureWindow::Tail(lines) => println!("- tail: {lines}"),
+        CaptureWindow::Head(lines) => println!("- head: {lines}"),
+    }
     println!("- poll: {}s", config.poll);
     println!(
         "- trigger_confirm_seconds: {}s",
@@ -4789,6 +4857,20 @@ fn validate_tmux_scope(scope: &TargetScope) -> Result<()> {
     Ok(())
 }
 
+fn validate_tmux_targets(targets: &[String]) -> Result<()> {
+    let panes = list_tmux_panes()?;
+    let available = panes
+        .iter()
+        .map(|pane| pane.target.as_str())
+        .collect::<HashSet<_>>();
+    for target in targets {
+        if !available.contains(target.as_str()) {
+            bail!("tmux target not found: {target}");
+        }
+    }
+    Ok(())
+}
+
 fn list_tmux_panes() -> Result<Vec<TmuxPane>> {
     let output = std::process::Command::new("tmux")
         .args([
@@ -4840,6 +4922,20 @@ fn resolve_target_scope(target: Option<&str>) -> Result<(TargetScope, String)> {
 
 fn resolve_target_scope_offline(target: Option<&str>) -> Result<(TargetScope, String)> {
     resolve_target_scope_with(target, resolve_target_offline)
+}
+
+fn resolve_explicit_targets(targets: &[String], skip_tmux: bool) -> Result<Vec<String>> {
+    let mut resolved = Vec::with_capacity(targets.len());
+    for target in targets {
+        let candidate = if skip_tmux {
+            resolve_target_offline(target)?
+        } else {
+            resolve_target(target)?
+        };
+        parse_target(&candidate)?;
+        resolved.push(candidate);
+    }
+    Ok(dedupe_preserve_order(resolved))
 }
 
 fn resolve_target_scope_with(
@@ -5345,6 +5441,7 @@ mod tests {
             files_file: Vec::new(),
             iterations: Some(1),
             tail: None,
+            head: None,
             once: false,
             dry_run: false,
             single_line: false,
@@ -5378,6 +5475,7 @@ mod tests {
             files_file: Vec::new(),
             iterations: Some(2),
             tail: Some(123),
+            head: None,
             once: true,
             dry_run: false,
             single_line: false,
@@ -5394,10 +5492,10 @@ mod tests {
         };
         let config = resolve_run_config(&args).unwrap();
         let resolved = resolve_config(
-            config, None, None, true, args.tail, args.once, false, false, None, None,
+            config, None, None, true, args.tail, args.head, args.once, false, false, None, None,
         )
         .unwrap();
-        assert_eq!(resolved.tail, 123);
+        assert!(matches!(resolved.capture_window, CaptureWindow::Tail(123)));
         assert!(resolved.once);
         assert_eq!(resolved.rules.len(), 1);
         assert_eq!(
@@ -5430,6 +5528,7 @@ mod tests {
             files_file: Vec::new(),
             iterations: Some(2),
             tail: Some(1),
+            head: None,
             once: true,
             dry_run: false,
             single_line: false,
@@ -5450,6 +5549,87 @@ mod tests {
         let matcher = rule.match_.unwrap();
         assert!(matcher.regex.is_none());
         assert_eq!(matcher.exact_line.as_deref(), Some("<CONTINUE-LOOP>"));
+    }
+
+    #[test]
+    fn resolve_config_prefers_head_window_when_set() {
+        let args = RunArgs {
+            config: None,
+            prompt: Some("Do it".to_string()),
+            trigger: Some("Done".to_string()),
+            trigger_exact_line: false,
+            exclude: None,
+            pre: None,
+            post: None,
+            target: vec!["ai:5.0".to_string()],
+            targets_file: Vec::new(),
+            file: Vec::new(),
+            files_file: Vec::new(),
+            iterations: Some(1),
+            tail: None,
+            head: Some(7),
+            once: false,
+            dry_run: false,
+            single_line: false,
+            tui: false,
+            poll: None,
+            trigger_confirm_seconds: None,
+            log_preview_lines: None,
+            no_trigger_edge: false,
+            no_recheck_before_send: false,
+            fanout: FanoutMode::Matched,
+            duration: None,
+            history_limit: None,
+            name: None,
+        };
+        let config = resolve_run_config(&args).unwrap();
+        let resolved = resolve_config(
+            config, None, None, true, args.tail, args.head, false, false, false, None, None,
+        )
+        .unwrap();
+        assert!(matches!(resolved.capture_window, CaptureWindow::Head(7)));
+    }
+
+    #[test]
+    fn resolve_config_supports_multiple_explicit_tmux_targets() {
+        let args = RunArgs {
+            config: None,
+            prompt: Some("Do it".to_string()),
+            trigger: Some("Done".to_string()),
+            trigger_exact_line: false,
+            exclude: None,
+            pre: None,
+            post: None,
+            target: vec!["ai:5.0".to_string(), "codex:1.0".to_string()],
+            targets_file: Vec::new(),
+            file: Vec::new(),
+            files_file: Vec::new(),
+            iterations: Some(1),
+            tail: Some(5),
+            head: None,
+            once: false,
+            dry_run: false,
+            single_line: false,
+            tui: false,
+            poll: None,
+            trigger_confirm_seconds: None,
+            log_preview_lines: None,
+            no_trigger_edge: false,
+            no_recheck_before_send: false,
+            fanout: FanoutMode::Matched,
+            duration: None,
+            history_limit: None,
+            name: None,
+        };
+        let config = resolve_run_config(&args).unwrap();
+        let resolved = resolve_config(
+            config, None, None, true, args.tail, args.head, false, false, false, None, None,
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.explicit_targets,
+            Some(vec!["ai:5.0".to_string(), "codex:1.0".to_string()])
+        );
     }
 
     #[test]
@@ -5503,6 +5683,17 @@ mod tests {
             matches!(scope, TargetScope::Window { ref session, ref window } if session == "ai" && window == "5")
         );
         assert_eq!(label, "ai:5.*");
+    }
+
+    #[test]
+    fn resolve_explicit_targets_dedupes_preserving_order() {
+        let targets = vec![
+            "ai:5.0".to_string(),
+            "codex:1.0".to_string(),
+            "ai:5.0".to_string(),
+        ];
+        let resolved = resolve_explicit_targets(&targets, true).unwrap();
+        assert_eq!(resolved, vec!["ai:5.0", "codex:1.0"]);
     }
 
     #[test]
@@ -5611,6 +5802,7 @@ mod tests {
         let config = ResolvedConfig {
             target_scope: TargetScope::Pane("ai:5.0".to_string()),
             target_label: "ai:5.0".to_string(),
+            explicit_targets: None,
             iterations: Some(10),
             infinite: false,
             has_prompt: true,
@@ -5629,7 +5821,7 @@ mod tests {
                 path: None,
                 format: LogFormatResolved::Text,
             },
-            tail: 200,
+            capture_window: CaptureWindow::Tail(200),
             once: false,
             single_line: false,
             tui: false,
@@ -5668,6 +5860,7 @@ mod tests {
         let config = ResolvedConfig {
             target_scope: TargetScope::Pane("ai:5.0".to_string()),
             target_label: "ai:5.0".to_string(),
+            explicit_targets: None,
             iterations: Some(10),
             infinite: false,
             has_prompt: true,
@@ -5686,7 +5879,7 @@ mod tests {
                 path: None,
                 format: LogFormatResolved::Text,
             },
-            tail: 200,
+            capture_window: CaptureWindow::Tail(200),
             once: false,
             single_line: false,
             tui: false,
