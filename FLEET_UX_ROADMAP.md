@@ -50,8 +50,19 @@ Status legend: `pending`, `in_progress`, `completed`, `blocked`.
 | E3-T4 | Add copy helpers (`id`, command snippet) | completed | added `i` run-id copy and `y` stop-snippet copy |
 | E3-T5 | Add summary counters (active/holding/stale/mismatch) | completed | header/details now expose fleet health counters |
 
+## Epic 4 - Fleet operator throughput + visual stability
+
+| ID | Task | Status | Notes |
+|---|---|---|---|
+| E4-T1 | Add marked-run bulk actions with confirmation preview | completed | added mark mode + pending bulk preview + enter-to-confirm |
+| E4-T2 | Add sortable list columns and quick view presets | completed | added sort cycle + preset cycle/direct keys |
+| E4-T3 | Add health scoring and attention-focused views | completed | each run now carries health score/label + attention preset |
+| E4-T4 | Add per-run event timeline in details panel | completed | latest state/send/target events shown in details panel |
+| E4-T5 | Reduce fleet TUI flicker and tune refresh cadence | completed | switched to differential line redraw + throttled refresh loop |
+
 ## Execution order
 
 1. Finish Epic 0 (this branch).
 2. Implement Epic 1 + Epic 2 together (shared version surface).
 3. Implement Epic 3 in iterative slices.
+4. Implement Epic 4 in operator-first order (bulk -> sort/presets -> health -> timeline -> visuals).
