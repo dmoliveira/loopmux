@@ -30,6 +30,7 @@ Allow `loopmux` to start without subcommands by loading `~/.config/loopmux/confi
 
 - Status output includes `profile=<id>` plus matched rule details.
 - TUI status bar includes `run <id>` to clarify which profile is active.
+- `loopmux config doctor` surfaces common workspace profile issues with fix-oriented messages.
 
 ## Acceptance criteria
 
