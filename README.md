@@ -269,6 +269,16 @@ codex:1.0
 ### Fleet manager (local)
 - Every running `loopmux run` writes a local registry entry under `~/.loopmux/runs/state/`.
 - Each run has an id plus a codename (`--name` or auto-generated like `amber-fox-0421`).
+- Quick command workflow:
+  ```bash
+  loopmux runs ls
+  loopmux runs hold <id-or-name>
+  loopmux runs resume <id-or-name>
+  loopmux runs next <id-or-name>
+  loopmux runs renew <id-or-name>
+  loopmux runs stop <id-or-name>
+  loopmux runs tui
+  ```
 - List runs:
   ```bash
   loopmux runs ls

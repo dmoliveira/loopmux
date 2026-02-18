@@ -221,7 +221,22 @@ struct SimulateArgs {
 }
 
 #[derive(Debug, Parser)]
-#[command(after_help = concat!("Version: ", env!("CARGO_PKG_VERSION"), "\n"))]
+#[command(
+    after_help = concat!(
+        "Quick fleet flow:\n",
+        "  loopmux runs ls\n",
+        "  loopmux runs hold <id-or-name>\n",
+        "  loopmux runs resume <id-or-name>\n",
+        "  loopmux runs next <id-or-name>\n",
+        "  loopmux runs renew <id-or-name>\n",
+        "  loopmux runs stop <id-or-name>\n",
+        "  loopmux runs tui\n\n",
+        "Tip: use run names (`--name`) for easier targeting in fleet commands.\n\n",
+        "Version: ",
+        env!("CARGO_PKG_VERSION"),
+        "\n"
+    )
+)]
 struct RunsArgs {
     #[command(subcommand)]
     action: Option<RunsAction>,
