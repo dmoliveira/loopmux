@@ -1,14 +1,14 @@
 use std::collections::{BTreeMap, HashSet};
 use std::io::{IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use crossterm::QueueableCommand;
 use crossterm::cursor::MoveTo;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType};
-use crossterm::QueueableCommand;
+use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode};
 use regex::Regex;
 use serde::Deserialize;
 use serde::Serialize;
@@ -1182,11 +1182,7 @@ fn config_validate(path_override: Option<&PathBuf>, all: bool) -> Result<()> {
 }
 
 fn yes_no(value: bool) -> &'static str {
-    if value {
-        "yes"
-    } else {
-        "no"
-    }
+    if value { "yes" } else { "no" }
 }
 
 fn load_workspace_profile_context(
@@ -1194,11 +1190,39 @@ fn load_workspace_profile_context(
 ) -> Result<(PathBuf, Vec<ResolvedRunProfile>, PathBuf)> {
     let config_path = resolve_workspace_config_path(path_override)?;
     if !config_path.exists() {
+        if path_override.is_none() {
+            ensure_default_workspace_config_exists(&config_path)?;
+        }
+    }
+    if !config_path.exists() {
         bail!("workspace config not found at {}", config_path.display());
     }
     let profiles = load_workspace_profiles(&config_path)?;
     let cwd = std::env::current_dir().context("failed to read current working directory")?;
     Ok((config_path, profiles, cwd))
+}
+
+fn ensure_default_workspace_config_exists(config_path: &Path) -> Result<()> {
+    if config_path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let template = default_template();
+    std::fs::write(config_path, template).with_context(|| {
+        format!(
+            "failed to write default config to {}",
+            config_path.display()
+        )
+    })?;
+    println!(
+        "Created default workspace config at {}",
+        config_path.display()
+    );
+    println!("Included `continue-loop` starter event (`exact_line: <CONTINUE-LOOP>`).");
+    Ok(())
 }
 
 fn resolve_workspace_config_path(path_override: Option<&PathBuf>) -> Result<PathBuf> {
@@ -5774,11 +5798,7 @@ fn log_line_date(line: &str) -> Option<&str> {
     let close = line.find(']')?;
     let ts = line.get(1..close)?;
     let date = ts.split('T').next()?;
-    if date.len() == 10 {
-        Some(date)
-    } else {
-        None
-    }
+    if date.len() == 10 { Some(date) } else { None }
 }
 
 fn parse_log_timestamp(line: &str) -> Option<OffsetDateTime> {
@@ -7022,6 +7042,41 @@ events:
     }
 
     #[test]
+    fn ensure_default_workspace_config_creates_template_with_continue_loop_event() {
+        let root = std::env::temp_dir().join(format!(
+            "loopmux-ensure-config-create-{}",
+            OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        let config_path = root.join("loopmux").join("config.yaml");
+
+        ensure_default_workspace_config_exists(&config_path).unwrap();
+
+        let contents = std::fs::read_to_string(&config_path).unwrap();
+        assert!(contents.contains("exact_line: \"<CONTINUE-LOOP>\""));
+        assert!(contents.contains("continue-loop"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ensure_default_workspace_config_keeps_existing_file() {
+        let root = std::env::temp_dir().join(format!(
+            "loopmux-ensure-config-existing-{}",
+            OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let config_path = root.join("config.yaml");
+        std::fs::write(&config_path, "id: existing\n").unwrap();
+
+        ensure_default_workspace_config_exists(&config_path).unwrap();
+
+        let contents = std::fs::read_to_string(&config_path).unwrap();
+        assert_eq!(contents, "id: existing\n");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn config_doctor_reports_duplicate_profile_ids() {
         let root = std::env::temp_dir().join(format!(
             "loopmux-doctor-dup-{}",
@@ -7081,9 +7136,10 @@ runs:
         .unwrap();
 
         let err = config_doctor(Some(&config_path), true).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("multiple selected profiles enable `tui`"));
+        assert!(
+            err.to_string()
+                .contains("multiple selected profiles enable `tui`")
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

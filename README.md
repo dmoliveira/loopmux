@@ -68,6 +68,7 @@ loopmux run -t ai:5.0 -n 5 \
 
 ### Config-first startup (no subcommand)
 - Run `loopmux` with no subcommand to auto-start matching profiles from `~/.config/loopmux/config.yaml`.
+- If that file does not exist yet, loopmux creates it automatically with a starter `continue-loop` event (`exact_line: <CONTINUE-LOOP>`).
 - Profiles in `runs:` (or `events:` alias) can be enabled/disabled and filtered by current directory.
 - Multiple matching profiles are started together (each as an independent run process).
 
