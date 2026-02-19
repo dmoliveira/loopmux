@@ -3,12 +3,12 @@ use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use crossterm::QueueableCommand;
 use crossterm::cursor::MoveTo;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType};
+use crossterm::QueueableCommand;
 use regex::Regex;
 use serde::Deserialize;
 use serde::Serialize;
@@ -1182,7 +1182,11 @@ fn config_validate(path_override: Option<&PathBuf>, all: bool) -> Result<()> {
 }
 
 fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
 }
 
 fn load_workspace_profile_context(
@@ -2021,6 +2025,7 @@ fn fleet_manager_counts(runs: &[FleetListedRun]) -> (usize, usize, usize, usize)
 
 fn fleet_detail_lines(
     selected_run: Option<&FleetListedRun>,
+    profile_filter: Option<&str>,
     show_stale: bool,
     mismatch_only: bool,
     state_filter: FleetStateFilter,
@@ -2034,12 +2039,15 @@ fn fleet_detail_lines(
     let mut lines = Vec::new();
     lines.push("Details".to_string());
     lines.push(format!(
-        "preset={} stale={} mismatch_only={} state={} sort={} search={}",
+        "view={} sort={} state={}",
         view_preset.label(),
+        sort_mode.label(),
+        state_filter.label(),
+    ));
+    lines.push(format!(
+        "filters stale={} mismatch={} search={}",
         if show_stale { "on" } else { "off" },
         if mismatch_only { "on" } else { "off" },
-        state_filter.label(),
-        sort_mode.label(),
         if search_query.trim().is_empty() {
             "<none>"
         } else {
@@ -2047,8 +2055,16 @@ fn fleet_detail_lines(
         }
     ));
     lines.push(format!(
-        "summary active={} holding={} stale={} mismatch={} marked={}",
-        counts.0, counts.1, counts.2, counts.3, marked_count
+        "scope profile={} marked={}",
+        profile_filter
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("<all>"),
+        marked_count,
+    ));
+    lines.push(format!(
+        "summary active={} holding={} stale={} mismatch={}",
+        counts.0, counts.1, counts.2, counts.3
     ));
 
     if let Some(action) = pending_action {
@@ -2130,13 +2146,104 @@ fn fleet_detail_lines(
 
     lines.push(String::new());
     lines.push("actions".to_string());
-    lines.push("space mark/unmark selected run, a clears marks".to_string());
-    lines.push("S/H/P/N/U arm bulk stop/hold/resume/next/renew".to_string());
-    lines.push("1-4 presets, p cycles presets, o cycles sort".to_string());
-    lines.push("/ enter search mode (name/id/target/state/ver)".to_string());
-    lines.push("h/r/n/R single control, s safe stop, enter jump/confirm".to_string());
-    lines.push("i copy run id, y copy stop snippet, x/v/f filters".to_string());
+    lines.push("space mark, a clear marks, / search".to_string());
+    lines.push("p or 1-4 presets, o sort, x/v/f filters".to_string());
+    lines.push("h/r/n/R single control, s safe stop".to_string());
+    lines.push("S/H/P/N/U bulk arm, Enter confirm, c cancel".to_string());
+    lines.push("i copy id, y copy stop snippet".to_string());
     lines
+}
+
+fn fleet_header_line(
+    visible_runs: usize,
+    total_runs: usize,
+    selected_index: usize,
+    counts: (usize, usize, usize, usize),
+    embedded: bool,
+) -> String {
+    format!(
+        "loopmux v{} fleet manager | visible={}/{} selected={} active={} holding={} stale={} mismatch={} | q/esc {}",
+        LOOPMUX_VERSION,
+        visible_runs,
+        total_runs,
+        selected_index,
+        counts.0,
+        counts.1,
+        counts.2,
+        counts.3,
+        if embedded {
+            "return to run"
+        } else {
+            "quit manager"
+        }
+    )
+}
+
+fn fleet_status_line(
+    view_preset: FleetViewPreset,
+    sort_mode: FleetSortMode,
+    state_filter: FleetStateFilter,
+    show_stale: bool,
+    mismatch_only: bool,
+    search_query: &str,
+    profile_filter: Option<&str>,
+) -> String {
+    format!(
+        "view={} sort={} state={} stale={} mismatch={} search={} profile={}",
+        view_preset.label(),
+        sort_mode.label(),
+        state_filter.label(),
+        if show_stale { "on" } else { "off" },
+        if mismatch_only { "on" } else { "off" },
+        if search_query.trim().is_empty() {
+            "<none>"
+        } else {
+            search_query.trim()
+        },
+        profile_filter
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("<all>")
+    )
+}
+
+fn fleet_run_list_line(
+    run: &FleetListedRun,
+    selected: bool,
+    marked: bool,
+    use_unicode: bool,
+) -> String {
+    let marker = if selected { ">" } else { " " };
+    let selected_mark = if marked { "[x]" } else { "[ ]" };
+    let version = if run.record.version.is_empty() {
+        "unknown"
+    } else {
+        run.record.version.as_str()
+    };
+    let mut tags: Vec<&str> = Vec::new();
+    tags.push(if run.stale { "stale" } else { "active" });
+    if run.needs_attention {
+        tags.push("attention");
+    }
+    if run.version_mismatch {
+        tags.push("mismatch");
+    }
+    let mut line = format!(
+        "{}{} {} [{}] sends={} health={}({}) target={}",
+        marker,
+        selected_mark,
+        run.record.name,
+        tags.join(","),
+        run.record.sends,
+        run.health_label,
+        run.health_score,
+        truncate_text(&run.record.target, 28, use_unicode)
+    );
+    if run.version_mismatch {
+        line.push_str(&format!(" ver={version}"));
+    }
+    line.push_str(&format!(" state={}", run.record.state));
+    line
 }
 
 fn resolve_fleet_target(target: &str, runs: &[FleetListedRun]) -> Result<FleetListedRun> {
@@ -2421,76 +2528,31 @@ fn run_fleet_manager_tui_inner(embedded: bool, profile_filter: Option<&str>) -> 
         }
 
         let (width, height) = crossterm::terminal::size().unwrap_or((120, 30));
-        let header = format!(
-            "loopmux v{} fleet manager | runs={}/{}{}{}{} | preset={} filter={} sort={} search={} | active={} holding={} stale={} mismatch={} | selected={} | q/esc {}",
-            LOOPMUX_VERSION,
+        let header = fleet_header_line(
             runs.len(),
             all_runs.len(),
-            if show_stale { "" } else { " (hide stale)" },
-            if mismatch_only {
-                " (mismatch only)"
-            } else {
-                ""
-            },
-            if let Some(profile_filter) = profile_filter {
-                format!(" (profile={profile_filter})")
-            } else {
-                String::new()
-            },
-            view_preset.label(),
-            state_filter.label(),
-            sort_mode.label(),
-            if search_query.is_empty() {
-                "<none>"
-            } else {
-                search_query.as_str()
-            },
-            counts.0,
-            counts.1,
-            counts.2,
-            counts.3,
             if runs.is_empty() { 0 } else { selected + 1 },
-            if embedded {
-                "return to run"
-            } else {
-                "quit manager"
-            }
+            counts,
+            embedded,
+        );
+        let status = fleet_status_line(
+            view_preset,
+            sort_mode,
+            state_filter,
+            show_stale,
+            mismatch_only,
+            &search_query,
+            profile_filter,
         );
 
-        let content_rows = height.saturating_sub(2) as usize;
+        let content_rows = height.saturating_sub(3) as usize;
         let mut lines = Vec::new();
         for (idx, run) in runs.iter().take(content_rows).enumerate() {
-            let marker = if idx == selected { ">" } else { " " };
-            let selected_mark = if selected_ids.contains(&run.record.id) {
-                "[x]"
-            } else {
-                "[ ]"
-            };
-            let stale = if run.stale { "stale" } else { "active" };
-            let version = if run.record.version.is_empty() {
-                "unknown"
-            } else {
-                run.record.version.as_str()
-            };
-            let mismatch = if run.version_mismatch { " !" } else { "" };
-            let line = format!(
-                "{}{} {} [{}{} {}] profile={} sends={} ver={} health={}({}) target={}",
-                marker,
-                selected_mark,
-                run.record.name,
-                stale,
-                mismatch,
-                run.record.state,
-                if run.record.profile_id.trim().is_empty() {
-                    "-"
-                } else {
-                    run.record.profile_id.as_str()
-                },
-                run.record.sends,
-                version,
-                run.health_label,
-                run.health_score,
-                truncate_text(&run.record.target, 28, true)
+            let line = fleet_run_list_line(
+                run,
+                idx == selected,
+                selected_ids.contains(&run.record.id),
+                true,
             );
             lines.push(line);
         }
@@ -2498,6 +2560,7 @@ fn run_fleet_manager_tui_inner(embedded: bool, profile_filter: Option<&str>) -> 
         let selected_run = runs.get(selected);
         let details = fleet_detail_lines(
             selected_run,
+            profile_filter,
             show_stale,
             mismatch_only,
             state_filter,
@@ -2510,26 +2573,29 @@ fn run_fleet_manager_tui_inner(embedded: bool, profile_filter: Option<&str>) -> 
         );
 
         let footer = format!(
-            "<-/> nav · space mark · a clear-mark · p/1-4 presets · o sort · x stale · v mismatch · f state · / search · enter jump/confirm · i id · y stop-cmd · h/r/n/R single · S/H/P/N/U bulk · s arm stop · c cancel · q/esc {} · {}",
+            "nav <-/-> · mark space · clear a · presets p/1-4 · sort o · filters x/v/f · search / · single h/r/n/R/s · bulk S/H/P/N/U · enter confirm · c cancel · i id · y stop-cmd · q/esc {} · {}",
             if embedded {
                 "return to run"
             } else {
                 "quit manager"
             },
-            truncate_text(&message, width.saturating_sub(80) as usize, true)
+            truncate_text(&message, width.saturating_sub(130) as usize, true)
         );
 
         let split_mode = width >= 120;
-        let left_width = ((width as usize) * 58 / 100)
-            .max(52)
-            .min((width as usize).saturating_sub(20));
-        let right_width = (width as usize).saturating_sub(left_width + 1);
+        let left_width = ((width as usize) * 54 / 100)
+            .max(46)
+            .min((width as usize).saturating_sub(24));
+        let right_width = (width as usize).saturating_sub(left_width + 3);
         let mut screen_lines = vec![String::new(); height as usize];
         if !screen_lines.is_empty() {
             screen_lines[0] = fit_line(&header, width as usize, true);
         }
+        if screen_lines.len() > 1 {
+            screen_lines[1] = fit_line(&status, width as usize, true);
+        }
         for idx in 0..content_rows {
-            let row = idx + 1;
+            let row = idx + 2;
             if row >= screen_lines.len().saturating_sub(1) {
                 break;
             }
@@ -2538,7 +2604,7 @@ fn run_fleet_manager_tui_inner(embedded: bool, profile_filter: Option<&str>) -> 
                 let right = details.get(idx).map(|value| value.as_str()).unwrap_or("");
                 screen_lines[row] = fit_line(
                     &format!(
-                        "{} {}",
+                        "{} | {}",
                         pad_to_width(&fit_line(left, left_width, true), left_width),
                         fit_line(right, right_width, true)
                     ),
@@ -5798,7 +5864,11 @@ fn log_line_date(line: &str) -> Option<&str> {
     let close = line.find(']')?;
     let ts = line.get(1..close)?;
     let date = ts.split('T').next()?;
-    if date.len() == 10 { Some(date) } else { None }
+    if date.len() == 10 {
+        Some(date)
+    } else {
+        None
+    }
 }
 
 fn parse_log_timestamp(line: &str) -> Option<OffsetDateTime> {
@@ -7136,10 +7206,9 @@ runs:
         .unwrap();
 
         let err = config_doctor(Some(&config_path), true).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("multiple selected profiles enable `tui`")
-        );
+        assert!(err
+            .to_string()
+            .contains("multiple selected profiles enable `tui`"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -8471,6 +8540,36 @@ runs:
         );
         assert!(run_matches_profile_filter(&run, "planner-a"));
         assert!(!run_matches_profile_filter(&run, "docs"));
+    }
+
+    #[test]
+    fn fleet_status_line_includes_profile_and_search() {
+        let line = fleet_status_line(
+            FleetViewPreset::Default,
+            FleetSortMode::LastSeen,
+            FleetStateFilter::All,
+            false,
+            true,
+            "needle",
+            Some("docs"),
+        );
+        assert!(line.contains("search=needle"));
+        assert!(line.contains("profile=docs"));
+        assert!(line.contains("mismatch=on"));
+    }
+
+    #[test]
+    fn fleet_run_list_line_includes_mismatch_tag_and_version() {
+        let run = fleet_listed(
+            fleet_test_record("run-2", "beta", "holding", 2, "0.0.1"),
+            false,
+            true,
+        );
+        let line = fleet_run_list_line(&run, true, true, true);
+        assert!(line.contains(">[x] beta"));
+        assert!(line.contains("[active"));
+        assert!(line.contains("mismatch"));
+        assert!(line.contains("ver=0.0.1"));
     }
 
     #[test]
