@@ -89,6 +89,11 @@ poll: 5
 default_action:
   prompt: "Do the next iteration."
 rules:
+  - id: continue-loop
+    match:
+      exact_line: "<CONTINUE-LOOP>"
+    action:
+      prompt: "Continue iteration in the wt flow e2e, remember to commit small advances."
   - id: continue
     match:
       regex: "Concluded|What is next"
