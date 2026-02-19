@@ -3657,6 +3657,20 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                 )?;
             }
 
+            if ui_mode == UiMode::SingleLine {
+                let elapsed =
+                    format_std_duration(effective_elapsed(run_started, held_total, hold_started));
+                let status = status_line(
+                    &config,
+                    send_count,
+                    max_sends,
+                    active_rule.as_deref(),
+                    &elapsed,
+                );
+                print!("\r{status}");
+                let _ = std::io::stdout().flush();
+            }
+
             sleep_with_heartbeat(
                 &fleet_registry,
                 &config.target_label,
@@ -6750,14 +6764,38 @@ fn status_line(
         format!("{}/{}", send_count, max_sends)
     };
     let rule = rule_id.unwrap_or("<unnamed>");
+    let (selector_label, selector_value) = if config.exec_command.is_some() {
+        ("event", format_exec_event_label(rule))
+    } else {
+        ("rule", rule.to_string())
+    };
     let profile = config.profile_id.as_deref().unwrap_or("-");
     let icon = ">";
     let color = "\u{001B}[32m";
     let reset = "\u{001B}[0m";
     format!(
-        "{}{} status:{} profile={} target={} progress={} rule={} elapsed={}{}",
-        color, icon, reset, profile, config.target_label, progress, rule, elapsed, reset
+        "{}{} status:{} profile={} target={} progress={} {}={} elapsed={}{}",
+        color,
+        icon,
+        reset,
+        profile,
+        config.target_label,
+        progress,
+        selector_label,
+        selector_value,
+        elapsed,
+        reset
     )
+}
+
+fn format_exec_event_label(value: &str) -> String {
+    match value {
+        "exec:started" => "started".to_string(),
+        "exec:running" => "running".to_string(),
+        "exec:ok" => "ok".to_string(),
+        "exec:fail" => "fail".to_string(),
+        _ => value.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -7988,6 +8026,59 @@ runs:
         );
         assert!(bar.contains("evt exec:running"));
         assert!(bar.contains("exec://gw-watch-comp"));
+    }
+
+    #[test]
+    fn status_line_exec_uses_friendly_event_label() {
+        let config = ResolvedConfig {
+            profile_id: Some("watcher".to_string()),
+            exec_command: Some("gw-watch-comp".to_string()),
+            target_scope: TargetScope::All,
+            target_label: "exec://gw-watch-comp".to_string(),
+            explicit_targets: None,
+            file_sources: Vec::new(),
+            iterations: Some(3),
+            infinite: false,
+            has_prompt: false,
+            rule_eval: RuleEval::FirstMatch,
+            rules: Vec::new(),
+            delay: None,
+            trigger_confirm_seconds: DEFAULT_TRIGGER_CONFIRM_SECONDS,
+            prompt_placeholders: Vec::new(),
+            template_vars: Vec::new(),
+            default_action: Action {
+                pre: None,
+                prompt: None,
+                post: None,
+            },
+            logging: LoggingConfigResolved {
+                path: None,
+                format: LogFormatResolved::Text,
+            },
+            capture_window: CaptureWindow::Tail(1),
+            once: false,
+            single_line: true,
+            tui: false,
+            poll: 10,
+            log_preview_lines: 3,
+            trigger_edge: true,
+            recheck_before_send: true,
+            fanout: FanoutMode::Matched,
+            duration: None,
+        };
+
+        let line = status_line(&config, 1, 3, Some("exec:running"), "5s");
+        assert!(line.contains("event=running"));
+        assert!(!line.contains("rule=exec:running"));
+    }
+
+    #[test]
+    fn format_exec_event_label_maps_known_values() {
+        assert_eq!(format_exec_event_label("exec:started"), "started");
+        assert_eq!(format_exec_event_label("exec:running"), "running");
+        assert_eq!(format_exec_event_label("exec:ok"), "ok");
+        assert_eq!(format_exec_event_label("exec:fail"), "fail");
+        assert_eq!(format_exec_event_label("custom"), "custom");
     }
 
     #[test]
