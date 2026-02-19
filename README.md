@@ -294,6 +294,8 @@ loopmux run --exec "gw-watch-comp" --poll 10 --iterations 3 --name gw-watch
 
 If a prior command invocation is still running at the next poll, loopmux waits and checks again on the next tick (no overlapping invocations).
 
+TUI status shows `evt` labels in exec mode (for example, `exec:running`, `exec:ok`, `exec:fail`) to make watcher state easier to scan.
+
 ### Trigger expression quick reference
 - Use regex terms joined by boolean operators:
   - `&&` logical AND
