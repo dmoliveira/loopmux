@@ -3,12 +3,12 @@ use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use crossterm::QueueableCommand;
 use crossterm::cursor::MoveTo;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType};
+use crossterm::QueueableCommand;
 use regex::Regex;
 use serde::Deserialize;
 use serde::Serialize;
@@ -1182,7 +1182,11 @@ fn config_validate(path_override: Option<&PathBuf>, all: bool) -> Result<()> {
 }
 
 fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
 }
 
 fn load_workspace_profile_context(
@@ -3666,6 +3670,20 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                 )?;
             }
 
+            if ui_mode == UiMode::SingleLine {
+                let elapsed =
+                    format_std_duration(effective_elapsed(run_started, held_total, hold_started));
+                let status = status_line(
+                    &config,
+                    send_count,
+                    max_sends,
+                    active_rule.as_deref(),
+                    &elapsed,
+                );
+                print!("\r{status}");
+                let _ = std::io::stdout().flush();
+            }
+
             sleep_with_heartbeat(
                 &fleet_registry,
                 &config.target_label,
@@ -5756,7 +5774,11 @@ fn log_line_date(line: &str) -> Option<&str> {
     let close = line.find(']')?;
     let ts = line.get(1..close)?;
     let date = ts.split('T').next()?;
-    if date.len() == 10 { Some(date) } else { None }
+    if date.len() == 10 {
+        Some(date)
+    } else {
+        None
+    }
 }
 
 fn parse_log_timestamp(line: &str) -> Option<OffsetDateTime> {
@@ -6754,11 +6776,11 @@ fn status_line(
     } else {
         format!("{}/{}", send_count, max_sends)
     };
-    let rule = rule_id.unwrap_or("<none>");
-    let label = if config.exec_command.is_some() {
-        "event"
+    let rule = rule_id.unwrap_or("<unnamed>");
+    let (selector_label, selector_value) = if config.exec_command.is_some() {
+        ("event", format_exec_event_label(rule))
     } else {
-        "rule"
+        ("rule", rule.to_string())
     };
     let profile = config.profile_id.as_deref().unwrap_or("-");
     let icon = ">";
@@ -6766,8 +6788,27 @@ fn status_line(
     let reset = "\u{001B}[0m";
     format!(
         "{}{} status:{} profile={} target={} progress={} {}={} elapsed={}{}",
-        color, icon, reset, profile, config.target_label, progress, label, rule, elapsed, reset
+        color,
+        icon,
+        reset,
+        profile,
+        config.target_label,
+        progress,
+        selector_label,
+        selector_value,
+        elapsed,
+        reset
     )
+}
+
+fn format_exec_event_label(value: &str) -> String {
+    match value {
+        "exec:started" => "started".to_string(),
+        "exec:running" => "running".to_string(),
+        "exec:ok" => "ok".to_string(),
+        "exec:fail" => "fail".to_string(),
+        _ => value.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -7040,10 +7081,9 @@ runs:
         .unwrap();
 
         let err = config_doctor(Some(&config_path), true).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("multiple selected profiles enable `tui`")
-        );
+        assert!(err
+            .to_string()
+            .contains("multiple selected profiles enable `tui`"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -8002,7 +8042,7 @@ runs:
     }
 
     #[test]
-    fn status_line_uses_event_key_for_exec_mode() {
+    fn status_line_exec_uses_friendly_event_label() {
         let config = ResolvedConfig {
             profile_id: Some("watcher".to_string()),
             exec_command: Some("gw-watch-comp".to_string()),
@@ -8040,9 +8080,18 @@ runs:
             duration: None,
         };
 
-        let status = status_line(&config, 1, 3, Some("exec:running"), "5s");
-        assert!(status.contains("event=exec:running"));
-        assert!(!status.contains("rule="));
+        let line = status_line(&config, 1, 3, Some("exec:running"), "5s");
+        assert!(line.contains("event=running"));
+        assert!(!line.contains("rule=exec:running"));
+    }
+
+    #[test]
+    fn format_exec_event_label_maps_known_values() {
+        assert_eq!(format_exec_event_label("exec:started"), "started");
+        assert_eq!(format_exec_event_label("exec:running"), "running");
+        assert_eq!(format_exec_event_label("exec:ok"), "ok");
+        assert_eq!(format_exec_event_label("exec:fail"), "fail");
+        assert_eq!(format_exec_event_label("custom"), "custom");
     }
 
     #[test]
