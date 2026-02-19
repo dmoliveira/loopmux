@@ -3306,6 +3306,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
     let mut backoff_state: std::collections::HashMap<String, BackoffState> =
         std::collections::HashMap::new();
     let mut exec_in_flight: Option<ExecInFlight> = None;
+    let mut exec_running_ticks: u32 = 0;
     let mut logger = Logger::new(config.logging.clone())?;
     let mut fleet_registry = FleetRunRegistry::new(identity.clone(), config.profile_id.clone())?;
     let tui_enabled = config.tui && std::io::stdout().is_terminal();
@@ -3333,6 +3334,10 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
         println!("loopmux: running on {}", config.target_label);
         println!("loopmux: version {}", LOOPMUX_VERSION);
         println!("loopmux: run {} ({})", identity.name, identity.id);
+        if let Some(command) = config.exec_command.as_deref() {
+            println!("loopmux: mode exec command=\"{}\"", command);
+            println!("loopmux: successful command exits count as sends; non-zero exits are logged");
+        }
         if config.infinite {
             println!("loopmux: iterations = infinite");
         } else {
@@ -3534,7 +3539,9 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                         let stdout_preview = summarize_exec_stream(&output.stdout, log_use_unicode);
                         let stderr_preview = summarize_exec_stream(&output.stderr, log_use_unicode);
                         if status.success() {
+                            exec_running_ticks = 0;
                             send_count = send_count.saturating_add(1);
+                            active_rule = Some("exec:ok".to_string());
                             let detail = format!(
                                 "command=\"{}\" exit=0 duration_ms={} stdout=\"{}\"",
                                 finished.command,
@@ -3563,6 +3570,8 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                             }
                             logger.log(LogEvent::exec(&config, "exec-triggered", detail))?;
                         } else {
+                            exec_running_ticks = 0;
+                            active_rule = Some("exec:fail".to_string());
                             let exit_label = status
                                 .code()
                                 .map(|code| code.to_string())
@@ -3588,28 +3597,33 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                             logger.log(LogEvent::exec(&config, "exec-failed", detail))?;
                         }
                     } else {
+                        exec_running_ticks = exec_running_ticks.saturating_add(1);
+                        active_rule = Some("exec:running".to_string());
                         let detail = format!(
                             "command=\"{}\" pid={} still-running elapsed={}s",
                             in_flight.command,
                             in_flight.child.id(),
                             in_flight.started_at.elapsed().as_secs()
                         );
-                        logger.log(LogEvent::exec(
-                            &config,
-                            "exec-still-running",
-                            detail.clone(),
-                        ))?;
-                        if let Some(tui_state) = tui.as_mut() {
-                            tui_state.push_log(format!(
-                                "[{}] {}",
-                                timestamp_now(),
-                                truncate_text(&detail, 120, log_use_unicode)
-                            ));
+                        if exec_running_ticks == 1 || exec_running_ticks % 3 == 0 {
+                            logger.log(LogEvent::exec(
+                                &config,
+                                "exec-still-running",
+                                detail.clone(),
+                            ))?;
+                            if let Some(tui_state) = tui.as_mut() {
+                                tui_state.push_log(format!(
+                                    "[{}] {}",
+                                    timestamp_now(),
+                                    truncate_text(&detail, 120, log_use_unicode)
+                                ));
+                            }
                         }
                     }
                 }
                 if exec_in_flight.is_none() && (config.infinite || send_count < max_sends) {
                     let in_flight = spawn_exec_in_flight(exec_command)?;
+                    active_rule = Some("exec:started".to_string());
                     let detail = format!(
                         "command=\"{}\" pid={} poll={}s",
                         in_flight.command,
@@ -3629,6 +3643,18 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                     }
                     exec_in_flight = Some(in_flight);
                 }
+            }
+
+            if let Some(tui_state) = tui.as_mut() {
+                tui_state.update(
+                    loop_state,
+                    &config,
+                    send_count,
+                    max_sends,
+                    active_rule.as_deref(),
+                    active_elapsed,
+                    "",
+                )?;
             }
 
             sleep_with_heartbeat(
@@ -5462,6 +5488,11 @@ fn render_status_bar(
         },
         style.use_unicode_ellipsis,
     );
+    let trigger_prefix = if config.exec_command.is_some() {
+        "evt"
+    } else {
+        "trg"
+    };
 
     let sep_text = if style.use_unicode_ellipsis {
         " · "
@@ -5481,7 +5512,7 @@ fn render_status_bar(
                 right_parts.push(format!("rem {remaining}"));
             }
             right_parts.push(format!("run {profile}"));
-            right_parts.push(format!("trg {trigger_text}"));
+            right_parts.push(format!("{trigger_prefix} {trigger_text}"));
             right_parts.push(format!("v{}", LOOPMUX_VERSION));
             right_parts.push(config.target_label.clone());
         }
@@ -5490,7 +5521,7 @@ fn render_status_bar(
                 right_parts.push(format!("rem {remaining}"));
             }
             right_parts.push(format!("run {profile}"));
-            right_parts.push(format!("trg {trigger_text}"));
+            right_parts.push(format!("{trigger_prefix} {trigger_text}"));
             right_parts.push(format!("last {elapsed}"));
             right_parts.push(format!("v{}", LOOPMUX_VERSION));
             right_parts.push(config.target_label.clone());
@@ -5500,7 +5531,7 @@ fn render_status_bar(
                 right_parts.push(format!("rem {remaining}"));
             }
             right_parts.push(format!("run {profile}"));
-            right_parts.push(format!("trg {trigger_text}"));
+            right_parts.push(format!("{trigger_prefix} {trigger_text}"));
             right_parts.push(format!("last {elapsed}"));
             right_parts.push(format!("v{}", LOOPMUX_VERSION));
             right_parts.push(format!("target {}", config.target_label));
@@ -7897,6 +7928,66 @@ runs:
         assert!(bar.contains("trg"));
         assert!(bar.contains("rem 1m20s"));
         assert!(bar.contains("…"));
+    }
+
+    #[test]
+    fn render_status_bar_exec_uses_event_label() {
+        let config = ResolvedConfig {
+            profile_id: Some("watcher".to_string()),
+            exec_command: Some("gw-watch-comp".to_string()),
+            target_scope: TargetScope::All,
+            target_label: "exec://gw-watch-comp".to_string(),
+            explicit_targets: None,
+            file_sources: Vec::new(),
+            iterations: Some(3),
+            infinite: false,
+            has_prompt: false,
+            rule_eval: RuleEval::FirstMatch,
+            rules: Vec::new(),
+            delay: None,
+            trigger_confirm_seconds: DEFAULT_TRIGGER_CONFIRM_SECONDS,
+            prompt_placeholders: Vec::new(),
+            template_vars: Vec::new(),
+            default_action: Action {
+                pre: None,
+                prompt: None,
+                post: None,
+            },
+            logging: LoggingConfigResolved {
+                path: None,
+                format: LogFormatResolved::Text,
+            },
+            capture_window: CaptureWindow::Tail(1),
+            once: false,
+            single_line: false,
+            tui: true,
+            poll: 10,
+            log_preview_lines: 3,
+            trigger_edge: true,
+            recheck_before_send: true,
+            fanout: FanoutMode::Matched,
+            duration: None,
+        };
+        let bar = render_status_bar(
+            LoopState::Running,
+            LayoutMode::Standard,
+            IconMode::Ascii,
+            StyleConfig {
+                use_color: false,
+                use_bg: false,
+                use_unicode_ellipsis: true,
+                dim_logs: true,
+            },
+            120,
+            &config,
+            1,
+            3,
+            Some("exec:running"),
+            "00:05",
+            None,
+        );
+        assert!(bar.contains("evt exec:running"));
+        assert!(bar.contains("exec://gw-watch-comp"));
     }
 
     #[test]
