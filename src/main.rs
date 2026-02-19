@@ -52,7 +52,7 @@ enum Command {
 #[derive(Debug, Parser)]
 #[command(
     after_help = concat!(
-        "Examples:\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n  loopmux run --config loop.yaml --duration 2h\n  loopmux run --tui\n\nDefaults:\n  tail=1 (last non-blank line)\n  poll=5s\n  trigger-confirm-seconds=5\n  history-limit=50\n  log-preview-lines=3\n  trigger-edge=on\n  recheck-before-send=on\n\nDuration units: s, m, h, d, w, mon (30d), y (365d)\n\n",
+        "Examples:\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n  loopmux run --config loop.yaml --duration 2h\n  loopmux run --tui\n  loopmux run --exec \"gw-watch-comp\" --poll 10 --iterations 3\n\nDefaults:\n  tail=1 (last non-blank line)\n  poll=5s\n  trigger-confirm-seconds=5\n  history-limit=50\n  log-preview-lines=3\n  trigger-edge=on\n  recheck-before-send=on\n\nDuration units: s, m, h, d, w, mon (30d), y (365d)\n\n",
         "Version: ",
         env!("CARGO_PKG_VERSION"),
         "\n"
@@ -83,6 +83,9 @@ struct RunArgs {
     /// Optional post block for inline prompt.
     #[arg(long, requires = "prompt", conflicts_with = "config")]
     post: Option<String>,
+    /// Inline executable command to run on each poll tick (mutually exclusive with trigger mode).
+    #[arg(long, conflicts_with = "config")]
+    exec: Option<String>,
     /// tmux target scope (session, session:window, or session:window.pane), overrides config.
     #[arg(long, short = 't')]
     target: Vec<String>,
@@ -308,6 +311,7 @@ struct Config {
     target: Option<String>,
     targets: Option<Vec<String>>,
     files: Option<Vec<String>>,
+    exec: Option<ExecConfig>,
     iterations: Option<u32>,
     infinite: Option<bool>,
     poll: Option<u64>,
@@ -328,6 +332,11 @@ struct Config {
     single_line: Option<bool>,
     tui: Option<bool>,
     name: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+struct ExecConfig {
+    command: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1406,6 +1415,7 @@ fn load_workspace_profiles_from_path(
 fn config_has_profile_definition(config: &Config) -> bool {
     config.default_action.is_some()
         || config.rules.is_some()
+        || config.exec.is_some()
         || config.target.is_some()
         || config
             .targets
@@ -2283,6 +2293,31 @@ fn sleep_with_heartbeat(
         registry.update(target, state, sends, poll_seconds)?;
     }
     Ok(())
+}
+
+fn spawn_exec_in_flight(command: &str) -> Result<ExecInFlight> {
+    let child = std::process::Command::new("sh")
+        .args(["-lc", command])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .with_context(|| format!("failed to start exec command: {command}"))?;
+    Ok(ExecInFlight {
+        command: command.to_string(),
+        child,
+        started_at: std::time::Instant::now(),
+    })
+}
+
+fn summarize_exec_stream(bytes: &[u8], use_unicode: bool) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return "(empty)".to_string();
+    }
+    let first = trimmed.lines().next().unwrap_or("").trim();
+    truncate_text(first, 120, use_unicode)
 }
 
 fn run_fleet_manager_tui(profile_filter: Option<&str>) -> Result<()> {
@@ -3266,6 +3301,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
     let mut active_rule: Option<String> = None;
     let mut backoff_state: std::collections::HashMap<String, BackoffState> =
         std::collections::HashMap::new();
+    let mut exec_in_flight: Option<ExecInFlight> = None;
     let mut logger = Logger::new(config.logging.clone())?;
     let mut fleet_registry = FleetRunRegistry::new(identity.clone(), config.profile_id.clone())?;
     let tui_enabled = config.tui && std::io::stdout().is_terminal();
@@ -3472,6 +3508,133 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                 continue;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
+            continue;
+        }
+
+        if let Some(exec_command) = config.exec_command.as_deref() {
+            if loop_state != LoopState::Holding {
+                if let Some(in_flight) = exec_in_flight.as_mut() {
+                    if let Some(status) = in_flight
+                        .child
+                        .try_wait()
+                        .context("failed to poll exec command")?
+                    {
+                        let finished = exec_in_flight
+                            .take()
+                            .ok_or_else(|| anyhow::anyhow!("exec process state lost"))?;
+                        let runtime = finished.started_at.elapsed();
+                        let output = finished
+                            .child
+                            .wait_with_output()
+                            .context("failed to read exec command output")?;
+                        let stdout_preview = summarize_exec_stream(&output.stdout, log_use_unicode);
+                        let stderr_preview = summarize_exec_stream(&output.stderr, log_use_unicode);
+                        if status.success() {
+                            send_count = send_count.saturating_add(1);
+                            let detail = format!(
+                                "command=\"{}\" exit=0 duration_ms={} stdout=\"{}\"",
+                                finished.command,
+                                runtime.as_millis(),
+                                stdout_preview
+                            );
+                            if ui_mode == UiMode::Plain {
+                                println!(
+                                    "loopmux: exec triggered ({}/{}) {}",
+                                    send_count,
+                                    if config.infinite {
+                                        "infinite".to_string()
+                                    } else {
+                                        max_sends.to_string()
+                                    },
+                                    detail
+                                );
+                            }
+                            if let Some(tui_state) = tui.as_mut() {
+                                tui_state.push_log(format!(
+                                    "[{}] exec-triggered sends={} detail=\"{}\"",
+                                    timestamp_now(),
+                                    send_count,
+                                    truncate_text(&detail, 120, log_use_unicode)
+                                ));
+                            }
+                            logger.log(LogEvent::exec(&config, "exec-triggered", detail))?;
+                        } else {
+                            let exit_label = status
+                                .code()
+                                .map(|code| code.to_string())
+                                .unwrap_or_else(|| "signal".to_string());
+                            let detail = format!(
+                                "command=\"{}\" exit={} duration_ms={} stderr=\"{}\" stdout=\"{}\"",
+                                finished.command,
+                                exit_label,
+                                runtime.as_millis(),
+                                stderr_preview,
+                                stdout_preview
+                            );
+                            if ui_mode == UiMode::Plain {
+                                println!("loopmux: exec failed {}", detail);
+                            }
+                            if let Some(tui_state) = tui.as_mut() {
+                                tui_state.push_log(format!(
+                                    "[{}] exec-failed detail=\"{}\"",
+                                    timestamp_now(),
+                                    truncate_text(&detail, 120, log_use_unicode)
+                                ));
+                            }
+                            logger.log(LogEvent::exec(&config, "exec-failed", detail))?;
+                        }
+                    } else {
+                        let detail = format!(
+                            "command=\"{}\" pid={} still-running elapsed={}s",
+                            in_flight.command,
+                            in_flight.child.id(),
+                            in_flight.started_at.elapsed().as_secs()
+                        );
+                        logger.log(LogEvent::exec(
+                            &config,
+                            "exec-still-running",
+                            detail.clone(),
+                        ))?;
+                        if let Some(tui_state) = tui.as_mut() {
+                            tui_state.push_log(format!(
+                                "[{}] {}",
+                                timestamp_now(),
+                                truncate_text(&detail, 120, log_use_unicode)
+                            ));
+                        }
+                    }
+                }
+                if exec_in_flight.is_none() && (config.infinite || send_count < max_sends) {
+                    let in_flight = spawn_exec_in_flight(exec_command)?;
+                    let detail = format!(
+                        "command=\"{}\" pid={} poll={}s",
+                        in_flight.command,
+                        in_flight.child.id(),
+                        config.poll
+                    );
+                    logger.log(LogEvent::exec(&config, "exec-started", detail.clone()))?;
+                    if ui_mode == UiMode::Plain {
+                        println!("loopmux: {detail}");
+                    }
+                    if let Some(tui_state) = tui.as_mut() {
+                        tui_state.push_log(format!(
+                            "[{}] {}",
+                            timestamp_now(),
+                            truncate_text(&detail, 120, log_use_unicode)
+                        ));
+                    }
+                    exec_in_flight = Some(in_flight);
+                }
+            }
+
+            sleep_with_heartbeat(
+                &fleet_registry,
+                &config.target_label,
+                loop_state,
+                send_count,
+                config.poll,
+                config.poll,
+            )?;
             continue;
         }
 
@@ -4108,6 +4271,11 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
         }
     }
 
+    if let Some(mut in_flight) = exec_in_flight {
+        let _ = in_flight.child.kill();
+        let _ = in_flight.child.wait();
+    }
+
     let elapsed = format_std_duration(effective_elapsed(run_started, held_total, hold_started));
     if ui_mode == UiMode::Tui {
         if let Some(tui_state) = tui.as_mut() {
@@ -4724,6 +4892,62 @@ fn resolve_run_config(args: &RunArgs) -> Result<Config> {
         return load_config(args.config.as_ref());
     }
 
+    if let Some(exec_command) = args.exec.as_ref() {
+        if args.prompt.is_some()
+            || args.trigger.is_some()
+            || args.trigger_expr.is_some()
+            || args.trigger_exact_line
+            || args.exclude.is_some()
+            || args.pre.is_some()
+            || args.post.is_some()
+        {
+            bail!(
+                "--exec cannot be combined with --prompt/--trigger/--trigger-expr/--exclude/--pre/--post"
+            );
+        }
+        if !args.target.is_empty()
+            || !args.targets_file.is_empty()
+            || !args.file.is_empty()
+            || !args.files_file.is_empty()
+        {
+            bail!("--exec cannot be combined with --target/--targets-file/--file/--files-file");
+        }
+
+        let command = exec_command.trim();
+        if command.is_empty() {
+            bail!("--exec command cannot be empty");
+        }
+
+        return Ok(Config {
+            target: None,
+            targets: None,
+            files: None,
+            exec: Some(ExecConfig {
+                command: command.to_string(),
+            }),
+            iterations: args.iterations,
+            infinite: None,
+            poll: args.poll,
+            trigger_confirm_seconds: args.trigger_confirm_seconds,
+            log_preview_lines: args.log_preview_lines,
+            trigger_edge: Some(!args.no_trigger_edge),
+            recheck_before_send: Some(!args.no_recheck_before_send),
+            fanout: Some(args.fanout),
+            duration: args.duration.clone(),
+            rule_eval: None,
+            default_action: None,
+            delay: None,
+            rules: None,
+            logging: None,
+            template_vars: None,
+            tail: args.tail,
+            once: Some(args.once),
+            single_line: Some(args.single_line),
+            tui: Some(args.tui),
+            name: args.name.clone(),
+        });
+    }
+
     let Some(prompt) = args.prompt.as_ref() else {
         bail!("--config or --prompt is required");
     };
@@ -4781,6 +5005,7 @@ fn resolve_run_config(args: &RunArgs) -> Result<Config> {
             Some(args.target.clone())
         },
         files: None,
+        exec: None,
         iterations: args.iterations,
         infinite: None,
         poll: args.poll,
@@ -4864,6 +5089,7 @@ fn collect_source_inputs(
 #[derive(Debug)]
 struct ResolvedConfig {
     profile_id: Option<String>,
+    exec_command: Option<String>,
     target_scope: TargetScope,
     target_label: String,
     explicit_targets: Option<Vec<String>>,
@@ -5569,6 +5795,12 @@ struct BackoffState {
     last_sent: Option<OffsetDateTime>,
 }
 
+struct ExecInFlight {
+    command: String,
+    child: std::process::Child,
+    started_at: std::time::Instant,
+}
+
 fn resolve_config(
     mut config: Config,
     target_override: Option<Vec<String>>,
@@ -5594,20 +5826,54 @@ fn resolve_config(
         config.infinite = Some(false);
     }
 
-    let requested_targets = config
-        .targets
-        .clone()
-        .unwrap_or_else(|| config.target.clone().into_iter().collect());
-    if let Some(files) = &config.files {
-        validate_file_sources(files)?;
+    let exec_command = config
+        .exec
+        .as_ref()
+        .map(|value| value.command.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if config.exec.is_some() && exec_command.is_none() {
+        bail!("exec.command is required and cannot be empty");
     }
 
-    let explicit_targets = if requested_targets.len() > 1 {
+    if exec_command.is_some()
+        && (config.default_action.is_some()
+            || config.rules.as_ref().is_some_and(|rules| !rules.is_empty())
+            || config.target.is_some()
+            || config
+                .targets
+                .as_ref()
+                .is_some_and(|targets| !targets.is_empty())
+            || config.files.as_ref().is_some_and(|files| !files.is_empty()))
+    {
+        bail!(
+            "exec mode cannot be combined with target/targets/files/default_action/rules in the same config"
+        );
+    }
+
+    let requested_targets = if exec_command.is_some() {
+        Vec::new()
+    } else {
+        config
+            .targets
+            .clone()
+            .unwrap_or_else(|| config.target.clone().into_iter().collect())
+    };
+    if exec_command.is_none() {
+        if let Some(files) = &config.files {
+            validate_file_sources(files)?;
+        }
+    }
+
+    let explicit_targets = if exec_command.is_some() {
+        None
+    } else if requested_targets.len() > 1 {
         Some(resolve_explicit_targets(&requested_targets, skip_tmux)?)
     } else {
         None
     };
-    let (target_scope, target_label) = if let Some(targets) = explicit_targets.as_ref() {
+    let (target_scope, target_label) = if let Some(command) = exec_command.as_ref() {
+        (TargetScope::All, format!("exec://{command}"))
+    } else if let Some(targets) = explicit_targets.as_ref() {
         (TargetScope::All, targets.join(","))
     } else {
         let target_input = requested_targets.first().map(String::as_str);
@@ -5633,28 +5899,50 @@ fn resolve_config(
         None
     };
 
-    let Some(default_action) = config.default_action else {
-        bail!("default_action.prompt is required");
-    };
-    let has_prompt = default_action.prompt.as_ref().is_some();
-    if !has_prompt {
-        bail!("default_action.prompt is required");
-    }
-
-    let prompt_placeholders = collect_template_placeholders(&default_action, &config.rules);
-    let template_vars = config.template_vars.unwrap_or_default();
-    let template_var_keys = template_vars.keys().cloned().collect::<Vec<_>>();
-    let missing_template_vars = find_missing_vars(&prompt_placeholders, &template_vars);
-    if !missing_template_vars.is_empty() {
-        bail!(
-            "missing template_vars: {}",
-            missing_template_vars.join(", ")
-        );
-    }
-
-    let rule_eval = config.rule_eval.unwrap_or(RuleEval::FirstMatch);
-    let rules = config.rules.unwrap_or_default();
-    validate_rules(&rules)?;
+    let (default_action, has_prompt, prompt_placeholders, template_var_keys, rule_eval, rules) =
+        if exec_command.is_some() {
+            (
+                Action {
+                    pre: None,
+                    prompt: None,
+                    post: None,
+                },
+                false,
+                Vec::new(),
+                Vec::new(),
+                RuleEval::FirstMatch,
+                Vec::new(),
+            )
+        } else {
+            let Some(default_action) = config.default_action else {
+                bail!("default_action.prompt is required");
+            };
+            let has_prompt = default_action.prompt.as_ref().is_some();
+            if !has_prompt {
+                bail!("default_action.prompt is required");
+            }
+            let prompt_placeholders = collect_template_placeholders(&default_action, &config.rules);
+            let template_vars = config.template_vars.unwrap_or_default();
+            let template_var_keys = template_vars.keys().cloned().collect::<Vec<_>>();
+            let missing_template_vars = find_missing_vars(&prompt_placeholders, &template_vars);
+            if !missing_template_vars.is_empty() {
+                bail!(
+                    "missing template_vars: {}",
+                    missing_template_vars.join(", ")
+                );
+            }
+            let rule_eval = config.rule_eval.unwrap_or(RuleEval::FirstMatch);
+            let rules = config.rules.unwrap_or_default();
+            validate_rules(&rules)?;
+            (
+                default_action,
+                true,
+                prompt_placeholders,
+                template_var_keys,
+                rule_eval,
+                rules,
+            )
+        };
     let logging = resolve_logging(config.logging);
 
     let delay = config.delay;
@@ -5673,7 +5961,7 @@ fn resolve_config(
 
     let fanout = config.fanout.unwrap_or(FanoutMode::Matched);
 
-    if !skip_tmux {
+    if exec_command.is_none() && !skip_tmux {
         if let Some(targets) = explicit_targets.as_ref() {
             validate_tmux_targets(targets)?;
         }
@@ -5691,6 +5979,7 @@ fn resolve_config(
 
     Ok(ResolvedConfig {
         profile_id,
+        exec_command,
         target_scope,
         target_label,
         explicit_targets,
@@ -5722,6 +6011,9 @@ fn resolve_config(
 fn print_validation(config: &ResolvedConfig) {
     println!("Validation OK");
     println!("- target: {}", config.target_label);
+    if let Some(command) = config.exec_command.as_deref() {
+        println!("- exec.command: {command}");
+    }
     if !config.file_sources.is_empty() {
         println!("- file_sources: {}", config.file_sources.join(", "));
     }
@@ -5731,16 +6023,18 @@ fn print_validation(config: &ResolvedConfig) {
         println!("- iterations: {iterations}");
     }
     println!("- prompt: {}", if config.has_prompt { "yes" } else { "no" });
-    println!("- rule_eval: {}", rule_eval_label(&config.rule_eval));
-    println!("- rules: {}", config.rules.len());
-    if let Some(delay) = &config.delay {
-        println!("- delay: {}", delay_summary(delay));
-    }
-    if !config.prompt_placeholders.is_empty() {
-        println!("- template vars: {}", config.prompt_placeholders.join(", "));
-    }
-    if !config.template_vars.is_empty() {
-        println!("- template_vars: {}", config.template_vars.join(", "));
+    if config.exec_command.is_none() {
+        println!("- rule_eval: {}", rule_eval_label(&config.rule_eval));
+        println!("- rules: {}", config.rules.len());
+        if let Some(delay) = &config.delay {
+            println!("- delay: {}", delay_summary(delay));
+        }
+        if !config.prompt_placeholders.is_empty() {
+            println!("- template vars: {}", config.prompt_placeholders.join(", "));
+        }
+        if !config.template_vars.is_empty() {
+            println!("- template_vars: {}", config.template_vars.join(", "));
+        }
     }
     if let Some(path) = &config.logging.path {
         println!(
@@ -5754,9 +6048,11 @@ fn print_validation(config: &ResolvedConfig) {
             log_format_label(config.logging.format)
         );
     }
-    match config.capture_window {
-        CaptureWindow::Tail(lines) => println!("- tail: {lines}"),
-        CaptureWindow::Head(lines) => println!("- head: {lines}"),
+    if config.exec_command.is_none() {
+        match config.capture_window {
+            CaptureWindow::Tail(lines) => println!("- tail: {lines}"),
+            CaptureWindow::Head(lines) => println!("- head: {lines}"),
+        }
     }
     println!("- poll: {}s", config.poll);
     println!(
@@ -6279,6 +6575,17 @@ impl LogEvent {
     fn status(config: &ResolvedConfig, detail: String) -> Self {
         Self {
             event: "status".to_string(),
+            timestamp: String::new(),
+            target: config.target_label.clone(),
+            rule_id: None,
+            detail: Some(detail),
+            sends: None,
+        }
+    }
+
+    fn exec(config: &ResolvedConfig, event: &str, detail: String) -> Self {
+        Self {
+            event: event.to_string(),
             timestamp: String::new(),
             target: config.target_label.clone(),
             rule_id: None,
@@ -6836,6 +7143,7 @@ runs:
             exclude: None,
             pre: None,
             post: None,
+            exec: None,
             target: vec!["ai:5.0".to_string()],
             targets_file: Vec::new(),
             file: Vec::new(),
@@ -6861,6 +7169,87 @@ runs:
     }
 
     #[test]
+    fn resolve_run_config_inline_exec_builds_exec_config() {
+        let args = RunArgs {
+            config: None,
+            prompt: None,
+            trigger: None,
+            trigger_expr: None,
+            trigger_exact_line: false,
+            exclude: None,
+            pre: None,
+            post: None,
+            exec: Some("gw-watch-comp --mode check".to_string()),
+            target: Vec::new(),
+            targets_file: Vec::new(),
+            file: Vec::new(),
+            files_file: Vec::new(),
+            iterations: Some(3),
+            tail: None,
+            head: None,
+            once: false,
+            dry_run: false,
+            single_line: false,
+            tui: false,
+            poll: Some(5),
+            trigger_confirm_seconds: None,
+            log_preview_lines: None,
+            no_trigger_edge: false,
+            no_recheck_before_send: false,
+            fanout: FanoutMode::Matched,
+            duration: Some("30s".to_string()),
+            history_limit: None,
+            name: Some("gw-watch".to_string()),
+        };
+
+        let config = resolve_run_config(&args).unwrap();
+        assert_eq!(
+            config.exec.as_ref().map(|value| value.command.as_str()),
+            Some("gw-watch-comp --mode check")
+        );
+        assert!(config.default_action.is_none());
+        assert!(config.rules.is_none());
+    }
+
+    #[test]
+    fn resolve_run_config_rejects_exec_with_prompt_mode_flags() {
+        let args = RunArgs {
+            config: None,
+            prompt: Some("Do it".to_string()),
+            trigger: Some("Done".to_string()),
+            trigger_expr: None,
+            trigger_exact_line: false,
+            exclude: None,
+            pre: None,
+            post: None,
+            exec: Some("gw-watch-comp".to_string()),
+            target: Vec::new(),
+            targets_file: Vec::new(),
+            file: Vec::new(),
+            files_file: Vec::new(),
+            iterations: Some(1),
+            tail: None,
+            head: None,
+            once: false,
+            dry_run: false,
+            single_line: false,
+            tui: false,
+            poll: None,
+            trigger_confirm_seconds: None,
+            log_preview_lines: None,
+            no_trigger_edge: false,
+            no_recheck_before_send: false,
+            fanout: FanoutMode::Matched,
+            duration: None,
+            history_limit: None,
+            name: None,
+        };
+
+        let err = resolve_run_config(&args).unwrap_err();
+        assert!(err.to_string().contains("--exec cannot be combined"));
+    }
+
+    #[test]
     fn resolve_run_config_inline_builds_rule() {
         let args = RunArgs {
             config: None,
@@ -6871,6 +7260,7 @@ runs:
             exclude: Some("PROD".to_string()),
             pre: Some("pre".to_string()),
             post: Some("post".to_string()),
+            exec: None,
             target: vec!["ai:5.0".to_string()],
             targets_file: Vec::new(),
             file: Vec::new(),
@@ -6926,6 +7316,7 @@ runs:
             exclude: None,
             pre: None,
             post: None,
+            exec: None,
             target: vec!["ai:5.0".to_string()],
             targets_file: Vec::new(),
             file: Vec::new(),
@@ -6966,6 +7357,7 @@ runs:
             exclude: None,
             pre: None,
             post: None,
+            exec: None,
             target: vec!["ai:5.0".to_string()],
             targets_file: Vec::new(),
             file: Vec::new(),
@@ -7006,6 +7398,7 @@ runs:
             exclude: None,
             pre: None,
             post: None,
+            exec: None,
             target: vec!["ai:5.0".to_string()],
             targets_file: Vec::new(),
             file: Vec::new(),
@@ -7046,6 +7439,7 @@ runs:
             exclude: None,
             pre: None,
             post: None,
+            exec: None,
             target: vec!["ai:5.0".to_string(), "codex:1.0".to_string()],
             targets_file: Vec::new(),
             file: Vec::new(),
@@ -7084,6 +7478,7 @@ runs:
             target: Some("ai:5.0".to_string()),
             targets: None,
             files: Some(vec!["/tmp/loopmux-missing-source.log".to_string()]),
+            exec: None,
             iterations: Some(1),
             infinite: None,
             poll: Some(1),
@@ -7125,6 +7520,59 @@ runs:
         )
         .unwrap_err();
         assert!(err.to_string().contains("file source not found"));
+    }
+
+    #[test]
+    fn resolve_config_exec_mode_without_prompt_target_or_rules() {
+        let config = Config {
+            target: None,
+            targets: None,
+            files: None,
+            exec: Some(ExecConfig {
+                command: "gw-watch-comp".to_string(),
+            }),
+            iterations: Some(3),
+            infinite: None,
+            poll: Some(7),
+            trigger_confirm_seconds: None,
+            log_preview_lines: None,
+            trigger_edge: None,
+            recheck_before_send: None,
+            fanout: None,
+            duration: Some("30s".to_string()),
+            rule_eval: None,
+            default_action: None,
+            delay: None,
+            rules: None,
+            logging: None,
+            template_vars: None,
+            tail: None,
+            once: None,
+            single_line: None,
+            tui: None,
+            name: Some("watcher".to_string()),
+        };
+
+        let resolved = resolve_config(
+            config,
+            None,
+            None,
+            true,
+            None,
+            None,
+            false,
+            false,
+            false,
+            None,
+            None,
+            Some("watcher".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(resolved.exec_command.as_deref(), Some("gw-watch-comp"));
+        assert_eq!(resolved.target_label, "exec://gw-watch-comp");
+        assert!(!resolved.has_prompt);
+        assert!(resolved.rules.is_empty());
     }
 
     #[test]
@@ -7326,6 +7774,7 @@ runs:
     fn render_status_bar_compact() {
         let config = ResolvedConfig {
             profile_id: None,
+            exec_command: None,
             target_scope: TargetScope::Pane("ai:5.0".to_string()),
             target_label: "ai:5.0".to_string(),
             explicit_targets: None,
@@ -7386,6 +7835,7 @@ runs:
     fn render_status_bar_standard_truncates_trigger() {
         let config = ResolvedConfig {
             profile_id: None,
+            exec_command: None,
             target_scope: TargetScope::Pane("ai:5.0".to_string()),
             target_label: "ai:5.0".to_string(),
             explicit_targets: None,

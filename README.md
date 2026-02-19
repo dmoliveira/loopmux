@@ -100,11 +100,17 @@ runs:
     iterations: 20
     default_action:
       prompt: "Polish docs and examples."
+  - id: gw-watch
+    enabled: true
+    exec:
+      command: "gw-watch-comp"
+    poll: 10
+    iterations: 3
 ```
 
 Notes:
 - Imported files can contribute extra `runs`/`events` profiles.
-- Each profile uses the same run-config schema as normal YAML runs (`target`, `rules`, `poll`, `tail`, etc.).
+- Each profile uses the same run-config schema as normal YAML runs (`target`, `rules`, `poll`, `tail`, or `exec.command`).
 - Startup validates all selected profiles before launch and prints clear per-profile errors.
 - Migration guide: `docs/specs/config-first-migration.md`.
 
@@ -176,6 +182,15 @@ logging:
   format: "jsonl"
 ```
 
+### Exec watcher example
+```yaml
+exec:
+  command: "gw-watch-comp"
+poll: 10
+iterations: 3
+name: "gw-watch"
+```
+
 ### Example files
 - `examples/loopmux.example.yaml`
 - `examples/loopmux.lean.yaml`
@@ -195,6 +210,7 @@ logging:
 
 ```text
 loopmux run --config loop.yaml [--target ai:5.0] [--iterations 10]
+loopmux run --exec "gw-watch-comp" [--poll 10] [--iterations 3|--duration 5m]
 loopmux run --config loop.yaml --dry-run
 loopmux validate --config loop.yaml [--skip-tmux]
 loopmux init --output loop.yaml
@@ -266,6 +282,17 @@ loopmux run -t ai:5.0 -n 5 \
 - `--tui`: enable the interactive terminal UI.
 - `--history-limit N`: max history entries to keep/show in TUI picker (default 50).
 - `--name`: optional codename for this run; auto-generated if omitted.
+- `--exec`: command to execute at each poll interval (exec mode; no trigger/target required).
+
+### Exec watcher mode
+
+Run an executable in the background and treat each successful completion (`exit=0`) as a trigger event:
+
+```bash
+loopmux run --exec "gw-watch-comp" --poll 10 --iterations 3 --name gw-watch
+```
+
+If a prior command invocation is still running at the next poll, loopmux waits and checks again on the next tick (no overlapping invocations).
 
 ### Trigger expression quick reference
 - Use regex terms joined by boolean operators:
