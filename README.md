@@ -298,6 +298,7 @@ loopmux run --exec "gw-watch-comp" --poll 10 --iterations 3 --name gw-watch
 ```
 
 If a prior command invocation is still running at the next poll, loopmux waits and checks again on the next tick (no overlapping invocations).
+`--iterations` counts successful command completions only (`exit=0`); for always-failing commands, use `--duration` (or stop manually).
 
 TUI status shows `evt` labels in exec mode (for example, `exec:running`, `exec:ok`, `exec:fail`) to make watcher state easier to scan.
 In `--single-line` mode, exec runs now report `event=<state>` so watcher progress is easier to follow.
