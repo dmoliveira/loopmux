@@ -6114,9 +6114,12 @@ fn render_active_list_popup(
     let mark_on = if use_unicode { "●" } else { "*" };
     let mark_off = if use_unicode { "○" } else { "-" };
     let mark_partial = if use_unicode { "◐" } else { "+" };
-    let focus = if use_unicode { "▸" } else { ">" };
+    let focus_selected = if use_unicode { "▶▶ " } else { ">>>" };
+    let focus_column = if use_unicode { "▸  " } else { "-->" };
+    let focus_none = "   ";
     let spacer = if use_unicode { " │ " } else { " | " };
-    let col_width = (width.saturating_sub(8) / 3).max(16);
+    let col_width = (width.saturating_sub(8) / 3).max(18);
+    let active_column = filter.cursor.column;
 
     let sessions = filter.sessions();
     let selected_session = sessions.get(filter.cursor.session_idx).cloned();
@@ -6139,17 +6142,28 @@ fn render_active_list_popup(
 
     let mut lines = Vec::new();
     lines.push("Active List - injection filter".to_string());
+    let session_header = if matches!(active_column, ActiveListColumn::Session) {
+        "» SESSIONS «"
+    } else {
+        "sessions"
+    };
+    let window_header = if matches!(active_column, ActiveListColumn::Window) {
+        "» WINDOWS «"
+    } else {
+        "windows"
+    };
+    let pane_header = if matches!(active_column, ActiveListColumn::Pane) {
+        "» PANES «"
+    } else {
+        "panes"
+    };
     lines.push(format!(
-        "{}{}{}",
-        pad_to_width("Sessions", col_width),
+        "{}{}{}{}{}",
+        pad_to_width(session_header, col_width),
         spacer,
-        pad_to_width("Windows", col_width + col_width + 3)
-    ));
-    lines.push(format!(
-        "{}{}{}",
-        pad_to_width("", col_width),
+        pad_to_width(window_header, col_width),
         spacer,
-        pad_to_width("Panes", col_width + col_width + 3)
+        pad_to_width(pane_header, col_width)
     ));
 
     let rows = max_lines.saturating_sub(lines.len()).max(1);
@@ -6172,14 +6186,16 @@ fn render_active_list_popup(
             } else {
                 mark_partial
             };
-            let pointer = if idx == filter.cursor.session_idx
-                && matches!(filter.cursor.column, ActiveListColumn::Session)
+            let pointer = if matches!(active_column, ActiveListColumn::Session)
+                && idx == filter.cursor.session_idx
             {
-                focus
+                focus_selected
+            } else if matches!(active_column, ActiveListColumn::Session) {
+                focus_column
             } else {
-                " "
+                focus_none
             };
-            format!("{pointer} {mark} {session} ({enabled}/{})", targets.len())
+            format!("{pointer}{mark} {session} ({enabled}/{})", targets.len())
         } else {
             String::new()
         };
@@ -6203,15 +6219,17 @@ fn render_active_list_popup(
                 } else {
                     mark_partial
                 };
-                let pointer = if idx == filter.cursor.window_idx
-                    && matches!(filter.cursor.column, ActiveListColumn::Window)
+                let pointer = if matches!(active_column, ActiveListColumn::Window)
+                    && idx == filter.cursor.window_idx
                 {
-                    focus
+                    focus_selected
+                } else if matches!(active_column, ActiveListColumn::Window) {
+                    focus_column
                 } else {
-                    " "
+                    focus_none
                 };
                 format!(
-                    "{pointer} {mark} {session}:{window} ({enabled}/{})",
+                    "{pointer}{mark} {session}:{window} ({enabled}/{})",
                     targets.len()
                 )
             } else {
@@ -6227,14 +6245,16 @@ fn render_active_list_popup(
             } else {
                 mark_off
             };
-            let pointer = if idx == filter.cursor.pane_idx
-                && matches!(filter.cursor.column, ActiveListColumn::Pane)
+            let pointer = if matches!(active_column, ActiveListColumn::Pane)
+                && idx == filter.cursor.pane_idx
             {
-                focus
+                focus_selected
+            } else if matches!(active_column, ActiveListColumn::Pane) {
+                focus_column
             } else {
-                " "
+                focus_none
             };
-            format!("{pointer} {mark} {target}")
+            format!("{pointer}{mark} {target}")
         } else {
             String::new()
         };
@@ -9010,6 +9030,41 @@ runs:
         assert!(!filter.is_allowed("ai:5.0"));
         assert!(!filter.is_allowed("ai:5.1"));
         assert!(filter.is_allowed("codex:1.0"));
+    }
+
+    #[test]
+    fn injection_filter_window_toggle_only_affects_window_targets() {
+        let mut filter = InjectionFilterState::default();
+        filter.observe_trigger_target("ai:5.0");
+        filter.observe_trigger_target("ai:5.1");
+        filter.observe_trigger_target("ai:6.0");
+        filter.observe_trigger_target("codex:1.0");
+        filter.open_popup();
+        filter.cursor.column = ActiveListColumn::Window;
+        filter.cursor.session_idx = 0;
+        filter.cursor.window_idx = 0;
+        filter.toggle_current_selection();
+        assert!(!filter.is_allowed("ai:5.0"));
+        assert!(!filter.is_allowed("ai:5.1"));
+        assert!(filter.is_allowed("ai:6.0"));
+        assert!(filter.is_allowed("codex:1.0"));
+    }
+
+    #[test]
+    fn injection_filter_pane_toggle_only_affects_selected_pane() {
+        let mut filter = InjectionFilterState::default();
+        filter.observe_trigger_target("ai:5.0");
+        filter.observe_trigger_target("ai:5.1");
+        filter.observe_trigger_target("ai:6.0");
+        filter.open_popup();
+        filter.cursor.column = ActiveListColumn::Pane;
+        filter.cursor.session_idx = 0;
+        filter.cursor.window_idx = 0;
+        filter.cursor.pane_idx = 1;
+        filter.toggle_current_selection();
+        assert!(filter.is_allowed("ai:5.0"));
+        assert!(!filter.is_allowed("ai:5.1"));
+        assert!(filter.is_allowed("ai:6.0"));
     }
 
     #[test]
