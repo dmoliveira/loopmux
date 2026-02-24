@@ -6015,7 +6015,7 @@ impl TuiState {
     }
 
     fn push_log(&mut self, line: String) {
-        self.logs.push(line);
+        self.logs.push(sanitize_tui_log_line(&line));
         if self.logs.len() > 500 {
             self.logs.drain(0..self.logs.len().saturating_sub(500));
         }
@@ -6518,6 +6518,47 @@ fn parse_process_usage_summary(ps_stdout: &str) -> Option<String> {
     let rss_kb = fields.next()?.parse::<u64>().ok()?;
     let mem_mb = rss_kb as f64 / 1024.0;
     Some(format!("cpu {:.1}% mem {:.1}mb", cpu, mem_mb))
+}
+
+fn sanitize_tui_log_line(line: &str) -> String {
+    let mut cleaned = String::new();
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            if matches!(chars.peek(), Some('[')) {
+                let _ = chars.next();
+                while let Some(next) = chars.next() {
+                    if ('@'..='~').contains(&next) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if ch == '\u{fffd}' {
+            continue;
+        }
+        if ch.is_control() {
+            cleaned.push(' ');
+            continue;
+        }
+        cleaned.push(ch);
+    }
+
+    let mut collapsed = String::new();
+    let mut space_run = 0usize;
+    for ch in cleaned.chars() {
+        if ch.is_whitespace() {
+            space_run += 1;
+            if space_run <= 2 {
+                collapsed.push(' ');
+            }
+        } else {
+            space_run = 0;
+            collapsed.push(ch);
+        }
+    }
+    collapsed.trim().to_string()
 }
 
 fn state_label(state: LoopState, icon_mode: IconMode) -> (&'static str, &'static str) {
@@ -9003,6 +9044,20 @@ runs:
     fn parse_process_usage_summary_parses_cpu_and_mem() {
         let summary = parse_process_usage_summary(" 12.5  20480\n").unwrap();
         assert_eq!(summary, "cpu 12.5% mem 20.0mb");
+    }
+
+    #[test]
+    fn sanitize_tui_log_line_removes_controls_and_limits_spaces() {
+        let raw = "\u{1b}[31mfoo\u{1b}[0m\t\tbar    baz\u{0007}";
+        let sanitized = sanitize_tui_log_line(raw);
+        assert_eq!(sanitized, "foo  bar  baz");
+    }
+
+    #[test]
+    fn sanitize_tui_log_line_drops_replacement_char() {
+        let raw = "ok\u{fffd}value";
+        let sanitized = sanitize_tui_log_line(raw);
+        assert_eq!(sanitized, "okvalue");
     }
 
     #[test]

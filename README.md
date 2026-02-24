@@ -371,6 +371,7 @@ codex:1.0
 - Active-list popup controls: arrows move across sessions/windows/panes, `space`/`Enter` toggle enabled injection scope, `a` enable all known panes, `d` disable all known panes, `q`/`Esc` close popup.
 - TUI footer shows current active injection scope counts as `active X/Y` (enabled / known panes).
 - TUI status bar now includes local loopmux process usage (`cpu ...% mem ...mb`) for quick runtime monitoring.
+- TUI logs are sanitized before render: control/non-printable artifacts are removed and long whitespace runs are collapsed for cleaner readability.
 - When `--duration` is set, the TUI status bar shows remaining time (`rem ...`) and it freezes while HOLD is active.
 - Run TUI status bar includes current loopmux version (`vX.Y.Z`) for quick parity checks.
 - Sent logs are compact and include a folded trigger preview (`N` lines from capture tail) to keep long prompts readable.
