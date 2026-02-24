@@ -4730,6 +4730,8 @@ fn last_non_empty_line(output: &str) -> String {
 }
 
 fn send_prompt(target: &str, prompt: &str) -> Result<()> {
+    let before_submit = capture_pane(target, CaptureWindow::Tail(8)).ok();
+
     let output = std::process::Command::new("tmux")
         .args(["send-keys", "-t", target, "-l", prompt])
         .output()
@@ -4738,6 +4740,17 @@ fn send_prompt(target: &str, prompt: &str) -> Result<()> {
         bail!("tmux send-keys failed");
     }
 
+    send_enter_key(target)?;
+
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    let after_submit = capture_pane(target, CaptureWindow::Tail(8)).ok();
+    if should_retry_enter_submit(before_submit.as_deref(), after_submit.as_deref(), prompt) {
+        send_enter_key(target)?;
+    }
+    Ok(())
+}
+
+fn send_enter_key(target: &str) -> Result<()> {
     let output = std::process::Command::new("tmux")
         .args(["send-keys", "-t", target, "Enter"])
         .output()
@@ -4746,6 +4759,28 @@ fn send_prompt(target: &str, prompt: &str) -> Result<()> {
         bail!("tmux send-keys submit failed");
     }
     Ok(())
+}
+
+fn should_retry_enter_submit(before: Option<&str>, after: Option<&str>, prompt: &str) -> bool {
+    let (Some(before), Some(after)) = (before, after) else {
+        return false;
+    };
+    if hash_output(before) == hash_output(after) {
+        return true;
+    }
+    let before_pending = pane_tail_indicates_pending_submit(before, prompt);
+    let after_pending = pane_tail_indicates_pending_submit(after, prompt);
+    !before_pending && after_pending
+}
+
+fn pane_tail_indicates_pending_submit(capture: &str, prompt: &str) -> bool {
+    let prompt = prompt.trim();
+    if prompt.is_empty() {
+        return false;
+    }
+    let tail = last_non_empty_line(capture);
+    let tail = tail.trim();
+    tail == prompt || tail.ends_with(prompt)
 }
 
 fn hash_output(output: &str) -> String {
@@ -9112,6 +9147,28 @@ runs:
         let truncated = truncate_text("abcdefghijk", 8, false);
         assert_eq!(truncated.chars().count(), 8);
         assert_eq!(truncated, "abcde...");
+    }
+
+    #[test]
+    fn retry_enter_when_tail_shows_unsent_prompt() {
+        let before = "shell ready\n";
+        let after = "shell ready\nloopmux test command";
+        assert!(should_retry_enter_submit(
+            Some(before),
+            Some(after),
+            "loopmux test command"
+        ));
+    }
+
+    #[test]
+    fn no_retry_when_tail_no_longer_contains_prompt() {
+        let before = "shell ready\n";
+        let after = "shell ready\ncommand output\n";
+        assert!(!should_retry_enter_submit(
+            Some(before),
+            Some(after),
+            "loopmux test command"
+        ));
     }
 
     #[test]
