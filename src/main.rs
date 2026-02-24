@@ -3535,11 +3535,13 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                 held_total += started_at.elapsed();
                             }
                             loop_state = LoopState::Running;
+                            force_rescan = true;
                         }
                         TuiAction::HoldToggle => {
                             if let Some(started_at) = hold_started.take() {
                                 held_total += started_at.elapsed();
                                 loop_state = LoopState::Running;
+                                force_rescan = true;
                             } else {
                                 hold_started = Some(std::time::Instant::now());
                                 loop_state = LoopState::Holding;
@@ -4295,11 +4297,13 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                 held_total += started_at.elapsed();
                             }
                             loop_state = LoopState::Running;
+                            force_rescan = true;
                         }
                         TuiAction::HoldToggle => {
                             if let Some(started_at) = hold_started.take() {
                                 held_total += started_at.elapsed();
                                 loop_state = LoopState::Running;
+                                force_rescan = true;
                             } else {
                                 hold_started = Some(std::time::Instant::now());
                                 loop_state = LoopState::Holding;
@@ -4461,11 +4465,15 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                     held_total += started_at.elapsed();
                                 }
                                 loop_state = LoopState::Running;
+                                force_rescan = true;
+                                break;
                             }
                             TuiAction::HoldToggle => {
                                 if let Some(started_at) = hold_started.take() {
                                     held_total += started_at.elapsed();
                                     loop_state = LoopState::Running;
+                                    force_rescan = true;
+                                    break;
                                 } else {
                                     hold_started = Some(std::time::Instant::now());
                                     loop_state = LoopState::Holding;
