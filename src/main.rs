@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -5863,6 +5863,12 @@ struct TuiState {
     max_logs: usize,
     overlay_lines: Option<Vec<String>>,
     footer_note: Option<String>,
+    usage_sample: Option<ProcessUsageSample>,
+}
+
+struct ProcessUsageSample {
+    captured_at: Instant,
+    summary: String,
 }
 
 impl TuiState {
@@ -5879,7 +5885,38 @@ impl TuiState {
             max_logs: height.saturating_sub(3) as usize,
             overlay_lines: None,
             footer_note: None,
+            usage_sample: None,
         })
+    }
+
+    fn process_usage_summary(&mut self) -> Option<String> {
+        if let Some(sample) = self.usage_sample.as_ref() {
+            if sample.captured_at.elapsed() < Duration::from_secs(1) {
+                return Some(sample.summary.clone());
+            }
+        }
+
+        let output = std::process::Command::new("ps")
+            .args([
+                "-o",
+                "%cpu=",
+                "-o",
+                "rss=",
+                "-p",
+                &std::process::id().to_string(),
+            ])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let summary = parse_process_usage_summary(&stdout)?;
+        self.usage_sample = Some(ProcessUsageSample {
+            captured_at: Instant::now(),
+            summary: summary.clone(),
+        });
+        Some(summary)
     }
 
     fn set_overlay_lines(&mut self, lines: Option<Vec<String>>) {
@@ -5910,6 +5947,7 @@ impl TuiState {
         self.max_logs = height.saturating_sub(3) as usize;
 
         let layout = layout_mode(width);
+        let process_usage = self.process_usage_summary();
         let bar = render_status_bar(
             state,
             layout,
@@ -5922,6 +5960,7 @@ impl TuiState {
             rule_id,
             &elapsed,
             remaining_duration.as_deref(),
+            process_usage.as_deref(),
         );
 
         let log_height = if width < 60 { 0 } else { self.max_logs };
@@ -6319,6 +6358,7 @@ fn render_status_bar(
     rule_id: Option<&str>,
     elapsed: &str,
     remaining_duration: Option<&str>,
+    process_usage: Option<&str>,
 ) -> String {
     let (icon, label) = state_label(state, icon_mode);
     let progress = if config.infinite {
@@ -6379,6 +6419,9 @@ fn render_status_bar(
                 right_parts.push(format!("rem {remaining}"));
             }
             right_parts.push(format!("run {profile}"));
+            if let Some(usage) = process_usage {
+                right_parts.push(usage.to_string());
+            }
             right_parts.push(format!("{trigger_prefix} {trigger_text}"));
             right_parts.push(format!("v{}", LOOPMUX_VERSION));
             right_parts.push(config.target_label.clone());
@@ -6388,6 +6431,9 @@ fn render_status_bar(
                 right_parts.push(format!("rem {remaining}"));
             }
             right_parts.push(format!("run {profile}"));
+            if let Some(usage) = process_usage {
+                right_parts.push(usage.to_string());
+            }
             right_parts.push(format!("{trigger_prefix} {trigger_text}"));
             right_parts.push(format!("last {elapsed}"));
             right_parts.push(format!("v{}", LOOPMUX_VERSION));
@@ -6398,6 +6444,9 @@ fn render_status_bar(
                 right_parts.push(format!("rem {remaining}"));
             }
             right_parts.push(format!("run {profile}"));
+            if let Some(usage) = process_usage {
+                right_parts.push(usage.to_string());
+            }
             right_parts.push(format!("{trigger_prefix} {trigger_text}"));
             right_parts.push(format!("last {elapsed}"));
             right_parts.push(format!("v{}", LOOPMUX_VERSION));
@@ -6457,6 +6506,18 @@ fn render_status_bar(
     } else {
         line
     }
+}
+
+fn parse_process_usage_summary(ps_stdout: &str) -> Option<String> {
+    let line = ps_stdout
+        .lines()
+        .find(|line| !line.trim().is_empty())?
+        .trim();
+    let mut fields = line.split_whitespace();
+    let cpu = fields.next()?.parse::<f64>().ok()?;
+    let rss_kb = fields.next()?.parse::<u64>().ok()?;
+    let mem_mb = rss_kb as f64 / 1024.0;
+    Some(format!("cpu {:.1}% mem {:.1}mb", cpu, mem_mb))
 }
 
 fn state_label(state: LoopState, icon_mode: IconMode) -> (&'static str, &'static str) {
@@ -8806,6 +8867,7 @@ runs:
             Some("Concluded"),
             "00:10",
             None,
+            None,
         );
         assert!(bar.contains("RUN"));
         assert!(bar.contains("5/10"));
@@ -8861,13 +8923,14 @@ runs:
                 use_unicode_ellipsis: true,
                 dim_logs: true,
             },
-            120,
+            160,
             &config,
             1,
             10,
             Some("This is a very long trigger string that should truncate"),
             "00:10",
             Some("1m20s"),
+            None,
         );
         assert!(bar.contains("trg"));
         assert!(bar.contains("rem 1m20s"));
@@ -8930,9 +8993,16 @@ runs:
             Some("exec:running"),
             "00:05",
             None,
+            Some("cpu 12.3% mem 42.0mb"),
         );
         assert!(bar.contains("evt exec:running"));
-        assert!(bar.contains("exec://gw-watch-comp"));
+        assert!(bar.contains("cpu 12.3% mem 42.0mb"));
+    }
+
+    #[test]
+    fn parse_process_usage_summary_parses_cpu_and_mem() {
+        let summary = parse_process_usage_summary(" 12.5  20480\n").unwrap();
+        assert_eq!(summary, "cpu 12.5% mem 20.0mb");
     }
 
     #[test]
