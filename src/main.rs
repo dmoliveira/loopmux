@@ -3643,6 +3643,9 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                         TuiAction::ActiveListClose => {
                             injection_filter.close_popup();
                         }
+                        TuiAction::ToggleLogView => {
+                            tui_state.toggle_log_view();
+                        }
                         TuiAction::Redraw => {}
                     }
                 }
@@ -4395,6 +4398,9 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                         TuiAction::ActiveListClose => {
                             injection_filter.close_popup();
                         }
+                        TuiAction::ToggleLogView => {
+                            tui_state.toggle_log_view();
+                        }
                         TuiAction::Redraw => {}
                         TuiAction::Quit => {
                             if injection_filter.popup_open {
@@ -4562,6 +4568,9 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                             }
                             TuiAction::ActiveListClose => {
                                 injection_filter.close_popup();
+                            }
+                            TuiAction::ToggleLogView => {
+                                tui_state.toggle_log_view();
                             }
                             TuiAction::Stop => {
                                 tui_state.push_log(format!(
@@ -5599,8 +5608,15 @@ enum TuiAction {
     ActiveListEnableAll,
     ActiveListDisableAll,
     ActiveListClose,
+    ToggleLogView,
     Redraw,
     Quit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogViewMode {
+    Chronological,
+    GroupedByPane,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5864,6 +5880,7 @@ struct TuiState {
     overlay_lines: Option<Vec<String>>,
     footer_note: Option<String>,
     usage_sample: Option<ProcessUsageSample>,
+    log_view: LogViewMode,
 }
 
 struct ProcessUsageSample {
@@ -5886,7 +5903,15 @@ impl TuiState {
             overlay_lines: None,
             footer_note: None,
             usage_sample: None,
+            log_view: LogViewMode::Chronological,
         })
+    }
+
+    fn toggle_log_view(&mut self) {
+        self.log_view = match self.log_view {
+            LogViewMode::Chronological => LogViewMode::GroupedByPane,
+            LogViewMode::GroupedByPane => LogViewMode::Chronological,
+        };
     }
 
     fn process_usage_summary(&mut self) -> Option<String> {
@@ -5964,7 +5989,20 @@ impl TuiState {
         );
 
         let log_height = if width < 60 { 0 } else { self.max_logs };
-        let visible_lines = self.overlay_lines.as_ref();
+        let overlay_lines = self.overlay_lines.as_ref();
+        let display_lines = if let Some(lines) = overlay_lines {
+            lines.clone()
+        } else if matches!(self.log_view, LogViewMode::GroupedByPane) {
+            build_grouped_log_lines(&self.logs, log_height, self.style.use_unicode_ellipsis)
+        } else {
+            self.logs
+                .iter()
+                .rev()
+                .take(log_height)
+                .rev()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
 
         let mut out = std::io::stdout();
         let _ = out.queue(MoveTo(0, 0));
@@ -5972,18 +6010,7 @@ impl TuiState {
         let _ = write!(out, "{bar}");
 
         for idx in 0..log_height {
-            let raw_line = if let Some(lines) = visible_lines {
-                lines.get(idx).cloned().unwrap_or_default()
-            } else {
-                self.logs
-                    .iter()
-                    .rev()
-                    .take(log_height)
-                    .rev()
-                    .nth(idx)
-                    .map(|value| value.to_string())
-                    .unwrap_or_default()
-            };
+            let raw_line = display_lines.get(idx).cloned().unwrap_or_default();
             let mut line = fit_line(&raw_line, width as usize, self.style.use_unicode_ellipsis);
             if self.style.use_color && self.style.dim_logs && !line.is_empty() {
                 let log_prefix = style_prefix(Some(log_line_color(&raw_line)), None, false);
@@ -6000,12 +6027,21 @@ impl TuiState {
         } else {
             None
         };
+        let view_note = match self.log_view {
+            LogViewMode::Chronological => "view chrono",
+            LogViewMode::GroupedByPane => "view grouped",
+        };
+        let footer_note_owned = if let Some(note) = self.footer_note.as_ref() {
+            format!("{note} {view_note}")
+        } else {
+            view_note.to_string()
+        };
         let footer = render_footer(
             self.style,
             width,
             footer_summary.as_deref(),
-            self.footer_note.as_deref(),
-            visible_lines.is_some(),
+            Some(footer_note_owned.as_str()),
+            overlay_lines.is_some(),
         );
         let _ = out.queue(MoveTo(0, footer_row));
         let _ = out.queue(Clear(ClearType::CurrentLine));
@@ -6045,6 +6081,7 @@ impl TuiState {
                     KeyCode::Char(' ') => Some(TuiAction::ActiveListToggleSelection),
                     KeyCode::Char('a') => Some(TuiAction::ActiveListEnableAll),
                     KeyCode::Char('d') => Some(TuiAction::ActiveListDisableAll),
+                    KeyCode::Char('g') => Some(TuiAction::ToggleLogView),
                     KeyCode::Esc => Some(TuiAction::ActiveListClose),
                     KeyCode::Char('R') => Some(TuiAction::Renew),
                     KeyCode::Char('s') => Some(TuiAction::Stop),
@@ -6126,7 +6163,7 @@ fn render_footer(
         )
     } else {
         format!(
-            "h hold/resume (p/r){sep_text}l active-list{sep_text}f fleet{sep_text}R renew{sep_text}n next{sep_text}s/^C stop{sep_text}q quit"
+            "h hold/resume (p/r){sep_text}l active-list{sep_text}g log-view{sep_text}f fleet{sep_text}R renew{sep_text}n next{sep_text}s/^C stop{sep_text}q quit"
         )
     };
     let text = if let Some(note) = note {
@@ -6559,6 +6596,99 @@ fn sanitize_tui_log_line(line: &str) -> String {
         }
     }
     collapsed.trim().to_string()
+}
+
+fn build_grouped_log_lines(logs: &[String], max_lines: usize, use_unicode: bool) -> Vec<String> {
+    if max_lines == 0 {
+        return Vec::new();
+    }
+
+    let mut groups: BTreeMap<String, (usize, usize, String)> = BTreeMap::new();
+    let mut misc: Option<(usize, usize, String)> = None;
+
+    for (idx, line) in logs.iter().enumerate() {
+        let key = extract_log_target(line);
+        if let Some(target) = key {
+            let entry = groups
+                .entry(target)
+                .or_insert_with(|| (0usize, idx, String::new()));
+            entry.0 = entry.0.saturating_add(1);
+            entry.1 = idx;
+            entry.2 = line.clone();
+        } else {
+            match misc.as_mut() {
+                Some(entry) => {
+                    entry.0 = entry.0.saturating_add(1);
+                    entry.1 = idx;
+                    entry.2 = line.clone();
+                }
+                None => {
+                    misc = Some((1usize, idx, line.clone()));
+                }
+            }
+        }
+    }
+
+    let mut items = groups
+        .into_iter()
+        .map(|(target, (count, last_idx, last_line))| (target, count, last_idx, last_line))
+        .collect::<Vec<_>>();
+    if let Some((count, last_idx, last_line)) = misc {
+        items.push(("misc".to_string(), count, last_idx, last_line));
+    }
+
+    items.sort_by(|a, b| b.2.cmp(&a.2));
+    if items.is_empty() {
+        return vec!["grouped view: no logs yet".to_string()];
+    }
+
+    items
+        .into_iter()
+        .take(max_lines)
+        .map(|(target, count, _idx, last_line)| {
+            let preview = truncate_text(&last_line, 74, use_unicode);
+            format!("{target} x{count} {preview}")
+        })
+        .collect()
+}
+
+fn extract_log_target(line: &str) -> Option<String> {
+    if let Some(pos) = line.find("target=") {
+        let value = &line[pos + 7..];
+        let token = value
+            .chars()
+            .take_while(|ch| !ch.is_whitespace() && *ch != '"' && *ch != ',' && *ch != ';')
+            .collect::<String>();
+        if looks_like_pane_target(&token) {
+            return Some(token);
+        }
+    }
+
+    for token in line.split_whitespace() {
+        let cleaned = token
+            .trim_matches(|ch: char| {
+                ch == '"' || ch == '\'' || ch == '[' || ch == ']' || ch == ',' || ch == ';'
+            })
+            .to_string();
+        if looks_like_pane_target(&cleaned) {
+            return Some(cleaned);
+        }
+    }
+    None
+}
+
+fn looks_like_pane_target(token: &str) -> bool {
+    let Some(colon) = token.find(':') else {
+        return false;
+    };
+    let Some(dot_rel) = token[colon + 1..].find('.') else {
+        return false;
+    };
+    let dot = colon + 1 + dot_rel;
+    let session = &token[..colon];
+    let window = &token[colon + 1..dot];
+    let pane = &token[dot + 1..];
+    !session.is_empty() && !window.is_empty() && !pane.is_empty()
 }
 
 fn state_label(state: LoopState, icon_mode: IconMode) -> (&'static str, &'static str) {
@@ -9058,6 +9188,24 @@ runs:
         let raw = "ok\u{fffd}value";
         let sanitized = sanitize_tui_log_line(raw);
         assert_eq!(sanitized, "okvalue");
+    }
+
+    #[test]
+    fn extract_log_target_prefers_target_field() {
+        let line = "[2026-02-24T20:51:12Z] sent target=ai:2.0 sends=4";
+        assert_eq!(extract_log_target(line).as_deref(), Some("ai:2.0"));
+    }
+
+    #[test]
+    fn grouped_log_lines_fold_same_target() {
+        let logs = vec![
+            "[a] matched target=ai:2.0".to_string(),
+            "[b] delay target=ai:2.0".to_string(),
+            "[c] matched target=codex:1.0".to_string(),
+        ];
+        let lines = build_grouped_log_lines(&logs, 10, true);
+        assert!(lines.iter().any(|line| line.starts_with("ai:2.0 x2 ")));
+        assert!(lines.iter().any(|line| line.starts_with("codex:1.0 x1 ")));
     }
 
     #[test]
