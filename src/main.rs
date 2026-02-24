@@ -1,14 +1,14 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use crossterm::QueueableCommand;
 use crossterm::cursor::MoveTo;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType};
+use crossterm::QueueableCommand;
 use regex::Regex;
 use serde::Deserialize;
 use serde::Serialize;
@@ -1188,7 +1188,11 @@ fn config_validate(path_override: Option<&PathBuf>, all: bool) -> Result<()> {
 }
 
 fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
 }
 
 fn load_workspace_profile_context(
@@ -3408,6 +3412,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
         std::collections::HashMap::new();
     let mut exec_in_flight: Option<ExecInFlight> = None;
     let mut exec_running_ticks: u32 = 0;
+    let mut injection_filter = InjectionFilterState::default();
     let mut logger = Logger::new(config.logging.clone())?;
     let mut fleet_registry = FleetRunRegistry::new(identity.clone(), config.profile_id.clone())?;
     let tui_enabled = config.tui && std::io::stdout().is_terminal();
@@ -3521,6 +3526,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
         if ui_mode == UiMode::Tui && loop_state == LoopState::Holding {
             let mut open_fleet_manager = false;
             if let Some(tui_state) = tui.as_mut() {
+                sync_tui_active_list_ui(tui_state, &injection_filter);
                 if let Some(action) = tui_state.poll_input()? {
                     match action {
                         TuiAction::Pause => {}
@@ -3558,6 +3564,10 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                             break;
                         }
                         TuiAction::Quit => {
+                            if injection_filter.popup_open {
+                                injection_filter.close_popup();
+                                continue;
+                            }
                             tui_state
                                 .push_log(format!("[{}] stopped reason=quit", timestamp_now()));
                             logger.log(LogEvent::stopped(&config, "quit", send_count))?;
@@ -3586,9 +3596,55 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                 timestamp_now()
                             ));
                         }
+                        TuiAction::ActiveListToggle => {
+                            if injection_filter.popup_open {
+                                injection_filter.close_popup();
+                            } else {
+                                injection_filter.open_popup();
+                            }
+                        }
+                        TuiAction::ActiveListUp => {
+                            if injection_filter.popup_open {
+                                injection_filter.move_up();
+                            }
+                        }
+                        TuiAction::ActiveListDown => {
+                            if injection_filter.popup_open {
+                                injection_filter.move_down();
+                            }
+                        }
+                        TuiAction::ActiveListLeft => {
+                            if injection_filter.popup_open {
+                                injection_filter.move_left();
+                            }
+                        }
+                        TuiAction::ActiveListRight => {
+                            if injection_filter.popup_open {
+                                injection_filter.move_right();
+                            }
+                        }
+                        TuiAction::ActiveListToggleSelection => {
+                            if injection_filter.popup_open {
+                                injection_filter.toggle_current_selection();
+                            }
+                        }
+                        TuiAction::ActiveListEnableAll => {
+                            if injection_filter.popup_open {
+                                injection_filter.enable_all();
+                            }
+                        }
+                        TuiAction::ActiveListDisableAll => {
+                            if injection_filter.popup_open {
+                                injection_filter.disable_all();
+                            }
+                        }
+                        TuiAction::ActiveListClose => {
+                            injection_filter.close_popup();
+                        }
                         TuiAction::Redraw => {}
                     }
                 }
+                sync_tui_active_list_ui(tui_state, &injection_filter);
                 tui_state.update(
                     loop_state,
                     &config,
@@ -3877,6 +3933,8 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                     continue;
                 }
 
+                injection_filter.observe_trigger_target(target);
+
                 matched_sources.insert(target.clone());
                 for rule_match in rule_matches {
                     let edge_key = trigger_edge_key(target, &rule_match);
@@ -4005,7 +4063,24 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                     }
                     FanoutMode::Broadcast => tmux_recipients.clone(),
                 };
+                let recipients = recipients
+                    .into_iter()
+                    .filter(|target| injection_filter.is_allowed(target))
+                    .collect::<Vec<_>>();
                 if recipients.is_empty() {
+                    let detail = format!(
+                        "suppressed by active list rule={} source={}",
+                        plan.rule_id.as_deref().unwrap_or("<unnamed>"),
+                        plan.source_target
+                    );
+                    logger.log(LogEvent::status(&config, detail.clone()))?;
+                    if let Some(tui_state) = tui.as_mut() {
+                        tui_state.push_log(format!(
+                            "[{}] {}",
+                            timestamp_now(),
+                            truncate_text(&detail, 120, log_use_unicode)
+                        ));
+                    }
                     continue;
                 }
 
@@ -4206,6 +4281,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
         if ui_mode == UiMode::Tui {
             let mut open_fleet_manager = false;
             if let Some(tui_state) = tui.as_mut() {
+                sync_tui_active_list_ui(tui_state, &injection_filter);
                 if let Some(action) = tui_state.poll_input()? {
                     match action {
                         TuiAction::Pause => {
@@ -4270,8 +4346,57 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                 timestamp_now()
                             ));
                         }
+                        TuiAction::ActiveListToggle => {
+                            if injection_filter.popup_open {
+                                injection_filter.close_popup();
+                            } else {
+                                injection_filter.open_popup();
+                            }
+                        }
+                        TuiAction::ActiveListUp => {
+                            if injection_filter.popup_open {
+                                injection_filter.move_up();
+                            }
+                        }
+                        TuiAction::ActiveListDown => {
+                            if injection_filter.popup_open {
+                                injection_filter.move_down();
+                            }
+                        }
+                        TuiAction::ActiveListLeft => {
+                            if injection_filter.popup_open {
+                                injection_filter.move_left();
+                            }
+                        }
+                        TuiAction::ActiveListRight => {
+                            if injection_filter.popup_open {
+                                injection_filter.move_right();
+                            }
+                        }
+                        TuiAction::ActiveListToggleSelection => {
+                            if injection_filter.popup_open {
+                                injection_filter.toggle_current_selection();
+                            }
+                        }
+                        TuiAction::ActiveListEnableAll => {
+                            if injection_filter.popup_open {
+                                injection_filter.enable_all();
+                            }
+                        }
+                        TuiAction::ActiveListDisableAll => {
+                            if injection_filter.popup_open {
+                                injection_filter.disable_all();
+                            }
+                        }
+                        TuiAction::ActiveListClose => {
+                            injection_filter.close_popup();
+                        }
                         TuiAction::Redraw => {}
                         TuiAction::Quit => {
+                            if injection_filter.popup_open {
+                                injection_filter.close_popup();
+                                continue;
+                            }
                             tui_state
                                 .push_log(format!("[{}] stopped reason=quit", timestamp_now()));
                             logger.log(LogEvent::stopped(&config, "quit", send_count))?;
@@ -4279,6 +4404,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                         }
                     }
                 }
+                sync_tui_active_list_ui(tui_state, &injection_filter);
                 tui_state.update(
                     loop_state,
                     &config,
@@ -4321,6 +4447,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
             let mut should_exit_loop = false;
             while std::time::Instant::now() < sleep_until {
                 if let Some(tui_state) = tui.as_mut() {
+                    sync_tui_active_list_ui(tui_state, &injection_filter);
                     if let Some(action) = tui_state.poll_input()? {
                         match action {
                             TuiAction::Pause => {
@@ -4383,6 +4510,51 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                     timestamp_now()
                                 ));
                             }
+                            TuiAction::ActiveListToggle => {
+                                if injection_filter.popup_open {
+                                    injection_filter.close_popup();
+                                } else {
+                                    injection_filter.open_popup();
+                                }
+                            }
+                            TuiAction::ActiveListUp => {
+                                if injection_filter.popup_open {
+                                    injection_filter.move_up();
+                                }
+                            }
+                            TuiAction::ActiveListDown => {
+                                if injection_filter.popup_open {
+                                    injection_filter.move_down();
+                                }
+                            }
+                            TuiAction::ActiveListLeft => {
+                                if injection_filter.popup_open {
+                                    injection_filter.move_left();
+                                }
+                            }
+                            TuiAction::ActiveListRight => {
+                                if injection_filter.popup_open {
+                                    injection_filter.move_right();
+                                }
+                            }
+                            TuiAction::ActiveListToggleSelection => {
+                                if injection_filter.popup_open {
+                                    injection_filter.toggle_current_selection();
+                                }
+                            }
+                            TuiAction::ActiveListEnableAll => {
+                                if injection_filter.popup_open {
+                                    injection_filter.enable_all();
+                                }
+                            }
+                            TuiAction::ActiveListDisableAll => {
+                                if injection_filter.popup_open {
+                                    injection_filter.disable_all();
+                                }
+                            }
+                            TuiAction::ActiveListClose => {
+                                injection_filter.close_popup();
+                            }
                             TuiAction::Stop => {
                                 tui_state.push_log(format!(
                                     "[{}] stopped reason=manual",
@@ -4402,6 +4574,10 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                 break;
                             }
                             TuiAction::Quit => {
+                                if injection_filter.popup_open {
+                                    injection_filter.close_popup();
+                                    continue;
+                                }
                                 tui_state
                                     .push_log(format!("[{}] stopped reason=quit", timestamp_now()));
                                 logger.log(LogEvent::stopped(&config, "quit", send_count))?;
@@ -4411,6 +4587,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                             TuiAction::Redraw => {}
                         }
                     }
+                    sync_tui_active_list_ui(tui_state, &injection_filter);
                     tui_state.update(
                         loop_state,
                         &config,
@@ -5370,8 +5547,268 @@ enum TuiAction {
     Stop,
     Next,
     Renew,
+    ActiveListToggle,
+    ActiveListUp,
+    ActiveListDown,
+    ActiveListLeft,
+    ActiveListRight,
+    ActiveListToggleSelection,
+    ActiveListEnableAll,
+    ActiveListDisableAll,
+    ActiveListClose,
     Redraw,
     Quit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveListColumn {
+    Session,
+    Window,
+    Pane,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveListCursor {
+    column: ActiveListColumn,
+    session_idx: usize,
+    window_idx: usize,
+    pane_idx: usize,
+}
+
+impl Default for ActiveListCursor {
+    fn default() -> Self {
+        Self {
+            column: ActiveListColumn::Session,
+            session_idx: 0,
+            window_idx: 0,
+            pane_idx: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct KnownPaneTarget {
+    target: String,
+    session: String,
+    window: String,
+}
+
+#[derive(Debug, Default, Clone)]
+struct InjectionFilterState {
+    known_targets: BTreeMap<String, KnownPaneTarget>,
+    disabled_targets: HashSet<String>,
+    popup_open: bool,
+    cursor: ActiveListCursor,
+}
+
+impl InjectionFilterState {
+    fn observe_trigger_target(&mut self, target: &str) {
+        let Ok((session, window, _pane)) = parse_target(target) else {
+            return;
+        };
+        self.known_targets
+            .entry(target.to_string())
+            .or_insert_with(|| KnownPaneTarget {
+                target: target.to_string(),
+                session: session.to_string(),
+                window: window.to_string(),
+            });
+    }
+
+    fn is_allowed(&self, target: &str) -> bool {
+        !self.disabled_targets.contains(target)
+    }
+
+    fn active_counts(&self) -> (usize, usize) {
+        let total = self.known_targets.len();
+        let disabled = self
+            .known_targets
+            .keys()
+            .filter(|target| self.disabled_targets.contains(*target))
+            .count();
+        (total.saturating_sub(disabled), total)
+    }
+
+    fn open_popup(&mut self) {
+        self.popup_open = true;
+        self.normalize_cursor();
+    }
+
+    fn close_popup(&mut self) {
+        self.popup_open = false;
+    }
+
+    fn enable_all(&mut self) {
+        self.disabled_targets.clear();
+    }
+
+    fn disable_all(&mut self) {
+        self.disabled_targets = self.known_targets.keys().cloned().collect();
+    }
+
+    fn normalize_cursor(&mut self) {
+        let sessions = self.sessions();
+        if sessions.is_empty() {
+            self.cursor = ActiveListCursor::default();
+            return;
+        }
+        self.cursor.session_idx = self
+            .cursor
+            .session_idx
+            .min(sessions.len().saturating_sub(1));
+        let Some(session) = sessions.get(self.cursor.session_idx) else {
+            return;
+        };
+        let windows = self.windows_for(session);
+        self.cursor.window_idx = self.cursor.window_idx.min(windows.len().saturating_sub(1));
+        if let Some(window) = windows.get(self.cursor.window_idx) {
+            let panes = self.panes_for(session, window);
+            self.cursor.pane_idx = self.cursor.pane_idx.min(panes.len().saturating_sub(1));
+        } else {
+            self.cursor.pane_idx = 0;
+        }
+    }
+
+    fn sessions(&self) -> Vec<String> {
+        self.known_targets
+            .values()
+            .map(|item| item.session.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    fn windows_for(&self, session: &str) -> Vec<String> {
+        self.known_targets
+            .values()
+            .filter(|item| item.session == session)
+            .map(|item| item.window.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    fn panes_for(&self, session: &str, window: &str) -> Vec<String> {
+        self.known_targets
+            .values()
+            .filter(|item| item.session == session && item.window == window)
+            .map(|item| item.target.clone())
+            .collect::<Vec<_>>()
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    fn selected_session(&self) -> Option<String> {
+        self.sessions().get(self.cursor.session_idx).cloned()
+    }
+
+    fn selected_window(&self, session: &str) -> Option<String> {
+        self.windows_for(session)
+            .get(self.cursor.window_idx)
+            .cloned()
+    }
+
+    fn move_up(&mut self) {
+        match self.cursor.column {
+            ActiveListColumn::Session => {
+                self.cursor.session_idx = self.cursor.session_idx.saturating_sub(1)
+            }
+            ActiveListColumn::Window => {
+                self.cursor.window_idx = self.cursor.window_idx.saturating_sub(1)
+            }
+            ActiveListColumn::Pane => self.cursor.pane_idx = self.cursor.pane_idx.saturating_sub(1),
+        }
+        self.normalize_cursor();
+    }
+
+    fn move_down(&mut self) {
+        match self.cursor.column {
+            ActiveListColumn::Session => {
+                self.cursor.session_idx = self.cursor.session_idx.saturating_add(1)
+            }
+            ActiveListColumn::Window => {
+                self.cursor.window_idx = self.cursor.window_idx.saturating_add(1)
+            }
+            ActiveListColumn::Pane => self.cursor.pane_idx = self.cursor.pane_idx.saturating_add(1),
+        }
+        self.normalize_cursor();
+    }
+
+    fn move_left(&mut self) {
+        self.cursor.column = match self.cursor.column {
+            ActiveListColumn::Session => ActiveListColumn::Session,
+            ActiveListColumn::Window => ActiveListColumn::Session,
+            ActiveListColumn::Pane => ActiveListColumn::Window,
+        };
+        self.normalize_cursor();
+    }
+
+    fn move_right(&mut self) {
+        self.cursor.column = match self.cursor.column {
+            ActiveListColumn::Session => ActiveListColumn::Window,
+            ActiveListColumn::Window => ActiveListColumn::Pane,
+            ActiveListColumn::Pane => ActiveListColumn::Pane,
+        };
+        self.normalize_cursor();
+    }
+
+    fn toggle_current_selection(&mut self) {
+        self.normalize_cursor();
+        let Some(session) = self.selected_session() else {
+            return;
+        };
+        match self.cursor.column {
+            ActiveListColumn::Session => {
+                let targets = self
+                    .known_targets
+                    .values()
+                    .filter(|item| item.session == session)
+                    .map(|item| item.target.clone())
+                    .collect::<Vec<_>>();
+                self.toggle_targets(&targets);
+            }
+            ActiveListColumn::Window => {
+                let Some(window) = self.selected_window(&session) else {
+                    return;
+                };
+                let targets = self
+                    .known_targets
+                    .values()
+                    .filter(|item| item.session == session && item.window == window)
+                    .map(|item| item.target.clone())
+                    .collect::<Vec<_>>();
+                self.toggle_targets(&targets);
+            }
+            ActiveListColumn::Pane => {
+                let Some(window) = self.selected_window(&session) else {
+                    return;
+                };
+                let panes = self.panes_for(&session, &window);
+                let Some(target) = panes.get(self.cursor.pane_idx) else {
+                    return;
+                };
+                self.toggle_targets(std::slice::from_ref(target));
+            }
+        }
+    }
+
+    fn toggle_targets(&mut self, targets: &[String]) {
+        if targets.is_empty() {
+            return;
+        }
+        let all_enabled = targets.iter().all(|target| self.is_allowed(target));
+        if all_enabled {
+            for target in targets {
+                self.disabled_targets.insert(target.clone());
+            }
+        } else {
+            for target in targets {
+                self.disabled_targets.remove(target);
+            }
+        }
+    }
 }
 
 struct TuiState {
@@ -5381,6 +5818,8 @@ struct TuiState {
     style: StyleConfig,
     logs: Vec<String>,
     max_logs: usize,
+    overlay_lines: Option<Vec<String>>,
+    footer_note: Option<String>,
 }
 
 impl TuiState {
@@ -5395,7 +5834,17 @@ impl TuiState {
             style,
             logs: Vec::new(),
             max_logs: height.saturating_sub(3) as usize,
+            overlay_lines: None,
+            footer_note: None,
         })
+    }
+
+    fn set_overlay_lines(&mut self, lines: Option<Vec<String>>) {
+        self.overlay_lines = lines;
+    }
+
+    fn set_footer_note(&mut self, note: Option<String>) {
+        self.footer_note = note;
     }
 
     fn update(
@@ -5433,6 +5882,7 @@ impl TuiState {
         );
 
         let log_height = if width < 60 { 0 } else { self.max_logs };
+        let visible_lines = self.overlay_lines.as_ref();
 
         let mut out = std::io::stdout();
         let _ = out.queue(MoveTo(0, 0));
@@ -5440,15 +5890,18 @@ impl TuiState {
         let _ = write!(out, "{bar}");
 
         for idx in 0..log_height {
-            let raw_line = self
-                .logs
-                .iter()
-                .rev()
-                .take(log_height)
-                .rev()
-                .nth(idx)
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "".to_string());
+            let raw_line = if let Some(lines) = visible_lines {
+                lines.get(idx).cloned().unwrap_or_default()
+            } else {
+                self.logs
+                    .iter()
+                    .rev()
+                    .take(log_height)
+                    .rev()
+                    .nth(idx)
+                    .map(|value| value.to_string())
+                    .unwrap_or_default()
+            };
             let mut line = fit_line(&raw_line, width as usize, self.style.use_unicode_ellipsis);
             if self.style.use_color && self.style.dim_logs && !line.is_empty() {
                 let log_prefix = style_prefix(Some(log_line_color(&raw_line)), None, false);
@@ -5465,7 +5918,13 @@ impl TuiState {
         } else {
             None
         };
-        let footer = render_footer(self.style, width, footer_summary.as_deref());
+        let footer = render_footer(
+            self.style,
+            width,
+            footer_summary.as_deref(),
+            self.footer_note.as_deref(),
+            visible_lines.is_some(),
+        );
         let _ = out.queue(MoveTo(0, footer_row));
         let _ = out.queue(Clear(ClearType::CurrentLine));
         let _ = write!(out, "{footer}");
@@ -5495,6 +5954,16 @@ impl TuiState {
                     KeyCode::Char('r') => Some(TuiAction::Resume),
                     KeyCode::Char('h') => Some(TuiAction::HoldToggle),
                     KeyCode::Char('f') => Some(TuiAction::Fleet),
+                    KeyCode::Char('l') => Some(TuiAction::ActiveListToggle),
+                    KeyCode::Up => Some(TuiAction::ActiveListUp),
+                    KeyCode::Down => Some(TuiAction::ActiveListDown),
+                    KeyCode::Left => Some(TuiAction::ActiveListLeft),
+                    KeyCode::Right => Some(TuiAction::ActiveListRight),
+                    KeyCode::Enter => Some(TuiAction::ActiveListToggleSelection),
+                    KeyCode::Char(' ') => Some(TuiAction::ActiveListToggleSelection),
+                    KeyCode::Char('a') => Some(TuiAction::ActiveListEnableAll),
+                    KeyCode::Char('d') => Some(TuiAction::ActiveListDisableAll),
+                    KeyCode::Esc => Some(TuiAction::ActiveListClose),
                     KeyCode::Char('R') => Some(TuiAction::Renew),
                     KeyCode::Char('s') => Some(TuiAction::Stop),
                     KeyCode::Char('n') => Some(TuiAction::Next),
@@ -5555,7 +6024,13 @@ fn supports_unicode() -> bool {
     locale.contains("utf-8") || locale.contains("utf8")
 }
 
-fn render_footer(style: StyleConfig, width: u16, summary: Option<&str>) -> String {
+fn render_footer(
+    style: StyleConfig,
+    width: u16,
+    summary: Option<&str>,
+    note: Option<&str>,
+    modal_open: bool,
+) -> String {
     let sep_text = if style.use_unicode_ellipsis {
         " · "
     } else {
@@ -5563,10 +6038,19 @@ fn render_footer(style: StyleConfig, width: u16, summary: Option<&str>) -> Strin
     };
     let text = if let Some(summary) = summary {
         format!("stopped{sep_text}{summary}{sep_text}q quit")
+    } else if modal_open {
+        format!(
+            "active list{sep_text}<-/-> cols{sep_text}↑/↓ rows{sep_text}space/enter toggle{sep_text}a all on{sep_text}d all off{sep_text}q/esc close"
+        )
     } else {
         format!(
-            "h hold/resume (p/r){sep_text}f fleet{sep_text}R renew{sep_text}n next{sep_text}s/^C stop{sep_text}q quit"
+            "h hold/resume (p/r){sep_text}l active-list{sep_text}f fleet{sep_text}R renew{sep_text}n next{sep_text}s/^C stop{sep_text}q quit"
         )
+    };
+    let text = if let Some(note) = note {
+        format!("{text}{sep_text}{note}")
+    } else {
+        text
     };
     let line = pad_to_width(&text, width as usize);
     if style.use_color {
@@ -5588,6 +6072,176 @@ fn render_footer_summary(
     } else {
         format!("iter {current}/{total} elapsed {elapsed}")
     }
+}
+
+fn active_list_note(filter: &InjectionFilterState) -> Option<String> {
+    let (active, total) = filter.active_counts();
+    if total == 0 {
+        None
+    } else {
+        Some(format!("active {active}/{total}"))
+    }
+}
+
+fn sync_tui_active_list_ui(tui_state: &mut TuiState, filter: &InjectionFilterState) {
+    tui_state.set_footer_note(active_list_note(filter));
+    if filter.popup_open {
+        tui_state.set_overlay_lines(Some(render_active_list_popup(
+            filter,
+            tui_state.width as usize,
+            tui_state.max_logs,
+            tui_state.style.use_unicode_ellipsis,
+        )));
+    } else {
+        tui_state.set_overlay_lines(None);
+    }
+}
+
+fn render_active_list_popup(
+    filter: &InjectionFilterState,
+    width: usize,
+    max_lines: usize,
+    use_unicode: bool,
+) -> Vec<String> {
+    let mark_on = if use_unicode { "●" } else { "*" };
+    let mark_off = if use_unicode { "○" } else { "-" };
+    let mark_partial = if use_unicode { "◐" } else { "+" };
+    let focus = if use_unicode { "▸" } else { ">" };
+    let spacer = if use_unicode { " │ " } else { " | " };
+    let col_width = (width.saturating_sub(8) / 3).max(16);
+
+    let sessions = filter.sessions();
+    let selected_session = sessions.get(filter.cursor.session_idx).cloned();
+    let windows = selected_session
+        .as_deref()
+        .map(|session| filter.windows_for(session))
+        .unwrap_or_default();
+    let selected_window = selected_session
+        .as_deref()
+        .and_then(|session| {
+            windows
+                .get(filter.cursor.window_idx)
+                .map(|window| (session, window))
+        })
+        .map(|(session, window)| (session.to_string(), window.to_string()));
+    let panes = selected_window
+        .as_ref()
+        .map(|(session, window)| filter.panes_for(session, window))
+        .unwrap_or_default();
+
+    let mut lines = Vec::new();
+    lines.push("Active List - injection filter".to_string());
+    lines.push(format!(
+        "{}{}{}",
+        pad_to_width("Sessions", col_width),
+        spacer,
+        pad_to_width("Windows", col_width + col_width + 3)
+    ));
+    lines.push(format!(
+        "{}{}{}",
+        pad_to_width("", col_width),
+        spacer,
+        pad_to_width("Panes", col_width + col_width + 3)
+    ));
+
+    let rows = max_lines.saturating_sub(lines.len()).max(1);
+    for idx in 0..rows {
+        let session_cell = if let Some(session) = sessions.get(idx) {
+            let targets = filter
+                .known_targets
+                .values()
+                .filter(|item| item.session == *session)
+                .map(|item| item.target.clone())
+                .collect::<Vec<_>>();
+            let enabled = targets
+                .iter()
+                .filter(|target| filter.is_allowed(target))
+                .count();
+            let mark = if enabled == 0 {
+                mark_off
+            } else if enabled == targets.len() {
+                mark_on
+            } else {
+                mark_partial
+            };
+            let pointer = if idx == filter.cursor.session_idx
+                && matches!(filter.cursor.column, ActiveListColumn::Session)
+            {
+                focus
+            } else {
+                " "
+            };
+            format!("{pointer} {mark} {session} ({enabled}/{})", targets.len())
+        } else {
+            String::new()
+        };
+
+        let window_cell = if let Some(session) = selected_session.as_ref() {
+            if let Some(window) = windows.get(idx) {
+                let targets = filter
+                    .known_targets
+                    .values()
+                    .filter(|item| item.session == *session && item.window == *window)
+                    .map(|item| item.target.clone())
+                    .collect::<Vec<_>>();
+                let enabled = targets
+                    .iter()
+                    .filter(|target| filter.is_allowed(target))
+                    .count();
+                let mark = if enabled == 0 {
+                    mark_off
+                } else if enabled == targets.len() {
+                    mark_on
+                } else {
+                    mark_partial
+                };
+                let pointer = if idx == filter.cursor.window_idx
+                    && matches!(filter.cursor.column, ActiveListColumn::Window)
+                {
+                    focus
+                } else {
+                    " "
+                };
+                format!(
+                    "{pointer} {mark} {session}:{window} ({enabled}/{})",
+                    targets.len()
+                )
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+
+        let pane_cell = if let Some(target) = panes.get(idx) {
+            let mark = if filter.is_allowed(target) {
+                mark_on
+            } else {
+                mark_off
+            };
+            let pointer = if idx == filter.cursor.pane_idx
+                && matches!(filter.cursor.column, ActiveListColumn::Pane)
+            {
+                focus
+            } else {
+                " "
+            };
+            format!("{pointer} {mark} {target}")
+        } else {
+            String::new()
+        };
+
+        lines.push(format!(
+            "{}{}{}{}{}",
+            pad_to_width(&fit_line(&session_cell, col_width, use_unicode), col_width),
+            spacer,
+            pad_to_width(&fit_line(&window_cell, col_width, use_unicode), col_width),
+            spacer,
+            fit_line(&pane_cell, col_width, use_unicode)
+        ));
+    }
+
+    lines
 }
 
 fn render_status_bar(
@@ -5897,7 +6551,11 @@ fn log_line_date(line: &str) -> Option<&str> {
     let close = line.find(']')?;
     let ts = line.get(1..close)?;
     let date = ts.split('T').next()?;
-    if date.len() == 10 { Some(date) } else { None }
+    if date.len() == 10 {
+        Some(date)
+    } else {
+        None
+    }
 }
 
 fn parse_log_timestamp(line: &str) -> Option<OffsetDateTime> {
@@ -7241,10 +7899,9 @@ runs:
         .unwrap();
 
         let err = config_doctor(Some(&config_path), true).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("multiple selected profiles enable `tui`")
-        );
+        assert!(err
+            .to_string()
+            .contains("multiple selected profiles enable `tui`"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -8309,6 +8966,42 @@ runs:
         assert!(has_pending_confirm_for_target(&pending, "ai:7.0"));
         assert!(has_pending_confirm_for_target(&pending, "other:1.0"));
         assert!(!has_pending_confirm_for_target(&pending, "ai:8.0"));
+    }
+
+    #[test]
+    fn injection_filter_tracks_triggered_targets() {
+        let mut filter = InjectionFilterState::default();
+        filter.observe_trigger_target("ai:5.0");
+        filter.observe_trigger_target("ai:5.1");
+        filter.observe_trigger_target("ai:5.0");
+        assert_eq!(filter.known_targets.len(), 2);
+        assert_eq!(filter.active_counts(), (2, 2));
+    }
+
+    #[test]
+    fn injection_filter_disable_all_blocks_known_targets() {
+        let mut filter = InjectionFilterState::default();
+        filter.observe_trigger_target("ai:5.0");
+        filter.observe_trigger_target("codex:1.0");
+        filter.disable_all();
+        assert!(!filter.is_allowed("ai:5.0"));
+        assert!(!filter.is_allowed("codex:1.0"));
+        assert_eq!(filter.active_counts(), (0, 2));
+    }
+
+    #[test]
+    fn injection_filter_toggle_current_selection_toggles_scope() {
+        let mut filter = InjectionFilterState::default();
+        filter.observe_trigger_target("ai:5.0");
+        filter.observe_trigger_target("ai:5.1");
+        filter.observe_trigger_target("codex:1.0");
+        filter.open_popup();
+        filter.cursor.column = ActiveListColumn::Session;
+        filter.cursor.session_idx = 0;
+        filter.toggle_current_selection();
+        assert!(!filter.is_allowed("ai:5.0"));
+        assert!(!filter.is_allowed("ai:5.1"));
+        assert!(filter.is_allowed("codex:1.0"));
     }
 
     #[test]
