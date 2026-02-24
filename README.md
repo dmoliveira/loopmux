@@ -87,6 +87,7 @@ target: "ai:8.1"
 iterations: 50
 tail: 3
 poll: 5
+initial_poll: 5
 default_action:
   prompt: "Do the next iteration."
 rules:
@@ -116,7 +117,7 @@ runs:
 
 Notes:
 - Imported files can contribute extra `runs`/`events` profiles.
-- Each profile uses the same run-config schema as normal YAML runs (`target`, `rules`, `poll`, `tail`, or `exec.command`).
+- Each profile uses the same run-config schema as normal YAML runs (`target`, `rules`, `poll`, `initial_poll`, `tail`, or `exec.command`).
 - Startup validates all selected profiles before launch and prints clear per-profile errors.
 - Migration guide: `docs/specs/config-first-migration.md`.
 
@@ -193,6 +194,7 @@ logging:
 exec:
   command: "gw-watch-comp"
 poll: 10
+initial_poll: 5
 iterations: 3
 name: "gw-watch"
 ```

@@ -52,7 +52,7 @@ enum Command {
 #[derive(Debug, Parser)]
 #[command(
     after_help = concat!(
-        "Examples:\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n  loopmux run --config loop.yaml --duration 2h\n  loopmux run --tui\n  loopmux run --exec \"gw-watch-comp\" --poll 10 --iterations 3\n\nDefaults:\n  tail=1 (last non-blank line)\n  poll=5s\n  trigger-confirm-seconds=5\n  history-limit=50\n  log-preview-lines=3\n  trigger-edge=on\n  recheck-before-send=on\n\nDuration units: s, m, h, d, w, mon (30d), y (365d)\n\n",
+        "Examples:\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --once\n  loopmux run -t ai:5.0 -n 5 --prompt \"Do the next iteration.\" --trigger \"Concluded|What is next\" --exclude \"PROD\"\n  loopmux run --config loop.yaml --duration 2h\n  loopmux run --tui\n  loopmux run --exec \"gw-watch-comp\" --poll 10 --iterations 3\n\nDefaults:\n  tail=1 (last non-blank line)\n  poll=5s\n  initial-poll=5s\n  trigger-confirm-seconds=5\n  history-limit=50\n  log-preview-lines=3\n  trigger-edge=on\n  recheck-before-send=on\n\nDuration units: s, m, h, d, w, mon (30d), y (365d)\n\n",
         "Version: ",
         env!("CARGO_PKG_VERSION"),
         "\n"
@@ -122,6 +122,9 @@ struct RunArgs {
     /// Poll interval in seconds when waiting for changes.
     #[arg(long)]
     poll: Option<u64>,
+    /// Initial wait in seconds before the second scan (default 5).
+    #[arg(long)]
+    initial_poll: Option<u64>,
     /// Seconds a trigger must remain matched before send (default 5).
     #[arg(long)]
     trigger_confirm_seconds: Option<u64>,
@@ -149,6 +152,7 @@ struct RunArgs {
 }
 
 const DEFAULT_HISTORY_LIMIT: usize = 50;
+const DEFAULT_INITIAL_POLL_SECONDS: u64 = 5;
 const DEFAULT_TRIGGER_CONFIRM_SECONDS: u64 = 5;
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -172,6 +176,7 @@ struct HistoryEntry {
     head: Option<usize>,
     once: bool,
     poll: Option<u64>,
+    initial_poll: Option<u64>,
     trigger_confirm_seconds: Option<u64>,
     log_preview_lines: Option<usize>,
     trigger_edge: Option<bool>,
@@ -315,6 +320,7 @@ struct Config {
     iterations: Option<u32>,
     infinite: Option<bool>,
     poll: Option<u64>,
+    initial_poll: Option<u64>,
     trigger_confirm_seconds: Option<u64>,
     log_preview_lines: Option<usize>,
     trigger_edge: Option<bool>,
@@ -1559,6 +1565,9 @@ fn hydrate_run_args_from_history(mut args: RunArgs) -> Result<RunArgs> {
     }
     if args.poll.is_none() {
         args.poll = entry.poll;
+    }
+    if args.initial_poll.is_none() {
+        args.initial_poll = entry.initial_poll;
     }
     if args.trigger_confirm_seconds.is_none() {
         args.trigger_confirm_seconds = entry.trigger_confirm_seconds;
@@ -3228,7 +3237,7 @@ fn history_signature(args: &RunArgs) -> Option<String> {
         return None;
     }
     Some(format!(
-        "target={target}|prompt={prompt}|trigger={trigger}|trigger_expr={trigger_expr}|trigger_exact_line={}|exclude={}|pre={}|post={}|iterations={}|tail={}|head={}|once={}|poll={}|trigger_confirm_seconds={}|log_preview_lines={}|trigger_edge={}|recheck_before_send={}|fanout={}|duration={}",
+        "target={target}|prompt={prompt}|trigger={trigger}|trigger_expr={trigger_expr}|trigger_exact_line={}|exclude={}|pre={}|post={}|iterations={}|tail={}|head={}|once={}|poll={}|initial_poll={}|trigger_confirm_seconds={}|log_preview_lines={}|trigger_edge={}|recheck_before_send={}|fanout={}|duration={}",
         args.trigger_exact_line,
         args.exclude.as_deref().unwrap_or(""),
         args.pre.as_deref().unwrap_or(""),
@@ -3238,6 +3247,7 @@ fn history_signature(args: &RunArgs) -> Option<String> {
         args.head.map(|v| v.to_string()).unwrap_or_default(),
         args.once,
         args.poll.map(|v| v.to_string()).unwrap_or_default(),
+        args.initial_poll.map(|v| v.to_string()).unwrap_or_default(),
         args.trigger_confirm_seconds
             .map(|v| v.to_string())
             .unwrap_or_default(),
@@ -3281,6 +3291,7 @@ fn store_run_history(args: &RunArgs) -> Result<()> {
             head: args.head,
             once: args.once,
             poll: args.poll,
+            initial_poll: args.initial_poll,
             trigger_confirm_seconds: args.trigger_confirm_seconds,
             log_preview_lines: args.log_preview_lines,
             trigger_edge: Some(!args.no_trigger_edge),
@@ -3297,7 +3308,7 @@ fn store_run_history(args: &RunArgs) -> Result<()> {
 
 fn history_entry_signature(entry: &HistoryEntry) -> Option<String> {
     Some(format!(
-        "target={}|prompt={}|trigger={}|trigger_expr={}|trigger_exact_line={}|exclude={}|pre={}|post={}|iterations={}|tail={}|head={}|once={}|poll={}|trigger_confirm_seconds={}|log_preview_lines={}|trigger_edge={}|recheck_before_send={}|fanout={}|duration={}",
+        "target={}|prompt={}|trigger={}|trigger_expr={}|trigger_exact_line={}|exclude={}|pre={}|post={}|iterations={}|tail={}|head={}|once={}|poll={}|initial_poll={}|trigger_confirm_seconds={}|log_preview_lines={}|trigger_edge={}|recheck_before_send={}|fanout={}|duration={}",
         entry.target,
         entry.prompt,
         entry.trigger,
@@ -3311,6 +3322,10 @@ fn history_entry_signature(entry: &HistoryEntry) -> Option<String> {
         entry.head.map(|v| v.to_string()).unwrap_or_default(),
         entry.once,
         entry.poll.map(|v| v.to_string()).unwrap_or_default(),
+        entry
+            .initial_poll
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
         entry
             .trigger_confirm_seconds
             .map(|v| v.to_string())
@@ -3442,6 +3457,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
     let run_started = std::time::Instant::now();
     let mut held_total = std::time::Duration::from_secs(0);
     let mut hold_started: Option<std::time::Instant> = None;
+    let mut first_wait_cycle = true;
     fleet_registry.update(&config.target_label, loop_state, send_count, config.poll)?;
 
     while config.infinite || send_count < max_sends {
@@ -3770,14 +3786,20 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                 let _ = std::io::stdout().flush();
             }
 
+            let wait_seconds = if first_wait_cycle {
+                config.initial_poll
+            } else {
+                config.poll
+            };
             sleep_with_heartbeat(
                 &fleet_registry,
                 &config.target_label,
                 loop_state,
                 send_count,
-                config.poll,
+                wait_seconds,
                 config.poll,
             )?;
+            first_wait_cycle = false;
             continue;
         }
 
@@ -4289,8 +4311,13 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
         }
 
         if ui_mode == UiMode::Tui {
+            let wait_seconds = if first_wait_cycle {
+                config.initial_poll
+            } else {
+                config.poll
+            };
             let sleep_until =
-                std::time::Instant::now() + std::time::Duration::from_secs(config.poll);
+                std::time::Instant::now() + std::time::Duration::from_secs(wait_seconds);
             let mut should_exit_loop = false;
             while std::time::Instant::now() < sleep_until {
                 if let Some(tui_state) = tui.as_mut() {
@@ -4402,15 +4429,22 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
             if force_rescan {
                 continue;
             }
+            first_wait_cycle = false;
         } else {
+            let wait_seconds = if first_wait_cycle {
+                config.initial_poll
+            } else {
+                config.poll
+            };
             sleep_with_heartbeat(
                 &fleet_registry,
                 &config.target_label,
                 loop_state,
                 send_count,
-                config.poll,
+                wait_seconds,
                 config.poll,
             )?;
+            first_wait_cycle = false;
         }
     }
 
@@ -5071,6 +5105,7 @@ fn resolve_run_config(args: &RunArgs) -> Result<Config> {
             iterations: args.iterations,
             infinite: None,
             poll: args.poll,
+            initial_poll: args.initial_poll,
             trigger_confirm_seconds: args.trigger_confirm_seconds,
             log_preview_lines: args.log_preview_lines,
             trigger_edge: Some(!args.no_trigger_edge),
@@ -5152,6 +5187,7 @@ fn resolve_run_config(args: &RunArgs) -> Result<Config> {
         iterations: args.iterations,
         infinite: None,
         poll: args.poll,
+        initial_poll: args.initial_poll,
         trigger_confirm_seconds: args.trigger_confirm_seconds,
         log_preview_lines: args.log_preview_lines,
         trigger_edge: Some(!args.no_trigger_edge),
@@ -5241,6 +5277,7 @@ struct ResolvedConfig {
     infinite: bool,
     has_prompt: bool,
     poll: u64,
+    initial_poll: u64,
     trigger_confirm_seconds: u64,
     log_preview_lines: usize,
     trigger_edge: bool,
@@ -6099,6 +6136,10 @@ fn resolve_config(
     }
 
     let poll = config.poll.unwrap_or(5).max(1);
+    let initial_poll = config
+        .initial_poll
+        .unwrap_or(DEFAULT_INITIAL_POLL_SECONDS)
+        .max(1);
     let trigger_confirm_seconds = config
         .trigger_confirm_seconds
         .unwrap_or(DEFAULT_TRIGGER_CONFIRM_SECONDS);
@@ -6136,6 +6177,7 @@ fn resolve_config(
         infinite,
         has_prompt,
         poll,
+        initial_poll,
         trigger_confirm_seconds,
         log_preview_lines,
         trigger_edge,
@@ -6203,6 +6245,7 @@ fn print_validation(config: &ResolvedConfig) {
         }
     }
     println!("- poll: {}s", config.poll);
+    println!("- initial_poll: {}s", config.initial_poll);
     println!(
         "- trigger_confirm_seconds: {}s",
         config.trigger_confirm_seconds
@@ -7363,6 +7406,7 @@ runs:
             single_line: false,
             tui: false,
             poll: None,
+            initial_poll: None,
             trigger_confirm_seconds: None,
             log_preview_lines: None,
             no_trigger_edge: false,
@@ -7399,6 +7443,7 @@ runs:
             single_line: false,
             tui: false,
             poll: Some(5),
+            initial_poll: None,
             trigger_confirm_seconds: None,
             log_preview_lines: None,
             no_trigger_edge: false,
@@ -7442,6 +7487,7 @@ runs:
             single_line: false,
             tui: false,
             poll: None,
+            initial_poll: None,
             trigger_confirm_seconds: None,
             log_preview_lines: None,
             no_trigger_edge: false,
@@ -7480,6 +7526,7 @@ runs:
             single_line: false,
             tui: false,
             poll: None,
+            initial_poll: None,
             trigger_confirm_seconds: None,
             log_preview_lines: None,
             no_trigger_edge: false,
@@ -7536,6 +7583,7 @@ runs:
             single_line: false,
             tui: false,
             poll: None,
+            initial_poll: None,
             trigger_confirm_seconds: None,
             log_preview_lines: None,
             no_trigger_edge: false,
@@ -7577,6 +7625,7 @@ runs:
             single_line: false,
             tui: false,
             poll: None,
+            initial_poll: None,
             trigger_confirm_seconds: None,
             log_preview_lines: None,
             no_trigger_edge: false,
@@ -7618,6 +7667,7 @@ runs:
             single_line: false,
             tui: false,
             poll: None,
+            initial_poll: None,
             trigger_confirm_seconds: None,
             log_preview_lines: None,
             no_trigger_edge: false,
@@ -7659,6 +7709,7 @@ runs:
             single_line: false,
             tui: false,
             poll: None,
+            initial_poll: None,
             trigger_confirm_seconds: None,
             log_preview_lines: None,
             no_trigger_edge: false,
@@ -7689,6 +7740,7 @@ runs:
             iterations: Some(1),
             infinite: None,
             poll: Some(1),
+            initial_poll: None,
             trigger_confirm_seconds: Some(0),
             log_preview_lines: Some(1),
             trigger_edge: Some(true),
@@ -7741,6 +7793,7 @@ runs:
             iterations: Some(3),
             infinite: None,
             poll: Some(7),
+            initial_poll: None,
             trigger_confirm_seconds: None,
             log_preview_lines: None,
             trigger_edge: None,
@@ -8009,6 +8062,7 @@ runs:
             single_line: false,
             tui: false,
             poll: 5,
+            initial_poll: 5,
             log_preview_lines: 3,
             trigger_edge: true,
             recheck_before_send: true,
@@ -8070,6 +8124,7 @@ runs:
             single_line: false,
             tui: false,
             poll: 5,
+            initial_poll: 5,
             log_preview_lines: 3,
             trigger_edge: true,
             recheck_before_send: true,
@@ -8131,6 +8186,7 @@ runs:
             single_line: false,
             tui: true,
             poll: 10,
+            initial_poll: 5,
             log_preview_lines: 3,
             trigger_edge: true,
             recheck_before_send: true,
@@ -8191,6 +8247,7 @@ runs:
             single_line: true,
             tui: false,
             poll: 10,
+            initial_poll: 5,
             log_preview_lines: 3,
             trigger_edge: true,
             recheck_before_send: true,
@@ -8640,6 +8697,7 @@ fn default_template() -> String {
     let template = r#"target: "ai:5.0"
 iterations: 10
 poll: 5
+initial_poll: 5
 trigger_confirm_seconds: 5
 log_preview_lines: 3
 trigger_edge: true
