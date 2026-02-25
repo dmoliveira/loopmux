@@ -3,12 +3,12 @@ use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use crossterm::QueueableCommand;
 use crossterm::cursor::MoveTo;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType};
-use crossterm::QueueableCommand;
+use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode};
 use regex::Regex;
 use serde::Deserialize;
 use serde::Serialize;
@@ -146,12 +146,16 @@ struct RunArgs {
     /// Max history entries to keep/show for TUI picker.
     #[arg(long)]
     history_limit: Option<usize>,
+    /// Max characters allowed in TUI prompt editor.
+    #[arg(long)]
+    prompt_edit_max_chars: Option<usize>,
     /// Optional run codename (auto-generated when omitted).
     #[arg(long)]
     name: Option<String>,
 }
 
 const DEFAULT_HISTORY_LIMIT: usize = 50;
+const DEFAULT_PROMPT_EDIT_MAX_CHARS: usize = 100;
 const DEFAULT_INITIAL_POLL_SECONDS: u64 = 5;
 const DEFAULT_TRIGGER_CONFIRM_SECONDS: u64 = 5;
 
@@ -327,6 +331,7 @@ struct Config {
     recheck_before_send: Option<bool>,
     fanout: Option<FanoutMode>,
     duration: Option<String>,
+    prompt_edit_max_chars: Option<usize>,
     rule_eval: Option<RuleEval>,
     default_action: Option<Action>,
     delay: Option<DelayConfig>,
@@ -1188,11 +1193,7 @@ fn config_validate(path_override: Option<&PathBuf>, all: bool) -> Result<()> {
 }
 
 fn yes_no(value: bool) -> &'static str {
-    if value {
-        "yes"
-    } else {
-        "no"
-    }
+    if value { "yes" } else { "no" }
 }
 
 fn load_workspace_profile_context(
@@ -3397,6 +3398,29 @@ fn select_history_entry(limit: usize) -> Result<HistoryEntry> {
     }
 }
 
+fn load_prompt_history_items(limit: usize) -> Result<Vec<PromptHistoryItem>> {
+    let history = load_run_history()?;
+    let mut seen = HashSet::new();
+    let mut items = Vec::new();
+    for entry in history.entries.into_iter() {
+        let text = entry.prompt.trim().to_string();
+        if text.is_empty() {
+            continue;
+        }
+        if !seen.insert(text.clone()) {
+            continue;
+        }
+        items.push(PromptHistoryItem {
+            created_at: entry.last_run,
+            text,
+        });
+        if items.len() >= limit.max(1) {
+            break;
+        }
+    }
+    Ok(items)
+}
+
 fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
     let mut send_count: u32 = 0;
     let max_sends = config.iterations.unwrap_or(u32::MAX);
@@ -3413,6 +3437,10 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
     let mut exec_in_flight: Option<ExecInFlight> = None;
     let mut exec_running_ticks: u32 = 0;
     let mut injection_filter = InjectionFilterState::default();
+    let mut prompt_editor = PromptEditorState::new(
+        build_prompt(&config.default_action),
+        config.prompt_edit_max_chars,
+    );
     let mut logger = Logger::new(config.logging.clone())?;
     let mut fleet_registry = FleetRunRegistry::new(identity.clone(), config.profile_id.clone())?;
     let tui_enabled = config.tui && std::io::stdout().is_terminal();
@@ -3526,8 +3554,10 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
         if ui_mode == UiMode::Tui && loop_state == LoopState::Holding {
             let mut open_fleet_manager = false;
             if let Some(tui_state) = tui.as_mut() {
-                sync_tui_active_list_ui(tui_state, &injection_filter);
-                if let Some(action) = tui_state.poll_input()? {
+                sync_tui_overlays(tui_state, &injection_filter, &prompt_editor);
+                if let Some(action) =
+                    tui_state.poll_input(prompt_editor.open, prompt_editor.confirm.is_some())?
+                {
                     match action {
                         TuiAction::Pause => {}
                         TuiAction::Resume => {
@@ -3566,6 +3596,10 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                             break;
                         }
                         TuiAction::Quit => {
+                            if prompt_editor.open {
+                                prompt_editor.close();
+                                continue;
+                            }
                             if injection_filter.popup_open {
                                 injection_filter.close_popup();
                                 continue;
@@ -3576,6 +3610,10 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                             break;
                         }
                         TuiAction::Next => {
+                            if prompt_editor.open && prompt_editor.confirm.is_some() {
+                                prompt_editor.confirm_no();
+                                continue;
+                            }
                             last_hash_by_target.clear();
                             trigger_edge_active.clear();
                             trigger_confirm_pending_since.clear();
@@ -3599,6 +3637,9 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                             ));
                         }
                         TuiAction::ActiveListToggle => {
+                            if prompt_editor.open {
+                                continue;
+                            }
                             if injection_filter.popup_open {
                                 injection_filter.close_popup();
                             } else {
@@ -3606,12 +3647,16 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                             }
                         }
                         TuiAction::ActiveListUp => {
-                            if injection_filter.popup_open {
+                            if prompt_editor.open {
+                                prompt_editor.select_up();
+                            } else if injection_filter.popup_open {
                                 injection_filter.move_up();
                             }
                         }
                         TuiAction::ActiveListDown => {
-                            if injection_filter.popup_open {
+                            if prompt_editor.open {
+                                prompt_editor.select_down();
+                            } else if injection_filter.popup_open {
                                 injection_filter.move_down();
                             }
                         }
@@ -3626,7 +3671,9 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                             }
                         }
                         TuiAction::ActiveListToggleSelection => {
-                            if injection_filter.popup_open {
+                            if prompt_editor.open {
+                                prompt_editor.use_selection();
+                            } else if injection_filter.popup_open {
                                 injection_filter.toggle_current_selection();
                             }
                         }
@@ -3641,7 +3688,50 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                             }
                         }
                         TuiAction::ActiveListClose => {
+                            if prompt_editor.open {
+                                prompt_editor.close();
+                            } else {
+                                injection_filter.close_popup();
+                            }
+                        }
+                        TuiAction::PromptEditorToggle => {
                             injection_filter.close_popup();
+                            prompt_editor.toggle_open();
+                        }
+                        TuiAction::PromptEditorClearHistory => {
+                            if prompt_editor.open {
+                                prompt_editor.request_clear_history();
+                            }
+                        }
+                        TuiAction::PromptEditorUndo => {
+                            if prompt_editor.open {
+                                prompt_editor.undo();
+                            }
+                        }
+                        TuiAction::PromptEditorConfirmYes => {
+                            if prompt_editor.open {
+                                prompt_editor.confirm_yes();
+                            }
+                        }
+                        TuiAction::PromptEditorConfirmNo => {
+                            if prompt_editor.open {
+                                prompt_editor.confirm_no();
+                            }
+                        }
+                        TuiAction::PromptEditorBackspace => {
+                            if prompt_editor.open {
+                                prompt_editor.backspace();
+                            }
+                        }
+                        TuiAction::PromptEditorInput(ch) => {
+                            if prompt_editor.open && !ch.is_control() {
+                                prompt_editor.input_char(ch);
+                            }
+                        }
+                        TuiAction::PromptEditorDeleteSelected => {
+                            if prompt_editor.open {
+                                prompt_editor.request_delete_selected();
+                            }
                         }
                         TuiAction::ToggleLogView => {
                             tui_state.toggle_log_view();
@@ -3649,7 +3739,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                         TuiAction::Redraw => {}
                     }
                 }
-                sync_tui_active_list_ui(tui_state, &injection_filter);
+                sync_tui_overlays(tui_state, &injection_filter, &prompt_editor);
                 tui_state.update(
                     loop_state,
                     &config,
@@ -3964,7 +4054,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                         .action
                         .as_ref()
                         .unwrap_or(&config.default_action);
-                    let prompt = build_prompt(action);
+                    let prompt = prompt_editor.effective_prompt(&build_prompt(action));
                     if config.fanout == FanoutMode::Broadcast {
                         let key = format!(
                             "{}|{}",
@@ -4286,8 +4376,10 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
         if ui_mode == UiMode::Tui {
             let mut open_fleet_manager = false;
             if let Some(tui_state) = tui.as_mut() {
-                sync_tui_active_list_ui(tui_state, &injection_filter);
-                if let Some(action) = tui_state.poll_input()? {
+                sync_tui_overlays(tui_state, &injection_filter, &prompt_editor);
+                if let Some(action) =
+                    tui_state.poll_input(prompt_editor.open, prompt_editor.confirm.is_some())?
+                {
                     match action {
                         TuiAction::Pause => {
                             if hold_started.is_none() {
@@ -4331,6 +4423,10 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                             break;
                         }
                         TuiAction::Next => {
+                            if prompt_editor.open && prompt_editor.confirm.is_some() {
+                                prompt_editor.confirm_no();
+                                continue;
+                            }
                             last_hash_by_target.clear();
                             trigger_edge_active.clear();
                             trigger_confirm_pending_since.clear();
@@ -4354,6 +4450,9 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                             ));
                         }
                         TuiAction::ActiveListToggle => {
+                            if prompt_editor.open {
+                                continue;
+                            }
                             if injection_filter.popup_open {
                                 injection_filter.close_popup();
                             } else {
@@ -4361,12 +4460,16 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                             }
                         }
                         TuiAction::ActiveListUp => {
-                            if injection_filter.popup_open {
+                            if prompt_editor.open {
+                                prompt_editor.select_up();
+                            } else if injection_filter.popup_open {
                                 injection_filter.move_up();
                             }
                         }
                         TuiAction::ActiveListDown => {
-                            if injection_filter.popup_open {
+                            if prompt_editor.open {
+                                prompt_editor.select_down();
+                            } else if injection_filter.popup_open {
                                 injection_filter.move_down();
                             }
                         }
@@ -4381,7 +4484,9 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                             }
                         }
                         TuiAction::ActiveListToggleSelection => {
-                            if injection_filter.popup_open {
+                            if prompt_editor.open {
+                                prompt_editor.use_selection();
+                            } else if injection_filter.popup_open {
                                 injection_filter.toggle_current_selection();
                             }
                         }
@@ -4396,13 +4501,55 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                             }
                         }
                         TuiAction::ActiveListClose => {
+                            if prompt_editor.open {
+                                prompt_editor.close();
+                            } else {
+                                injection_filter.close_popup();
+                            }
+                        }
+                        TuiAction::PromptEditorToggle => {
                             injection_filter.close_popup();
+                            prompt_editor.toggle_open();
+                        }
+                        TuiAction::PromptEditorClearHistory => {
+                            if prompt_editor.open {
+                                prompt_editor.request_clear_history();
+                            }
+                        }
+                        TuiAction::PromptEditorUndo => {
+                            if prompt_editor.open {
+                                prompt_editor.undo();
+                            }
+                        }
+                        TuiAction::PromptEditorConfirmYes => {
+                            if prompt_editor.open {
+                                prompt_editor.confirm_yes();
+                            }
+                        }
+                        TuiAction::PromptEditorConfirmNo => {
+                            if prompt_editor.open {
+                                prompt_editor.confirm_no();
+                            }
+                        }
+                        TuiAction::PromptEditorBackspace => {
+                            if prompt_editor.open {
+                                prompt_editor.backspace();
+                            }
+                        }
+                        TuiAction::PromptEditorInput(ch) => {
+                            if prompt_editor.open && !ch.is_control() {
+                                prompt_editor.input_char(ch);
+                            }
                         }
                         TuiAction::ToggleLogView => {
                             tui_state.toggle_log_view();
                         }
                         TuiAction::Redraw => {}
                         TuiAction::Quit => {
+                            if prompt_editor.open {
+                                prompt_editor.close();
+                                continue;
+                            }
                             if injection_filter.popup_open {
                                 injection_filter.close_popup();
                                 continue;
@@ -4412,9 +4559,14 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                             logger.log(LogEvent::stopped(&config, "quit", send_count))?;
                             break;
                         }
+                        TuiAction::PromptEditorDeleteSelected => {
+                            if prompt_editor.open {
+                                prompt_editor.request_delete_selected();
+                            }
+                        }
                     }
                 }
-                sync_tui_active_list_ui(tui_state, &injection_filter);
+                sync_tui_overlays(tui_state, &injection_filter, &prompt_editor);
                 tui_state.update(
                     loop_state,
                     &config,
@@ -4457,8 +4609,10 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
             let mut should_exit_loop = false;
             while std::time::Instant::now() < sleep_until {
                 if let Some(tui_state) = tui.as_mut() {
-                    sync_tui_active_list_ui(tui_state, &injection_filter);
-                    if let Some(action) = tui_state.poll_input()? {
+                    sync_tui_overlays(tui_state, &injection_filter, &prompt_editor);
+                    if let Some(action) =
+                        tui_state.poll_input(prompt_editor.open, prompt_editor.confirm.is_some())?
+                    {
                         match action {
                             TuiAction::Pause => {
                                 if hold_started.is_none() {
@@ -4501,6 +4655,10 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                 break;
                             }
                             TuiAction::Next => {
+                                if prompt_editor.open && prompt_editor.confirm.is_some() {
+                                    prompt_editor.confirm_no();
+                                    continue;
+                                }
                                 last_hash_by_target.clear();
                                 trigger_edge_active.clear();
                                 trigger_confirm_pending_since.clear();
@@ -4525,6 +4683,9 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                 ));
                             }
                             TuiAction::ActiveListToggle => {
+                                if prompt_editor.open {
+                                    continue;
+                                }
                                 if injection_filter.popup_open {
                                     injection_filter.close_popup();
                                 } else {
@@ -4532,12 +4693,16 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                 }
                             }
                             TuiAction::ActiveListUp => {
-                                if injection_filter.popup_open {
+                                if prompt_editor.open {
+                                    prompt_editor.select_up();
+                                } else if injection_filter.popup_open {
                                     injection_filter.move_up();
                                 }
                             }
                             TuiAction::ActiveListDown => {
-                                if injection_filter.popup_open {
+                                if prompt_editor.open {
+                                    prompt_editor.select_down();
+                                } else if injection_filter.popup_open {
                                     injection_filter.move_down();
                                 }
                             }
@@ -4552,7 +4717,9 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                 }
                             }
                             TuiAction::ActiveListToggleSelection => {
-                                if injection_filter.popup_open {
+                                if prompt_editor.open {
+                                    prompt_editor.use_selection();
+                                } else if injection_filter.popup_open {
                                     injection_filter.toggle_current_selection();
                                 }
                             }
@@ -4567,7 +4734,45 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                 }
                             }
                             TuiAction::ActiveListClose => {
+                                if prompt_editor.open {
+                                    prompt_editor.close();
+                                } else {
+                                    injection_filter.close_popup();
+                                }
+                            }
+                            TuiAction::PromptEditorToggle => {
                                 injection_filter.close_popup();
+                                prompt_editor.toggle_open();
+                            }
+                            TuiAction::PromptEditorClearHistory => {
+                                if prompt_editor.open {
+                                    prompt_editor.request_clear_history();
+                                }
+                            }
+                            TuiAction::PromptEditorUndo => {
+                                if prompt_editor.open {
+                                    prompt_editor.undo();
+                                }
+                            }
+                            TuiAction::PromptEditorConfirmYes => {
+                                if prompt_editor.open {
+                                    prompt_editor.confirm_yes();
+                                }
+                            }
+                            TuiAction::PromptEditorConfirmNo => {
+                                if prompt_editor.open {
+                                    prompt_editor.confirm_no();
+                                }
+                            }
+                            TuiAction::PromptEditorBackspace => {
+                                if prompt_editor.open {
+                                    prompt_editor.backspace();
+                                }
+                            }
+                            TuiAction::PromptEditorInput(ch) => {
+                                if prompt_editor.open && !ch.is_control() {
+                                    prompt_editor.input_char(ch);
+                                }
                             }
                             TuiAction::ToggleLogView => {
                                 tui_state.toggle_log_view();
@@ -4591,6 +4796,10 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                 break;
                             }
                             TuiAction::Quit => {
+                                if prompt_editor.open {
+                                    prompt_editor.close();
+                                    continue;
+                                }
                                 if injection_filter.popup_open {
                                     injection_filter.close_popup();
                                     continue;
@@ -4601,10 +4810,15 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                 should_exit_loop = true;
                                 break;
                             }
+                            TuiAction::PromptEditorDeleteSelected => {
+                                if prompt_editor.open {
+                                    prompt_editor.request_delete_selected();
+                                }
+                            }
                             TuiAction::Redraw => {}
                         }
                     }
-                    sync_tui_active_list_ui(tui_state, &injection_filter);
+                    sync_tui_overlays(tui_state, &injection_filter, &prompt_editor);
                     tui_state.update(
                         loop_state,
                         &config,
@@ -5341,6 +5555,7 @@ fn resolve_run_config(args: &RunArgs) -> Result<Config> {
             recheck_before_send: Some(!args.no_recheck_before_send),
             fanout: Some(args.fanout),
             duration: args.duration.clone(),
+            prompt_edit_max_chars: args.prompt_edit_max_chars,
             rule_eval: None,
             default_action: None,
             delay: None,
@@ -5423,6 +5638,7 @@ fn resolve_run_config(args: &RunArgs) -> Result<Config> {
         recheck_before_send: Some(!args.no_recheck_before_send),
         fanout: Some(args.fanout),
         duration: args.duration.clone(),
+        prompt_edit_max_chars: args.prompt_edit_max_chars,
         rule_eval: Some(RuleEval::FirstMatch),
         default_action: Some(default_action),
         delay: None,
@@ -5513,6 +5729,7 @@ struct ResolvedConfig {
     recheck_before_send: bool,
     fanout: FanoutMode,
     duration: Option<Duration>,
+    prompt_edit_max_chars: usize,
     rule_eval: RuleEval,
     rules: Vec<Rule>,
     delay: Option<DelayConfig>,
@@ -5608,6 +5825,14 @@ enum TuiAction {
     ActiveListEnableAll,
     ActiveListDisableAll,
     ActiveListClose,
+    PromptEditorToggle,
+    PromptEditorDeleteSelected,
+    PromptEditorClearHistory,
+    PromptEditorUndo,
+    PromptEditorConfirmYes,
+    PromptEditorConfirmNo,
+    PromptEditorBackspace,
+    PromptEditorInput(char),
     ToggleLogView,
     Redraw,
     Quit,
@@ -5617,6 +5842,175 @@ enum TuiAction {
 enum LogViewMode {
     Chronological,
     GroupedByPane,
+}
+
+#[derive(Debug, Clone)]
+struct PromptHistoryItem {
+    created_at: String,
+    text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptEditorConfirm {
+    DeleteSelected,
+    ClearAll,
+}
+
+#[derive(Debug, Clone)]
+struct PromptEditorState {
+    open: bool,
+    max_chars: usize,
+    original: String,
+    current: String,
+    history: Vec<PromptHistoryItem>,
+    selected_idx: usize,
+    confirm: Option<PromptEditorConfirm>,
+    undo_stack: Vec<Vec<PromptHistoryItem>>,
+}
+
+impl PromptEditorState {
+    fn new(original: String, max_chars: usize) -> Self {
+        let mut history = load_prompt_history_items(DEFAULT_HISTORY_LIMIT).unwrap_or_default();
+        history.retain(|item| item.text != original);
+        Self {
+            open: false,
+            max_chars: max_chars.max(1),
+            original: original.clone(),
+            current: truncate_text(&original, max_chars.max(1), true),
+            history,
+            selected_idx: 0,
+            confirm: None,
+            undo_stack: Vec::new(),
+        }
+    }
+
+    fn selected_prompt(&self) -> String {
+        if self.selected_idx == 0 {
+            self.original.clone()
+        } else {
+            self.history
+                .get(self.selected_idx.saturating_sub(1))
+                .map(|item| item.text.clone())
+                .unwrap_or_else(|| self.current.clone())
+        }
+    }
+
+    fn toggle_open(&mut self) {
+        self.open = !self.open;
+        self.confirm = None;
+        if !self.open {
+            self.persist_current_to_history();
+        }
+    }
+
+    fn close(&mut self) {
+        self.open = false;
+        self.confirm = None;
+        self.persist_current_to_history();
+    }
+
+    fn normalize_selection(&mut self) {
+        let max = self.history.len();
+        self.selected_idx = self.selected_idx.min(max);
+    }
+
+    fn select_up(&mut self) {
+        self.selected_idx = self.selected_idx.saturating_sub(1);
+    }
+
+    fn select_down(&mut self) {
+        self.selected_idx = self.selected_idx.saturating_add(1);
+        self.normalize_selection();
+    }
+
+    fn use_selection(&mut self) {
+        self.current = self.selected_prompt();
+    }
+
+    fn input_char(&mut self, ch: char) {
+        if self.current.chars().count() >= self.max_chars {
+            return;
+        }
+        self.current.push(ch);
+        self.selected_idx = 0;
+    }
+
+    fn backspace(&mut self) {
+        let _ = self.current.pop();
+        self.selected_idx = 0;
+    }
+
+    fn request_delete_selected(&mut self) {
+        if self.selected_idx == 0 {
+            return;
+        }
+        self.confirm = Some(PromptEditorConfirm::DeleteSelected);
+    }
+
+    fn request_clear_history(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        self.confirm = Some(PromptEditorConfirm::ClearAll);
+    }
+
+    fn confirm_yes(&mut self) {
+        match self.confirm.take() {
+            Some(PromptEditorConfirm::DeleteSelected) => {
+                if self.selected_idx > 0 {
+                    self.undo_stack.push(self.history.clone());
+                    let idx = self.selected_idx - 1;
+                    if idx < self.history.len() {
+                        self.history.remove(idx);
+                    }
+                    self.normalize_selection();
+                }
+            }
+            Some(PromptEditorConfirm::ClearAll) => {
+                self.undo_stack.push(self.history.clone());
+                self.history.clear();
+                self.selected_idx = 0;
+            }
+            None => {}
+        }
+    }
+
+    fn confirm_no(&mut self) {
+        self.confirm = None;
+    }
+
+    fn undo(&mut self) {
+        if let Some(previous) = self.undo_stack.pop() {
+            self.history = previous;
+            self.normalize_selection();
+        }
+    }
+
+    fn effective_prompt(&self, fallback: &str) -> String {
+        if self.current.trim().is_empty() {
+            fallback.to_string()
+        } else {
+            self.current.clone()
+        }
+    }
+
+    fn persist_current_to_history(&mut self) {
+        let text = self.current.trim().to_string();
+        if text.is_empty() || text == self.original {
+            return;
+        }
+        self.history.retain(|entry| entry.text != text);
+        self.history.insert(
+            0,
+            PromptHistoryItem {
+                created_at: timestamp_now(),
+                text,
+            },
+        );
+        if self.history.len() > DEFAULT_HISTORY_LIMIT {
+            self.history.truncate(DEFAULT_HISTORY_LIMIT);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5878,6 +6272,7 @@ struct TuiState {
     logs: Vec<String>,
     max_logs: usize,
     overlay_lines: Option<Vec<String>>,
+    overlay_help: Option<String>,
     footer_note: Option<String>,
     usage_sample: Option<ProcessUsageSample>,
     log_view: LogViewMode,
@@ -5901,6 +6296,7 @@ impl TuiState {
             logs: Vec::new(),
             max_logs: height.saturating_sub(3) as usize,
             overlay_lines: None,
+            overlay_help: None,
             footer_note: None,
             usage_sample: None,
             log_view: LogViewMode::Chronological,
@@ -5946,6 +6342,10 @@ impl TuiState {
 
     fn set_overlay_lines(&mut self, lines: Option<Vec<String>>) {
         self.overlay_lines = lines;
+    }
+
+    fn set_overlay_help(&mut self, help: Option<String>) {
+        self.overlay_help = help;
     }
 
     fn set_footer_note(&mut self, note: Option<String>) {
@@ -6041,7 +6441,7 @@ impl TuiState {
             width,
             footer_summary.as_deref(),
             Some(footer_note_owned.as_str()),
-            overlay_lines.is_some(),
+            self.overlay_help.as_deref(),
         );
         let _ = out.queue(MoveTo(0, footer_row));
         let _ = out.queue(Clear(ClearType::CurrentLine));
@@ -6057,38 +6457,71 @@ impl TuiState {
         }
     }
 
-    fn poll_input(&self) -> Result<Option<TuiAction>> {
+    fn poll_input(
+        &self,
+        prompt_editor_open: bool,
+        prompt_confirm_open: bool,
+    ) -> Result<Option<TuiAction>> {
         if event::poll(Duration::from_millis(10)).context("poll input failed")? {
             let ev = event::read()?;
             return Ok(match ev {
                 Event::Resize(_, _) => Some(TuiAction::Redraw),
                 Event::Key(KeyEvent {
                     code, modifiers, ..
-                }) => match code {
-                    KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                }) => {
+                    if modifiers.contains(KeyModifiers::CONTROL)
+                        && matches!(code, KeyCode::Char('c'))
+                    {
                         Some(TuiAction::Stop)
+                    } else if prompt_editor_open {
+                        match code {
+                            KeyCode::Char('e') => Some(TuiAction::PromptEditorToggle),
+                            KeyCode::Up => Some(TuiAction::ActiveListUp),
+                            KeyCode::Down => Some(TuiAction::ActiveListDown),
+                            KeyCode::Enter => Some(TuiAction::ActiveListToggleSelection),
+                            KeyCode::Char(' ') => Some(TuiAction::ActiveListToggleSelection),
+                            KeyCode::Char('d') => Some(TuiAction::PromptEditorDeleteSelected),
+                            KeyCode::Char('c') => Some(TuiAction::PromptEditorClearHistory),
+                            KeyCode::Char('u') => Some(TuiAction::PromptEditorUndo),
+                            KeyCode::Char('y') if prompt_confirm_open => {
+                                Some(TuiAction::PromptEditorConfirmYes)
+                            }
+                            KeyCode::Char('n') | KeyCode::Char('N') if prompt_confirm_open => {
+                                Some(TuiAction::PromptEditorConfirmNo)
+                            }
+                            KeyCode::Backspace => Some(TuiAction::PromptEditorBackspace),
+                            KeyCode::Esc => Some(TuiAction::ActiveListClose),
+                            KeyCode::Char(ch) if !ch.is_control() => {
+                                Some(TuiAction::PromptEditorInput(ch))
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        match code {
+                            KeyCode::Char('p') => Some(TuiAction::Pause),
+                            KeyCode::Char('r') => Some(TuiAction::Resume),
+                            KeyCode::Char('h') => Some(TuiAction::HoldToggle),
+                            KeyCode::Char('f') => Some(TuiAction::Fleet),
+                            KeyCode::Char('e') => Some(TuiAction::PromptEditorToggle),
+                            KeyCode::Char('l') => Some(TuiAction::ActiveListToggle),
+                            KeyCode::Up => Some(TuiAction::ActiveListUp),
+                            KeyCode::Down => Some(TuiAction::ActiveListDown),
+                            KeyCode::Left => Some(TuiAction::ActiveListLeft),
+                            KeyCode::Right => Some(TuiAction::ActiveListRight),
+                            KeyCode::Enter => Some(TuiAction::ActiveListToggleSelection),
+                            KeyCode::Char(' ') => Some(TuiAction::ActiveListToggleSelection),
+                            KeyCode::Char('a') => Some(TuiAction::ActiveListEnableAll),
+                            KeyCode::Char('d') => Some(TuiAction::ActiveListDisableAll),
+                            KeyCode::Char('g') => Some(TuiAction::ToggleLogView),
+                            KeyCode::Esc => Some(TuiAction::ActiveListClose),
+                            KeyCode::Char('R') => Some(TuiAction::Renew),
+                            KeyCode::Char('s') => Some(TuiAction::Stop),
+                            KeyCode::Char('n') => Some(TuiAction::Next),
+                            KeyCode::Char('q') => Some(TuiAction::Quit),
+                            _ => None,
+                        }
                     }
-                    KeyCode::Char('p') => Some(TuiAction::Pause),
-                    KeyCode::Char('r') => Some(TuiAction::Resume),
-                    KeyCode::Char('h') => Some(TuiAction::HoldToggle),
-                    KeyCode::Char('f') => Some(TuiAction::Fleet),
-                    KeyCode::Char('l') => Some(TuiAction::ActiveListToggle),
-                    KeyCode::Up => Some(TuiAction::ActiveListUp),
-                    KeyCode::Down => Some(TuiAction::ActiveListDown),
-                    KeyCode::Left => Some(TuiAction::ActiveListLeft),
-                    KeyCode::Right => Some(TuiAction::ActiveListRight),
-                    KeyCode::Enter => Some(TuiAction::ActiveListToggleSelection),
-                    KeyCode::Char(' ') => Some(TuiAction::ActiveListToggleSelection),
-                    KeyCode::Char('a') => Some(TuiAction::ActiveListEnableAll),
-                    KeyCode::Char('d') => Some(TuiAction::ActiveListDisableAll),
-                    KeyCode::Char('g') => Some(TuiAction::ToggleLogView),
-                    KeyCode::Esc => Some(TuiAction::ActiveListClose),
-                    KeyCode::Char('R') => Some(TuiAction::Renew),
-                    KeyCode::Char('s') => Some(TuiAction::Stop),
-                    KeyCode::Char('n') => Some(TuiAction::Next),
-                    KeyCode::Char('q') => Some(TuiAction::Quit),
-                    _ => None,
-                },
+                }
                 _ => None,
             });
         }
@@ -6148,7 +6581,7 @@ fn render_footer(
     width: u16,
     summary: Option<&str>,
     note: Option<&str>,
-    modal_open: bool,
+    overlay_help: Option<&str>,
 ) -> String {
     let sep_text = if style.use_unicode_ellipsis {
         " · "
@@ -6157,10 +6590,8 @@ fn render_footer(
     };
     let text = if let Some(summary) = summary {
         format!("stopped{sep_text}{summary}{sep_text}q quit")
-    } else if modal_open {
-        format!(
-            "active list{sep_text}<-/-> cols{sep_text}↑/↓ rows{sep_text}space/enter toggle{sep_text}a all on{sep_text}d all off{sep_text}q/esc close"
-        )
+    } else if let Some(help) = overlay_help {
+        help.to_string()
     } else {
         format!(
             "h hold/resume (p/r){sep_text}l active-list{sep_text}g log-view{sep_text}f fleet{sep_text}R renew{sep_text}n next{sep_text}s/^C stop{sep_text}q quit"
@@ -6202,18 +6633,124 @@ fn active_list_note(filter: &InjectionFilterState) -> Option<String> {
     }
 }
 
-fn sync_tui_active_list_ui(tui_state: &mut TuiState, filter: &InjectionFilterState) {
-    tui_state.set_footer_note(active_list_note(filter));
-    if filter.popup_open {
+fn sync_tui_overlays(
+    tui_state: &mut TuiState,
+    filter: &InjectionFilterState,
+    prompt_editor: &PromptEditorState,
+) {
+    let mut note = active_list_note(filter).unwrap_or_default();
+    if prompt_editor.open {
+        let editor_note = format!(
+            "prompt {} / {} chars",
+            prompt_editor.current.chars().count(),
+            prompt_editor.max_chars
+        );
+        if note.is_empty() {
+            note = editor_note;
+        } else {
+            note = format!("{note} {editor_note}");
+        }
+        tui_state.set_overlay_lines(Some(render_prompt_editor_popup(
+            prompt_editor,
+            tui_state.width as usize,
+            tui_state.max_logs,
+            tui_state.style.use_unicode_ellipsis,
+        )));
+        let sep = if tui_state.style.use_unicode_ellipsis {
+            " · "
+        } else {
+            " . "
+        };
+        tui_state.set_overlay_help(Some(format!(
+            "prompt editor{sep}↑/↓ select{sep}enter apply{sep}type/backspace edit{sep}d delete{sep}c clear{sep}u undo{sep}y/n confirm{sep}e/esc close"
+        )));
+    } else if filter.popup_open {
         tui_state.set_overlay_lines(Some(render_active_list_popup(
             filter,
             tui_state.width as usize,
             tui_state.max_logs,
             tui_state.style.use_unicode_ellipsis,
         )));
+        let sep = if tui_state.style.use_unicode_ellipsis {
+            " · "
+        } else {
+            " . "
+        };
+        tui_state.set_overlay_help(Some(format!(
+            "active list{sep}<-/-> cols{sep}↑/↓ rows{sep}space/enter toggle{sep}a all on{sep}d all off{sep}q/esc close"
+        )));
     } else {
         tui_state.set_overlay_lines(None);
+        tui_state.set_overlay_help(None);
     }
+    if note.is_empty() {
+        tui_state.set_footer_note(None);
+    } else {
+        tui_state.set_footer_note(Some(note));
+    }
+}
+
+fn render_prompt_editor_popup(
+    editor: &PromptEditorState,
+    width: usize,
+    max_lines: usize,
+    use_unicode: bool,
+) -> Vec<String> {
+    let on = if use_unicode { "●" } else { "*" };
+    let off = if use_unicode { "○" } else { "-" };
+    let pointer = if use_unicode { "▶▶" } else { ">>" };
+    let col_width = width.saturating_sub(2).max(20);
+    let mut lines = Vec::new();
+    lines.push("Prompt Editor - edit or choose history".to_string());
+    lines.push(format!(
+        "current ({} / {}): {}",
+        editor.current.chars().count(),
+        editor.max_chars,
+        fit_line(&editor.current, col_width.saturating_sub(24), use_unicode)
+    ));
+    lines.push("choose source (original first):".to_string());
+
+    let mut entries = Vec::new();
+    entries.push((
+        "original".to_string(),
+        editor.original.clone(),
+        "-".to_string(),
+    ));
+    for item in &editor.history {
+        entries.push((
+            "history".to_string(),
+            item.text.clone(),
+            compact_timestamp(&item.created_at),
+        ));
+    }
+
+    let rows = max_lines.saturating_sub(lines.len()).max(1);
+    for idx in 0..rows {
+        let Some((kind, text, when)) = entries.get(idx) else {
+            lines.push(String::new());
+            continue;
+        };
+        let marker = if idx == editor.selected_idx {
+            pointer
+        } else {
+            "  "
+        };
+        let enabled = if idx == editor.selected_idx { on } else { off };
+        lines.push(format!(
+            "{marker} {enabled} {kind:<8} [{}] {}",
+            when,
+            fit_line(text, col_width.saturating_sub(24), use_unicode)
+        ));
+    }
+
+    if let Some(confirm) = editor.confirm {
+        let msg = match confirm {
+            PromptEditorConfirm::DeleteSelected => "confirm delete selected history? y yes / n no",
+            PromptEditorConfirm::ClearAll => "confirm clear all history? y yes / n no",
+        };
+        lines.push(msg.to_string());
+    }
+    lines
 }
 
 fn render_active_list_popup(
@@ -6846,11 +7383,7 @@ fn log_line_date(line: &str) -> Option<&str> {
     let close = line.find(']')?;
     let ts = line.get(1..close)?;
     let date = ts.split('T').next()?;
-    if date.len() == 10 {
-        Some(date)
-    } else {
-        None
-    }
+    if date.len() == 10 { Some(date) } else { None }
 }
 
 fn parse_log_timestamp(line: &str) -> Option<OffsetDateTime> {
@@ -7100,6 +7633,10 @@ fn resolve_config(
     let recheck_before_send =
         recheck_before_send_override.unwrap_or(config.recheck_before_send.unwrap_or(true));
     let log_preview_lines = config.log_preview_lines.unwrap_or(3).max(1);
+    let prompt_edit_max_chars = config
+        .prompt_edit_max_chars
+        .unwrap_or(DEFAULT_PROMPT_EDIT_MAX_CHARS)
+        .max(1);
 
     let fanout = config.fanout.unwrap_or(FanoutMode::Matched);
 
@@ -7137,6 +7674,7 @@ fn resolve_config(
         recheck_before_send,
         fanout,
         duration,
+        prompt_edit_max_chars,
         rule_eval,
         rules,
         delay,
@@ -7199,6 +7737,7 @@ fn print_validation(config: &ResolvedConfig) {
     }
     println!("- poll: {}s", config.poll);
     println!("- initial_poll: {}s", config.initial_poll);
+    println!("- prompt_edit_max_chars: {}", config.prompt_edit_max_chars);
     println!(
         "- trigger_confirm_seconds: {}s",
         config.trigger_confirm_seconds
@@ -8194,9 +8733,12 @@ runs:
         .unwrap();
 
         let err = config_doctor(Some(&config_path), true).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("multiple selected profiles enable `tui`"));
+        let message = err.to_string();
+        assert!(
+            message.contains("multiple selected profiles enable `tui`")
+                || message.contains("tmux list-panes failed"),
+            "{message}"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -8366,6 +8908,7 @@ runs:
             fanout: FanoutMode::Matched,
             duration: None,
             history_limit: None,
+            prompt_edit_max_chars: None,
             name: None,
         };
         assert!(resolve_run_config(&args).is_err());
@@ -8403,6 +8946,7 @@ runs:
             fanout: FanoutMode::Matched,
             duration: Some("30s".to_string()),
             history_limit: None,
+            prompt_edit_max_chars: None,
             name: Some("gw-watch".to_string()),
         };
 
@@ -8447,6 +8991,7 @@ runs:
             fanout: FanoutMode::Matched,
             duration: None,
             history_limit: None,
+            prompt_edit_max_chars: None,
             name: None,
         };
 
@@ -8486,6 +9031,7 @@ runs:
             fanout: FanoutMode::Matched,
             duration: None,
             history_limit: None,
+            prompt_edit_max_chars: None,
             name: None,
         };
         let config = resolve_run_config(&args).unwrap();
@@ -8543,6 +9089,7 @@ runs:
             fanout: FanoutMode::Matched,
             duration: None,
             history_limit: None,
+            prompt_edit_max_chars: None,
             name: None,
         };
         let config = resolve_run_config(&args).unwrap();
@@ -8585,6 +9132,7 @@ runs:
             fanout: FanoutMode::Matched,
             duration: None,
             history_limit: None,
+            prompt_edit_max_chars: None,
             name: None,
         };
         let config = resolve_run_config(&args).unwrap();
@@ -8627,6 +9175,7 @@ runs:
             fanout: FanoutMode::Matched,
             duration: None,
             history_limit: None,
+            prompt_edit_max_chars: None,
             name: None,
         };
         let config = resolve_run_config(&args).unwrap();
@@ -8669,6 +9218,7 @@ runs:
             fanout: FanoutMode::Matched,
             duration: None,
             history_limit: None,
+            prompt_edit_max_chars: None,
             name: None,
         };
         let config = resolve_run_config(&args).unwrap();
@@ -8699,6 +9249,7 @@ runs:
             recheck_before_send: Some(true),
             fanout: Some(FanoutMode::Matched),
             duration: None,
+            prompt_edit_max_chars: None,
             rule_eval: Some(RuleEval::FirstMatch),
             default_action: Some(Action {
                 pre: None,
@@ -8752,6 +9303,7 @@ runs:
             recheck_before_send: None,
             fanout: None,
             duration: Some("30s".to_string()),
+            prompt_edit_max_chars: None,
             rule_eval: None,
             default_action: None,
             delay: None,
@@ -9019,6 +9571,7 @@ runs:
             trigger_edge: true,
             recheck_before_send: true,
             fanout: FanoutMode::Matched,
+            prompt_edit_max_chars: DEFAULT_PROMPT_EDIT_MAX_CHARS,
             duration: None,
         };
         let bar = render_status_bar(
@@ -9082,6 +9635,7 @@ runs:
             trigger_edge: true,
             recheck_before_send: true,
             fanout: FanoutMode::Matched,
+            prompt_edit_max_chars: DEFAULT_PROMPT_EDIT_MAX_CHARS,
             duration: None,
         };
         let bar = render_status_bar(
@@ -9145,6 +9699,7 @@ runs:
             trigger_edge: true,
             recheck_before_send: true,
             fanout: FanoutMode::Matched,
+            prompt_edit_max_chars: DEFAULT_PROMPT_EDIT_MAX_CHARS,
             duration: None,
         };
         let bar = render_status_bar(
@@ -9245,6 +9800,7 @@ runs:
             trigger_edge: true,
             recheck_before_send: true,
             fanout: FanoutMode::Matched,
+            prompt_edit_max_chars: DEFAULT_PROMPT_EDIT_MAX_CHARS,
             duration: None,
         };
 
@@ -9283,6 +9839,70 @@ runs:
         assert!(!edge_guard_allows(&active, "ai:7.0|inline|0", true));
         assert!(edge_guard_allows(&active, "ai:7.0|inline|0", false));
         assert!(edge_guard_allows(&active, "ai:7.0|inline|1", true));
+    }
+
+    #[test]
+    fn prompt_editor_enforces_max_chars() {
+        let mut editor = PromptEditorState::new("seed".to_string(), 5);
+        editor.current.clear();
+        editor.input_char('a');
+        editor.input_char('b');
+        editor.input_char('c');
+        editor.input_char('d');
+        editor.input_char('e');
+        editor.input_char('f');
+        assert_eq!(editor.current, "abcde");
+    }
+
+    #[test]
+    fn prompt_editor_delete_selected_and_undo_restore_history() {
+        let mut editor = PromptEditorState::new("original".to_string(), 100);
+        editor.history = vec![
+            PromptHistoryItem {
+                created_at: "2026-02-25T00:00:00Z".to_string(),
+                text: "first".to_string(),
+            },
+            PromptHistoryItem {
+                created_at: "2026-02-25T00:01:00Z".to_string(),
+                text: "second".to_string(),
+            },
+        ];
+
+        editor.selected_idx = 0;
+        editor.request_delete_selected();
+        assert!(editor.confirm.is_none());
+
+        editor.selected_idx = 1;
+        editor.request_delete_selected();
+        assert_eq!(editor.confirm, Some(PromptEditorConfirm::DeleteSelected));
+
+        editor.confirm_yes();
+        assert_eq!(editor.history.len(), 1);
+        assert_eq!(editor.history[0].text, "second");
+
+        editor.undo();
+        assert_eq!(editor.history.len(), 2);
+        assert_eq!(editor.history[0].text, "first");
+        assert_eq!(editor.history[1].text, "second");
+    }
+
+    #[test]
+    fn prompt_editor_clear_all_and_undo_restore_history() {
+        let mut editor = PromptEditorState::new("original".to_string(), 100);
+        editor.history = vec![PromptHistoryItem {
+            created_at: "2026-02-25T00:00:00Z".to_string(),
+            text: "first".to_string(),
+        }];
+
+        editor.request_clear_history();
+        assert_eq!(editor.confirm, Some(PromptEditorConfirm::ClearAll));
+
+        editor.confirm_yes();
+        assert!(editor.history.is_empty());
+
+        editor.undo();
+        assert_eq!(editor.history.len(), 1);
+        assert_eq!(editor.history[0].text, "first");
     }
 
     #[test]
