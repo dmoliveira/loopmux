@@ -1610,6 +1610,10 @@ fn history_path() -> Result<PathBuf> {
     Ok(history_dir()?.join("history.json"))
 }
 
+fn prompt_editor_history_path() -> Result<PathBuf> {
+    Ok(history_dir()?.join("prompt_editor_history.json"))
+}
+
 fn fleet_dir() -> Result<PathBuf> {
     Ok(history_dir()?.join("runs"))
 }
@@ -3399,9 +3403,32 @@ fn select_history_entry(limit: usize) -> Result<HistoryEntry> {
 }
 
 fn load_prompt_history_items(limit: usize) -> Result<Vec<PromptHistoryItem>> {
-    let history = load_run_history()?;
+    let limit = limit.max(1);
     let mut seen = HashSet::new();
     let mut items = Vec::new();
+
+    let persisted_path = prompt_editor_history_path()?;
+    if persisted_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&persisted_path) {
+            if let Ok(persisted) = serde_json::from_str::<Vec<PromptHistoryItem>>(&content) {
+                for item in persisted {
+                    let text = item.text.trim().to_string();
+                    if text.is_empty() || !seen.insert(text.clone()) {
+                        continue;
+                    }
+                    items.push(PromptHistoryItem {
+                        created_at: item.created_at,
+                        text,
+                    });
+                    if items.len() >= limit {
+                        return Ok(items);
+                    }
+                }
+            }
+        }
+    }
+
+    let history = load_run_history()?;
     for entry in history.entries.into_iter() {
         let text = entry.prompt.trim().to_string();
         if text.is_empty() {
@@ -3414,11 +3441,28 @@ fn load_prompt_history_items(limit: usize) -> Result<Vec<PromptHistoryItem>> {
             created_at: entry.last_run,
             text,
         });
-        if items.len() >= limit.max(1) {
+        if items.len() >= limit {
             break;
         }
     }
     Ok(items)
+}
+
+fn save_prompt_history_items(items: &[PromptHistoryItem], limit: usize) -> Result<()> {
+    let dir = history_dir()?;
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create history dir: {}", dir.display()))?;
+    let path = prompt_editor_history_path()?;
+    let content =
+        serde_json::to_string_pretty(&items.iter().take(limit.max(1)).cloned().collect::<Vec<_>>())
+            .context("failed to serialize prompt editor history")?;
+    std::fs::write(&path, content).with_context(|| {
+        format!(
+            "failed to write prompt editor history file: {}",
+            path.display()
+        )
+    })?;
+    Ok(())
 }
 
 fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
@@ -5844,7 +5888,7 @@ enum LogViewMode {
     GroupedByPane,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct PromptHistoryItem {
     created_at: String,
     text: String,
@@ -5965,11 +6009,13 @@ impl PromptEditorState {
                     }
                     self.normalize_selection();
                 }
+                self.save_history();
             }
             Some(PromptEditorConfirm::ClearAll) => {
                 self.undo_stack.push(self.history.clone());
                 self.history.clear();
                 self.selected_idx = 0;
+                self.save_history();
             }
             None => {}
         }
@@ -5983,6 +6029,7 @@ impl PromptEditorState {
         if let Some(previous) = self.undo_stack.pop() {
             self.history = previous;
             self.normalize_selection();
+            self.save_history();
         }
     }
 
@@ -6010,6 +6057,11 @@ impl PromptEditorState {
         if self.history.len() > DEFAULT_HISTORY_LIMIT {
             self.history.truncate(DEFAULT_HISTORY_LIMIT);
         }
+        self.save_history();
+    }
+
+    fn save_history(&self) {
+        let _ = save_prompt_history_items(&self.history, DEFAULT_HISTORY_LIMIT);
     }
 }
 

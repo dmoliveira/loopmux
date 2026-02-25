@@ -370,6 +370,7 @@ codex:1.0
 - Entries are stored in `~/.loopmux/history.json`, newest first, deduplicated by command shape.
 - TUI controls: `h` hold/resume (non-consuming, alias `p`/`r`), `l` open active-list filter popup, `g` toggle log view (chronological/grouped), `f` open fleet manager view, `R` renew counter, `n` next, `s`/`Ctrl+C` stop run, `q` quit run view.
 - Prompt editor controls (open with `e`): `↑`/`↓` select source prompt (`original` + history), `Enter`/`space` apply selected prompt, type/backspace to edit current prompt, `d` delete selected history entry (never deletes original), `c` clear history, `u` undo delete/clear, `y`/`n` confirm dialog, `e`/`Esc` close editor.
+- Prompt editor history edits persist between runs in `~/.loopmux/prompt_editor_history.json`.
 - Active-list popup controls: arrows move across sessions/windows/panes, `space`/`Enter` toggle enabled injection scope, `a` enable all known panes, `d` disable all known panes, `q`/`Esc` close popup.
 - TUI footer shows current active injection scope counts as `active X/Y` (enabled / known panes).
 - TUI status bar now includes local loopmux process usage (`cpu ...% mem ...mb`) for quick runtime monitoring.
