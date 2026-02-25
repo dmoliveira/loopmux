@@ -3216,6 +3216,10 @@ fn jump_to_tmux_target(target: &str) -> Result<()> {
 
 fn load_run_history() -> Result<RunHistory> {
     let path = history_path()?;
+    load_run_history_from_path(&path)
+}
+
+fn load_run_history_from_path(path: &Path) -> Result<RunHistory> {
     if !path.exists() {
         return Ok(RunHistory::default());
     }
@@ -3403,11 +3407,20 @@ fn select_history_entry(limit: usize) -> Result<HistoryEntry> {
 }
 
 fn load_prompt_history_items(limit: usize) -> Result<Vec<PromptHistoryItem>> {
+    let persisted_path = prompt_editor_history_path()?;
+    let run_history_path = history_path()?;
+    load_prompt_history_items_from_paths(limit, &persisted_path, &run_history_path)
+}
+
+fn load_prompt_history_items_from_paths(
+    limit: usize,
+    persisted_path: &Path,
+    run_history_path: &Path,
+) -> Result<Vec<PromptHistoryItem>> {
     let limit = limit.max(1);
     let mut seen = HashSet::new();
     let mut items = Vec::new();
 
-    let persisted_path = prompt_editor_history_path()?;
     if persisted_path.exists() {
         if let Ok(content) = std::fs::read_to_string(&persisted_path) {
             if let Ok(persisted) = serde_json::from_str::<Vec<PromptHistoryItem>>(&content) {
@@ -3428,7 +3441,7 @@ fn load_prompt_history_items(limit: usize) -> Result<Vec<PromptHistoryItem>> {
         }
     }
 
-    let history = load_run_history()?;
+    let history = load_run_history_from_path(run_history_path)?;
     for entry in history.entries.into_iter() {
         let text = entry.prompt.trim().to_string();
         if text.is_empty() {
@@ -3449,14 +3462,23 @@ fn load_prompt_history_items(limit: usize) -> Result<Vec<PromptHistoryItem>> {
 }
 
 fn save_prompt_history_items(items: &[PromptHistoryItem], limit: usize) -> Result<()> {
-    let dir = history_dir()?;
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("failed to create history dir: {}", dir.display()))?;
     let path = prompt_editor_history_path()?;
+    save_prompt_history_items_to_path(items, limit, &path)
+}
+
+fn save_prompt_history_items_to_path(
+    items: &[PromptHistoryItem],
+    limit: usize,
+    path: &Path,
+) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("failed to create history dir: {}", dir.display()))?;
+    }
     let content =
         serde_json::to_string_pretty(&items.iter().take(limit.max(1)).cloned().collect::<Vec<_>>())
             .context("failed to serialize prompt editor history")?;
-    std::fs::write(&path, content).with_context(|| {
+    std::fs::write(path, content).with_context(|| {
         format!(
             "failed to write prompt editor history file: {}",
             path.display()
@@ -8517,6 +8539,32 @@ mod tests {
         }
     }
 
+    fn test_history_entry(prompt: &str, last_run: &str) -> HistoryEntry {
+        HistoryEntry {
+            last_run: last_run.to_string(),
+            target: "ai:1.0".to_string(),
+            prompt: prompt.to_string(),
+            trigger: "DONE".to_string(),
+            trigger_expr: None,
+            trigger_exact_line: Some(false),
+            exclude: None,
+            pre: None,
+            post: None,
+            iterations: Some(1),
+            tail: Some(1),
+            head: None,
+            once: false,
+            poll: Some(5),
+            initial_poll: Some(5),
+            trigger_confirm_seconds: Some(DEFAULT_TRIGGER_CONFIRM_SECONDS),
+            log_preview_lines: Some(3),
+            trigger_edge: Some(true),
+            recheck_before_send: Some(true),
+            fanout: Some(FanoutMode::Matched),
+            duration: None,
+        }
+    }
+
     #[test]
     fn trigger_expr_respects_precedence() {
         let expr = "A || B && C";
@@ -9955,6 +10003,103 @@ runs:
         editor.undo();
         assert_eq!(editor.history.len(), 1);
         assert_eq!(editor.history[0].text, "first");
+    }
+
+    #[test]
+    fn prompt_history_loader_falls_back_when_persisted_json_corrupt() {
+        let root = std::env::temp_dir().join(format!(
+            "loopmux-prompt-history-corrupt-{}",
+            OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let persisted_path = root.join("prompt_editor_history.json");
+        let run_history_path = root.join("history.json");
+
+        std::fs::write(&persisted_path, "{not-valid-json").unwrap();
+        let run_history = RunHistory {
+            entries: vec![test_history_entry(
+                "from-run-history",
+                "2026-02-25T00:00:00Z",
+            )],
+        };
+        std::fs::write(
+            &run_history_path,
+            serde_json::to_string_pretty(&run_history).unwrap(),
+        )
+        .unwrap();
+
+        let items =
+            load_prompt_history_items_from_paths(10, &persisted_path, &run_history_path).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].text, "from-run-history");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prompt_history_loader_falls_back_when_persisted_file_empty() {
+        let root = std::env::temp_dir().join(format!(
+            "loopmux-prompt-history-empty-{}",
+            OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let persisted_path = root.join("prompt_editor_history.json");
+        let run_history_path = root.join("history.json");
+
+        std::fs::write(&persisted_path, "").unwrap();
+        let run_history = RunHistory {
+            entries: vec![test_history_entry(
+                "fallback-run-history",
+                "2026-02-25T00:00:00Z",
+            )],
+        };
+        std::fs::write(
+            &run_history_path,
+            serde_json::to_string_pretty(&run_history).unwrap(),
+        )
+        .unwrap();
+
+        let items =
+            load_prompt_history_items_from_paths(10, &persisted_path, &run_history_path).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].text, "fallback-run-history");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prompt_history_save_truncates_to_limit() {
+        let root = std::env::temp_dir().join(format!(
+            "loopmux-prompt-history-save-{}",
+            OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let persisted_path = root.join("prompt_editor_history.json");
+
+        let items = vec![
+            PromptHistoryItem {
+                created_at: "2026-02-25T00:00:00Z".to_string(),
+                text: "first".to_string(),
+            },
+            PromptHistoryItem {
+                created_at: "2026-02-25T00:01:00Z".to_string(),
+                text: "second".to_string(),
+            },
+            PromptHistoryItem {
+                created_at: "2026-02-25T00:02:00Z".to_string(),
+                text: "third".to_string(),
+            },
+        ];
+
+        save_prompt_history_items_to_path(&items, 2, &persisted_path).unwrap();
+        let content = std::fs::read_to_string(&persisted_path).unwrap();
+        let saved: Vec<PromptHistoryItem> = serde_json::from_str(&content).unwrap();
+
+        assert_eq!(saved.len(), 2);
+        assert_eq!(saved[0].text, "first");
+        assert_eq!(saved[1].text, "second");
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
