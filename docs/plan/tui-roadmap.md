@@ -344,13 +344,13 @@ Important decisions to remember:
 
 ### Task E3.T2 - Interaction contract tests
 
-Status: `` doing
+Status: `` done
 
 Subtasks:
 
 - `` E3.T2.S1 Keymap compatibility tests for run and fleet modes.
 - `` E3.T2.S2 Confirmation flow tests for destructive actions.
-- `` E3.T2.S3 Non-interactive fallback tests.
+- `` E3.T2.S3 Non-interactive fallback tests.
 
 Implementation notes (2026-02-28):
 
@@ -358,17 +358,19 @@ Implementation notes (2026-02-28):
 - Extracted `fleet_control_key` helper and applied it in fleet manager loop for quit/left/right alias handling (`Esc`/`q`, `<`/Left, `>`/Right).
 - Added deterministic keymap contract tests to lock compatibility for run and fleet hotkeys.
 - Added deterministic destructive-confirmation contracts for single stop, bulk actions, and pending-action cancel message semantics.
+- Added `resolve_ui_mode` helper and contract tests for interactive/non-interactive fallback selection across TUI, single-line, and plain modes.
 
-Closure update (partial, 2026-02-28):
+Closure update (2026-02-28):
 
-- Validation evidence: `cargo fmt --check` and `cargo test -q` (112 passed).
-- Outcome: E3.T2.S1/S2 complete; E3.T2.S3 remains pending.
+- Validation evidence: `cargo fmt --check` and `cargo test -q` (115 passed).
+- Outcome: E3.T2 complete; E3.T1 remains pending.
 
 Important decisions to remember:
 
 - Contract tests define compatibility promise for future `ratatui` parity.
 - Key translation helpers should remain the single source of truth for hotkey aliases to avoid drift between docs and behavior.
 - Confirmation prompt text should be generated through shared helpers so Enter/c cancel guidance remains uniform.
+- UI mode selection should be centralized and testable so non-interactive fallback behavior remains stable during renderer migrations.
 
 ## Epic E4 - ratatui feasibility and phased migration
 
@@ -431,3 +433,4 @@ When any task/subtask changes to `` done, update this file in the same PR:
 - `2026-02-28` `PLAN-014` E2.T1.S2 isolates process-usage command execution behind `ProcessUsageProvider` trait boundary to reduce side-effect coupling in `TuiState`.
 - `2026-02-28` `PLAN-015` E3.T2.S1 centralizes run/fleet key translation helpers and pins hotkey aliases with contract tests for migration safety.
 - `2026-02-28` `PLAN-016` E3.T2.S2 promotes destructive confirmation and cancel wording to shared helpers and validates arm/cancel contracts with deterministic tests.
+- `2026-02-28` `PLAN-017` E3.T2.S3 centralizes UI mode fallback selection with `resolve_ui_mode` and locks non-interactive behavior through contract tests.
