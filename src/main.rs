@@ -3700,6 +3700,84 @@ fn save_prompt_history_items_to_path(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HoldTransition {
+    Unchanged,
+    EnterHolding,
+    ExitHolding,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HoldActionPlan {
+    transition: HoldTransition,
+    force_rescan: bool,
+    break_wait: bool,
+}
+
+fn plan_hold_action(
+    action: TuiAction,
+    currently_holding: bool,
+    break_wait_on_resume: bool,
+) -> Option<HoldActionPlan> {
+    match action {
+        TuiAction::Pause => Some(HoldActionPlan {
+            transition: if currently_holding {
+                HoldTransition::Unchanged
+            } else {
+                HoldTransition::EnterHolding
+            },
+            force_rescan: false,
+            break_wait: false,
+        }),
+        TuiAction::Resume => Some(HoldActionPlan {
+            transition: if currently_holding {
+                HoldTransition::ExitHolding
+            } else {
+                HoldTransition::Unchanged
+            },
+            force_rescan: true,
+            break_wait: break_wait_on_resume,
+        }),
+        TuiAction::HoldToggle => Some(HoldActionPlan {
+            transition: if currently_holding {
+                HoldTransition::ExitHolding
+            } else {
+                HoldTransition::EnterHolding
+            },
+            force_rescan: currently_holding,
+            break_wait: currently_holding && break_wait_on_resume,
+        }),
+        _ => None,
+    }
+}
+
+fn apply_hold_transition(
+    transition: HoldTransition,
+    loop_state: &mut LoopState,
+    hold_started: &mut Option<std::time::Instant>,
+    held_total: &mut std::time::Duration,
+) {
+    match transition {
+        HoldTransition::Unchanged => {
+            if hold_started.is_none() {
+                *loop_state = LoopState::Running;
+            }
+        }
+        HoldTransition::EnterHolding => {
+            if hold_started.is_none() {
+                *hold_started = Some(std::time::Instant::now());
+            }
+            *loop_state = LoopState::Holding;
+        }
+        HoldTransition::ExitHolding => {
+            if let Some(started_at) = hold_started.take() {
+                *held_total += started_at.elapsed();
+            }
+            *loop_state = LoopState::Running;
+        }
+    }
+}
+
 fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
     let mut send_count: u32 = 0;
     let max_sends = config.iterations.unwrap_or(u32::MAX);
@@ -3840,185 +3918,182 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                 if let Some(action) =
                     tui_state.poll_input(prompt_editor.open, prompt_editor.confirm.is_some())?
                 {
-                    match action {
-                        TuiAction::Pause => {}
-                        TuiAction::Resume => {
-                            if let Some(started_at) = hold_started.take() {
-                                held_total += started_at.elapsed();
-                            }
-                            loop_state = LoopState::Running;
+                    if let Some(plan) = plan_hold_action(action, hold_started.is_some(), false) {
+                        apply_hold_transition(
+                            plan.transition,
+                            &mut loop_state,
+                            &mut hold_started,
+                            &mut held_total,
+                        );
+                        if plan.force_rescan {
                             force_rescan = true;
                         }
-                        TuiAction::HoldToggle => {
-                            if let Some(started_at) = hold_started.take() {
-                                held_total += started_at.elapsed();
+                    } else {
+                        match action {
+                            TuiAction::Fleet => {
+                                open_fleet_manager = true;
+                            }
+                            TuiAction::Stop => {
+                                tui_state.push_log(format!(
+                                    "[{}] stopped reason=manual",
+                                    timestamp_now()
+                                ));
+                                logger.log(LogEvent::stopped(&config, "manual", send_count))?;
+                                tui_state.update(
+                                    LoopState::Stopped,
+                                    &config,
+                                    send_count,
+                                    max_sends,
+                                    active_rule.as_deref(),
+                                    effective_elapsed(run_started, held_total, hold_started),
+                                    "",
+                                )?;
+                                break;
+                            }
+                            TuiAction::Quit => {
+                                if prompt_editor.open {
+                                    prompt_editor.close();
+                                    continue;
+                                }
+                                if injection_filter.popup_open {
+                                    injection_filter.close_popup();
+                                    continue;
+                                }
+                                tui_state
+                                    .push_log(format!("[{}] stopped reason=quit", timestamp_now()));
+                                logger.log(LogEvent::stopped(&config, "quit", send_count))?;
+                                break;
+                            }
+                            TuiAction::Next => {
+                                if prompt_editor.open && prompt_editor.confirm.is_some() {
+                                    prompt_editor.confirm_no();
+                                    continue;
+                                }
+                                last_hash_by_target.clear();
+                                trigger_edge_active.clear();
+                                trigger_confirm_pending_since.clear();
+                                active_rule = None;
+                                active_rule_by_target.clear();
+                                backoff_state.clear();
                                 loop_state = LoopState::Running;
                                 force_rescan = true;
-                            } else {
-                                hold_started = Some(std::time::Instant::now());
-                                loop_state = LoopState::Holding;
                             }
-                        }
-                        TuiAction::Fleet => {
-                            open_fleet_manager = true;
-                        }
-                        TuiAction::Stop => {
-                            tui_state
-                                .push_log(format!("[{}] stopped reason=manual", timestamp_now()));
-                            logger.log(LogEvent::stopped(&config, "manual", send_count))?;
-                            tui_state.update(
-                                LoopState::Stopped,
-                                &config,
-                                send_count,
-                                max_sends,
-                                active_rule.as_deref(),
-                                effective_elapsed(run_started, held_total, hold_started),
-                                "",
-                            )?;
-                            break;
-                        }
-                        TuiAction::Quit => {
-                            if prompt_editor.open {
-                                prompt_editor.close();
-                                continue;
+                            TuiAction::Renew => {
+                                send_count = 0;
+                                last_hash_by_target.clear();
+                                trigger_edge_active.clear();
+                                trigger_confirm_pending_since.clear();
+                                active_rule = None;
+                                active_rule_by_target.clear();
+                                backoff_state.clear();
+                                tui_state.push_log(format!(
+                                    "[{}] renewed counter reason=manual",
+                                    timestamp_now()
+                                ));
                             }
-                            if injection_filter.popup_open {
+                            TuiAction::ActiveListToggle => {
+                                if prompt_editor.open {
+                                    continue;
+                                }
+                                if injection_filter.popup_open {
+                                    injection_filter.close_popup();
+                                } else {
+                                    injection_filter.open_popup();
+                                }
+                            }
+                            TuiAction::ActiveListUp => {
+                                if prompt_editor.open {
+                                    prompt_editor.select_up();
+                                } else if injection_filter.popup_open {
+                                    injection_filter.move_up();
+                                }
+                            }
+                            TuiAction::ActiveListDown => {
+                                if prompt_editor.open {
+                                    prompt_editor.select_down();
+                                } else if injection_filter.popup_open {
+                                    injection_filter.move_down();
+                                }
+                            }
+                            TuiAction::ActiveListLeft => {
+                                if injection_filter.popup_open {
+                                    injection_filter.move_left();
+                                }
+                            }
+                            TuiAction::ActiveListRight => {
+                                if injection_filter.popup_open {
+                                    injection_filter.move_right();
+                                }
+                            }
+                            TuiAction::ActiveListToggleSelection => {
+                                if prompt_editor.open {
+                                    prompt_editor.use_selection();
+                                } else if injection_filter.popup_open {
+                                    injection_filter.toggle_current_selection();
+                                }
+                            }
+                            TuiAction::ActiveListEnableAll => {
+                                if injection_filter.popup_open {
+                                    injection_filter.enable_all();
+                                }
+                            }
+                            TuiAction::ActiveListDisableAll => {
+                                if injection_filter.popup_open {
+                                    injection_filter.disable_all();
+                                }
+                            }
+                            TuiAction::ActiveListClose => {
+                                if prompt_editor.open {
+                                    prompt_editor.close();
+                                } else {
+                                    injection_filter.close_popup();
+                                }
+                            }
+                            TuiAction::PromptEditorToggle => {
                                 injection_filter.close_popup();
-                                continue;
+                                prompt_editor.toggle_open();
                             }
-                            tui_state
-                                .push_log(format!("[{}] stopped reason=quit", timestamp_now()));
-                            logger.log(LogEvent::stopped(&config, "quit", send_count))?;
-                            break;
-                        }
-                        TuiAction::Next => {
-                            if prompt_editor.open && prompt_editor.confirm.is_some() {
-                                prompt_editor.confirm_no();
-                                continue;
+                            TuiAction::PromptEditorClearHistory => {
+                                if prompt_editor.open {
+                                    prompt_editor.request_clear_history();
+                                }
                             }
-                            last_hash_by_target.clear();
-                            trigger_edge_active.clear();
-                            trigger_confirm_pending_since.clear();
-                            active_rule = None;
-                            active_rule_by_target.clear();
-                            backoff_state.clear();
-                            loop_state = LoopState::Running;
-                            force_rescan = true;
-                        }
-                        TuiAction::Renew => {
-                            send_count = 0;
-                            last_hash_by_target.clear();
-                            trigger_edge_active.clear();
-                            trigger_confirm_pending_since.clear();
-                            active_rule = None;
-                            active_rule_by_target.clear();
-                            backoff_state.clear();
-                            tui_state.push_log(format!(
-                                "[{}] renewed counter reason=manual",
-                                timestamp_now()
-                            ));
-                        }
-                        TuiAction::ActiveListToggle => {
-                            if prompt_editor.open {
-                                continue;
+                            TuiAction::PromptEditorUndo => {
+                                if prompt_editor.open {
+                                    prompt_editor.undo();
+                                }
                             }
-                            if injection_filter.popup_open {
-                                injection_filter.close_popup();
-                            } else {
-                                injection_filter.open_popup();
+                            TuiAction::PromptEditorConfirmYes => {
+                                if prompt_editor.open {
+                                    prompt_editor.confirm_yes();
+                                }
                             }
-                        }
-                        TuiAction::ActiveListUp => {
-                            if prompt_editor.open {
-                                prompt_editor.select_up();
-                            } else if injection_filter.popup_open {
-                                injection_filter.move_up();
+                            TuiAction::PromptEditorConfirmNo => {
+                                if prompt_editor.open {
+                                    prompt_editor.confirm_no();
+                                }
                             }
-                        }
-                        TuiAction::ActiveListDown => {
-                            if prompt_editor.open {
-                                prompt_editor.select_down();
-                            } else if injection_filter.popup_open {
-                                injection_filter.move_down();
+                            TuiAction::PromptEditorBackspace => {
+                                if prompt_editor.open {
+                                    prompt_editor.backspace();
+                                }
                             }
-                        }
-                        TuiAction::ActiveListLeft => {
-                            if injection_filter.popup_open {
-                                injection_filter.move_left();
+                            TuiAction::PromptEditorInput(ch) => {
+                                if prompt_editor.open && !ch.is_control() {
+                                    prompt_editor.input_char(ch);
+                                }
                             }
-                        }
-                        TuiAction::ActiveListRight => {
-                            if injection_filter.popup_open {
-                                injection_filter.move_right();
+                            TuiAction::PromptEditorDeleteSelected => {
+                                if prompt_editor.open {
+                                    prompt_editor.request_delete_selected();
+                                }
                             }
-                        }
-                        TuiAction::ActiveListToggleSelection => {
-                            if prompt_editor.open {
-                                prompt_editor.use_selection();
-                            } else if injection_filter.popup_open {
-                                injection_filter.toggle_current_selection();
+                            TuiAction::ToggleLogView => {
+                                tui_state.toggle_log_view();
                             }
+                            TuiAction::Pause | TuiAction::Resume | TuiAction::HoldToggle => {}
+                            TuiAction::Redraw => {}
                         }
-                        TuiAction::ActiveListEnableAll => {
-                            if injection_filter.popup_open {
-                                injection_filter.enable_all();
-                            }
-                        }
-                        TuiAction::ActiveListDisableAll => {
-                            if injection_filter.popup_open {
-                                injection_filter.disable_all();
-                            }
-                        }
-                        TuiAction::ActiveListClose => {
-                            if prompt_editor.open {
-                                prompt_editor.close();
-                            } else {
-                                injection_filter.close_popup();
-                            }
-                        }
-                        TuiAction::PromptEditorToggle => {
-                            injection_filter.close_popup();
-                            prompt_editor.toggle_open();
-                        }
-                        TuiAction::PromptEditorClearHistory => {
-                            if prompt_editor.open {
-                                prompt_editor.request_clear_history();
-                            }
-                        }
-                        TuiAction::PromptEditorUndo => {
-                            if prompt_editor.open {
-                                prompt_editor.undo();
-                            }
-                        }
-                        TuiAction::PromptEditorConfirmYes => {
-                            if prompt_editor.open {
-                                prompt_editor.confirm_yes();
-                            }
-                        }
-                        TuiAction::PromptEditorConfirmNo => {
-                            if prompt_editor.open {
-                                prompt_editor.confirm_no();
-                            }
-                        }
-                        TuiAction::PromptEditorBackspace => {
-                            if prompt_editor.open {
-                                prompt_editor.backspace();
-                            }
-                        }
-                        TuiAction::PromptEditorInput(ch) => {
-                            if prompt_editor.open && !ch.is_control() {
-                                prompt_editor.input_char(ch);
-                            }
-                        }
-                        TuiAction::PromptEditorDeleteSelected => {
-                            if prompt_editor.open {
-                                prompt_editor.request_delete_selected();
-                            }
-                        }
-                        TuiAction::ToggleLogView => {
-                            tui_state.toggle_log_view();
-                        }
-                        TuiAction::Redraw => {}
                     }
                 }
                 sync_tui_overlays(tui_state, &injection_filter, &prompt_editor);
@@ -4662,188 +4737,180 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                 if let Some(action) =
                     tui_state.poll_input(prompt_editor.open, prompt_editor.confirm.is_some())?
                 {
-                    match action {
-                        TuiAction::Pause => {
-                            if hold_started.is_none() {
-                                hold_started = Some(std::time::Instant::now());
-                            }
-                            loop_state = LoopState::Holding;
-                        }
-                        TuiAction::Resume => {
-                            if let Some(started_at) = hold_started.take() {
-                                held_total += started_at.elapsed();
-                            }
-                            loop_state = LoopState::Running;
+                    if let Some(plan) = plan_hold_action(action, hold_started.is_some(), false) {
+                        apply_hold_transition(
+                            plan.transition,
+                            &mut loop_state,
+                            &mut hold_started,
+                            &mut held_total,
+                        );
+                        if plan.force_rescan {
                             force_rescan = true;
                         }
-                        TuiAction::HoldToggle => {
-                            if let Some(started_at) = hold_started.take() {
-                                held_total += started_at.elapsed();
+                    } else {
+                        match action {
+                            TuiAction::Fleet => {
+                                open_fleet_manager = true;
+                            }
+                            TuiAction::Stop => {
+                                tui_state.push_log(format!(
+                                    "[{}] stopped reason=manual",
+                                    timestamp_now()
+                                ));
+                                tui_state.update(
+                                    LoopState::Stopped,
+                                    &config,
+                                    send_count,
+                                    max_sends,
+                                    active_rule.as_deref(),
+                                    effective_elapsed(run_started, held_total, hold_started),
+                                    "",
+                                )?;
+                                logger.log(LogEvent::stopped(&config, "manual", send_count))?;
+                                break;
+                            }
+                            TuiAction::Next => {
+                                if prompt_editor.open && prompt_editor.confirm.is_some() {
+                                    prompt_editor.confirm_no();
+                                    continue;
+                                }
+                                last_hash_by_target.clear();
+                                trigger_edge_active.clear();
+                                trigger_confirm_pending_since.clear();
+                                active_rule = None;
+                                active_rule_by_target.clear();
+                                backoff_state.clear();
                                 loop_state = LoopState::Running;
                                 force_rescan = true;
-                            } else {
-                                hold_started = Some(std::time::Instant::now());
-                                loop_state = LoopState::Holding;
                             }
-                        }
-                        TuiAction::Fleet => {
-                            open_fleet_manager = true;
-                        }
-                        TuiAction::Stop => {
-                            tui_state
-                                .push_log(format!("[{}] stopped reason=manual", timestamp_now()));
-                            tui_state.update(
-                                LoopState::Stopped,
-                                &config,
-                                send_count,
-                                max_sends,
-                                active_rule.as_deref(),
-                                effective_elapsed(run_started, held_total, hold_started),
-                                "",
-                            )?;
-                            logger.log(LogEvent::stopped(&config, "manual", send_count))?;
-                            break;
-                        }
-                        TuiAction::Next => {
-                            if prompt_editor.open && prompt_editor.confirm.is_some() {
-                                prompt_editor.confirm_no();
-                                continue;
+                            TuiAction::Renew => {
+                                send_count = 0;
+                                last_hash_by_target.clear();
+                                trigger_edge_active.clear();
+                                trigger_confirm_pending_since.clear();
+                                active_rule = None;
+                                active_rule_by_target.clear();
+                                backoff_state.clear();
+                                tui_state.push_log(format!(
+                                    "[{}] renewed counter reason=manual",
+                                    timestamp_now()
+                                ));
                             }
-                            last_hash_by_target.clear();
-                            trigger_edge_active.clear();
-                            trigger_confirm_pending_since.clear();
-                            active_rule = None;
-                            active_rule_by_target.clear();
-                            backoff_state.clear();
-                            loop_state = LoopState::Running;
-                            force_rescan = true;
-                        }
-                        TuiAction::Renew => {
-                            send_count = 0;
-                            last_hash_by_target.clear();
-                            trigger_edge_active.clear();
-                            trigger_confirm_pending_since.clear();
-                            active_rule = None;
-                            active_rule_by_target.clear();
-                            backoff_state.clear();
-                            tui_state.push_log(format!(
-                                "[{}] renewed counter reason=manual",
-                                timestamp_now()
-                            ));
-                        }
-                        TuiAction::ActiveListToggle => {
-                            if prompt_editor.open {
-                                continue;
+                            TuiAction::ActiveListToggle => {
+                                if prompt_editor.open {
+                                    continue;
+                                }
+                                if injection_filter.popup_open {
+                                    injection_filter.close_popup();
+                                } else {
+                                    injection_filter.open_popup();
+                                }
                             }
-                            if injection_filter.popup_open {
+                            TuiAction::ActiveListUp => {
+                                if prompt_editor.open {
+                                    prompt_editor.select_up();
+                                } else if injection_filter.popup_open {
+                                    injection_filter.move_up();
+                                }
+                            }
+                            TuiAction::ActiveListDown => {
+                                if prompt_editor.open {
+                                    prompt_editor.select_down();
+                                } else if injection_filter.popup_open {
+                                    injection_filter.move_down();
+                                }
+                            }
+                            TuiAction::ActiveListLeft => {
+                                if injection_filter.popup_open {
+                                    injection_filter.move_left();
+                                }
+                            }
+                            TuiAction::ActiveListRight => {
+                                if injection_filter.popup_open {
+                                    injection_filter.move_right();
+                                }
+                            }
+                            TuiAction::ActiveListToggleSelection => {
+                                if prompt_editor.open {
+                                    prompt_editor.use_selection();
+                                } else if injection_filter.popup_open {
+                                    injection_filter.toggle_current_selection();
+                                }
+                            }
+                            TuiAction::ActiveListEnableAll => {
+                                if injection_filter.popup_open {
+                                    injection_filter.enable_all();
+                                }
+                            }
+                            TuiAction::ActiveListDisableAll => {
+                                if injection_filter.popup_open {
+                                    injection_filter.disable_all();
+                                }
+                            }
+                            TuiAction::ActiveListClose => {
+                                if prompt_editor.open {
+                                    prompt_editor.close();
+                                } else {
+                                    injection_filter.close_popup();
+                                }
+                            }
+                            TuiAction::PromptEditorToggle => {
                                 injection_filter.close_popup();
-                            } else {
-                                injection_filter.open_popup();
+                                prompt_editor.toggle_open();
                             }
-                        }
-                        TuiAction::ActiveListUp => {
-                            if prompt_editor.open {
-                                prompt_editor.select_up();
-                            } else if injection_filter.popup_open {
-                                injection_filter.move_up();
+                            TuiAction::PromptEditorClearHistory => {
+                                if prompt_editor.open {
+                                    prompt_editor.request_clear_history();
+                                }
                             }
-                        }
-                        TuiAction::ActiveListDown => {
-                            if prompt_editor.open {
-                                prompt_editor.select_down();
-                            } else if injection_filter.popup_open {
-                                injection_filter.move_down();
+                            TuiAction::PromptEditorUndo => {
+                                if prompt_editor.open {
+                                    prompt_editor.undo();
+                                }
                             }
-                        }
-                        TuiAction::ActiveListLeft => {
-                            if injection_filter.popup_open {
-                                injection_filter.move_left();
+                            TuiAction::PromptEditorConfirmYes => {
+                                if prompt_editor.open {
+                                    prompt_editor.confirm_yes();
+                                }
                             }
-                        }
-                        TuiAction::ActiveListRight => {
-                            if injection_filter.popup_open {
-                                injection_filter.move_right();
+                            TuiAction::PromptEditorConfirmNo => {
+                                if prompt_editor.open {
+                                    prompt_editor.confirm_no();
+                                }
                             }
-                        }
-                        TuiAction::ActiveListToggleSelection => {
-                            if prompt_editor.open {
-                                prompt_editor.use_selection();
-                            } else if injection_filter.popup_open {
-                                injection_filter.toggle_current_selection();
+                            TuiAction::PromptEditorBackspace => {
+                                if prompt_editor.open {
+                                    prompt_editor.backspace();
+                                }
                             }
-                        }
-                        TuiAction::ActiveListEnableAll => {
-                            if injection_filter.popup_open {
-                                injection_filter.enable_all();
+                            TuiAction::PromptEditorInput(ch) => {
+                                if prompt_editor.open && !ch.is_control() {
+                                    prompt_editor.input_char(ch);
+                                }
                             }
-                        }
-                        TuiAction::ActiveListDisableAll => {
-                            if injection_filter.popup_open {
-                                injection_filter.disable_all();
+                            TuiAction::ToggleLogView => {
+                                tui_state.toggle_log_view();
                             }
-                        }
-                        TuiAction::ActiveListClose => {
-                            if prompt_editor.open {
-                                prompt_editor.close();
-                            } else {
-                                injection_filter.close_popup();
+                            TuiAction::Pause | TuiAction::Resume | TuiAction::HoldToggle => {}
+                            TuiAction::Redraw => {}
+                            TuiAction::Quit => {
+                                if prompt_editor.open {
+                                    prompt_editor.close();
+                                    continue;
+                                }
+                                if injection_filter.popup_open {
+                                    injection_filter.close_popup();
+                                    continue;
+                                }
+                                tui_state
+                                    .push_log(format!("[{}] stopped reason=quit", timestamp_now()));
+                                logger.log(LogEvent::stopped(&config, "quit", send_count))?;
+                                break;
                             }
-                        }
-                        TuiAction::PromptEditorToggle => {
-                            injection_filter.close_popup();
-                            prompt_editor.toggle_open();
-                        }
-                        TuiAction::PromptEditorClearHistory => {
-                            if prompt_editor.open {
-                                prompt_editor.request_clear_history();
-                            }
-                        }
-                        TuiAction::PromptEditorUndo => {
-                            if prompt_editor.open {
-                                prompt_editor.undo();
-                            }
-                        }
-                        TuiAction::PromptEditorConfirmYes => {
-                            if prompt_editor.open {
-                                prompt_editor.confirm_yes();
-                            }
-                        }
-                        TuiAction::PromptEditorConfirmNo => {
-                            if prompt_editor.open {
-                                prompt_editor.confirm_no();
-                            }
-                        }
-                        TuiAction::PromptEditorBackspace => {
-                            if prompt_editor.open {
-                                prompt_editor.backspace();
-                            }
-                        }
-                        TuiAction::PromptEditorInput(ch) => {
-                            if prompt_editor.open && !ch.is_control() {
-                                prompt_editor.input_char(ch);
-                            }
-                        }
-                        TuiAction::ToggleLogView => {
-                            tui_state.toggle_log_view();
-                        }
-                        TuiAction::Redraw => {}
-                        TuiAction::Quit => {
-                            if prompt_editor.open {
-                                prompt_editor.close();
-                                continue;
-                            }
-                            if injection_filter.popup_open {
-                                injection_filter.close_popup();
-                                continue;
-                            }
-                            tui_state
-                                .push_log(format!("[{}] stopped reason=quit", timestamp_now()));
-                            logger.log(LogEvent::stopped(&config, "quit", send_count))?;
-                            break;
-                        }
-                        TuiAction::PromptEditorDeleteSelected => {
-                            if prompt_editor.open {
-                                prompt_editor.request_delete_selected();
+                            TuiAction::PromptEditorDeleteSelected => {
+                                if prompt_editor.open {
+                                    prompt_editor.request_delete_selected();
+                                }
                             }
                         }
                     }
@@ -4895,32 +4962,22 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                     if let Some(action) =
                         tui_state.poll_input(prompt_editor.open, prompt_editor.confirm.is_some())?
                     {
-                        match action {
-                            TuiAction::Pause => {
-                                if hold_started.is_none() {
-                                    hold_started = Some(std::time::Instant::now());
-                                }
-                                loop_state = LoopState::Holding;
-                            }
-                            TuiAction::Resume => {
-                                if let Some(started_at) = hold_started.take() {
-                                    held_total += started_at.elapsed();
-                                }
-                                loop_state = LoopState::Running;
+                        if let Some(plan) = plan_hold_action(action, hold_started.is_some(), true) {
+                            apply_hold_transition(
+                                plan.transition,
+                                &mut loop_state,
+                                &mut hold_started,
+                                &mut held_total,
+                            );
+                            if plan.force_rescan {
                                 force_rescan = true;
+                            }
+                            if plan.break_wait {
                                 break;
                             }
-                            TuiAction::HoldToggle => {
-                                if let Some(started_at) = hold_started.take() {
-                                    held_total += started_at.elapsed();
-                                    loop_state = LoopState::Running;
-                                    force_rescan = true;
-                                    break;
-                                } else {
-                                    hold_started = Some(std::time::Instant::now());
-                                    loop_state = LoopState::Holding;
-                                }
-                            }
+                            continue;
+                        }
+                        match action {
                             TuiAction::Fleet => {
                                 if let Err(err) = run_fleet_manager_tui_embedded() {
                                     tui_state.push_log(format!(
@@ -5097,6 +5154,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                     prompt_editor.request_delete_selected();
                                 }
                             }
+                            TuiAction::Pause | TuiAction::Resume | TuiAction::HoldToggle => {}
                             TuiAction::Redraw => {}
                         }
                     }
@@ -10805,6 +10863,47 @@ runs:
         assert_eq!(fleet_step_selection_right(0, 0), 0);
         assert_eq!(fleet_step_selection_left(5, 0), 0);
         assert_eq!(fleet_step_selection_right(5, 0), 0);
+    }
+
+    #[test]
+    fn plan_hold_action_resume_sets_force_rescan() {
+        let plan = plan_hold_action(TuiAction::Resume, false, true).unwrap();
+        assert_eq!(plan.transition, HoldTransition::Unchanged);
+        assert!(plan.force_rescan);
+        assert!(plan.break_wait);
+    }
+
+    #[test]
+    fn plan_hold_action_toggle_exits_when_holding() {
+        let plan = plan_hold_action(TuiAction::HoldToggle, true, true).unwrap();
+        assert_eq!(plan.transition, HoldTransition::ExitHolding);
+        assert!(plan.force_rescan);
+        assert!(plan.break_wait);
+    }
+
+    #[test]
+    fn apply_hold_transition_updates_state_consistently() {
+        let mut loop_state = LoopState::Running;
+        let mut hold_started = None;
+        let mut held_total = std::time::Duration::from_secs(0);
+
+        apply_hold_transition(
+            HoldTransition::EnterHolding,
+            &mut loop_state,
+            &mut hold_started,
+            &mut held_total,
+        );
+        assert_eq!(loop_state, LoopState::Holding);
+        assert!(hold_started.is_some());
+
+        apply_hold_transition(
+            HoldTransition::ExitHolding,
+            &mut loop_state,
+            &mut hold_started,
+            &mut held_total,
+        );
+        assert_eq!(loop_state, LoopState::Running);
+        assert!(hold_started.is_none());
     }
 
     #[test]
