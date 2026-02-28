@@ -42,7 +42,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Run a loop against a tmux target scope.
-    Run(RunArgs),
+    Run(Box<RunArgs>),
     /// Validate configuration without sending anything.
     Validate(ValidateArgs),
     /// Print a starter YAML config to stdout.
@@ -862,7 +862,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Command::Run(args)) => run(args),
+        Some(Command::Run(args)) => run(*args),
         Some(Command::Validate(args)) => validate(args),
         Some(Command::Init(args)) => init(args),
         Some(Command::Simulate(args)) => simulate(args),
@@ -916,17 +916,19 @@ fn run(args: RunArgs) -> Result<()> {
     let identity = resolve_run_identity(run_name.as_deref());
     let resolved = resolve_config(
         config,
-        None,
-        args.iterations,
-        false,
-        args.tail,
-        args.head,
-        args.once,
-        args.single_line,
-        args.tui,
-        args.no_trigger_edge.then_some(false),
-        args.no_recheck_before_send.then_some(false),
-        None,
+        ResolveConfigArgs {
+            target_override: None,
+            iterations_override: args.iterations,
+            skip_tmux: false,
+            tail_override: args.tail,
+            head_override: args.head,
+            once: args.once,
+            single_line: args.single_line,
+            tui: args.tui,
+            trigger_edge_override: args.no_trigger_edge.then_some(false),
+            recheck_before_send_override: args.no_recheck_before_send.then_some(false),
+            profile_id: None,
+        },
     )?;
 
     if args.dry_run {
@@ -1263,17 +1265,19 @@ fn selected_workspace_profiles(
 fn validate_workspace_profile(profile: &ResolvedRunProfile) -> Result<ResolvedConfig> {
     resolve_config(
         profile.config.clone(),
-        None,
-        None,
-        false,
-        None,
-        None,
-        false,
-        false,
-        false,
-        None,
-        None,
-        Some(profile.id.clone()),
+        ResolveConfigArgs {
+            target_override: None,
+            iterations_override: None,
+            skip_tmux: false,
+            tail_override: None,
+            head_override: None,
+            once: false,
+            single_line: false,
+            tui: false,
+            trigger_edge_override: None,
+            recheck_before_send_override: None,
+            profile_id: Some(profile.id.clone()),
+        },
     )
 }
 
@@ -1949,16 +1953,28 @@ fn pid_alive(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
-fn fleet_manager_visible_runs(
-    runs: &[FleetListedRun],
-    profile_filter: Option<&str>,
+struct FleetVisibleArgs<'a> {
+    runs: &'a [FleetListedRun],
+    profile_filter: Option<&'a str>,
     show_stale: bool,
     mismatch_only: bool,
     state_filter: FleetStateFilter,
-    search_query: &str,
+    search_query: &'a str,
     sort_mode: FleetSortMode,
     view_preset: FleetViewPreset,
-) -> Vec<FleetListedRun> {
+}
+
+fn fleet_manager_visible_runs(args: FleetVisibleArgs<'_>) -> Vec<FleetListedRun> {
+    let FleetVisibleArgs {
+        runs,
+        profile_filter,
+        show_stale,
+        mismatch_only,
+        state_filter,
+        search_query,
+        sort_mode,
+        view_preset,
+    } = args;
     let search = search_query.trim().to_ascii_lowercase();
     let mut visible: Vec<FleetListedRun> = runs
         .iter()
@@ -2041,19 +2057,18 @@ fn fleet_manager_counts(runs: &[FleetListedRun]) -> (usize, usize, usize, usize)
     (active, holding, stale, mismatch)
 }
 
-fn fleet_detail_lines(
-    selected_run: Option<&FleetListedRun>,
-    profile_filter: Option<&str>,
-    show_stale: bool,
-    mismatch_only: bool,
-    state_filter: FleetStateFilter,
-    search_query: &str,
-    counts: (usize, usize, usize, usize),
-    sort_mode: FleetSortMode,
-    view_preset: FleetViewPreset,
-    marked_count: usize,
-    pending_action: Option<&PendingFleetAction>,
-) -> Vec<String> {
+fn fleet_detail_lines(args: &FleetDetailRenderArgs<'_>) -> Vec<String> {
+    let selected_run = args.selected_run;
+    let profile_filter = args.profile_filter;
+    let show_stale = args.show_stale;
+    let mismatch_only = args.mismatch_only;
+    let state_filter = args.state_filter;
+    let search_query = args.search_query;
+    let counts = args.counts;
+    let sort_mode = args.sort_mode;
+    let view_preset = args.view_preset;
+    let marked_count = args.marked_count;
+    let pending_action = args.pending_action;
     let mut lines = Vec::new();
     lines.push("Details".to_string());
     lines.push(format!(
@@ -2390,16 +2405,26 @@ fn fleet_command_label(command: FleetControlCommand) -> &'static str {
     }
 }
 
-fn apply_external_control(
-    command: FleetControlCommand,
-    loop_state: &mut LoopState,
-    hold_started: &mut Option<std::time::Instant>,
-    held_total: &mut std::time::Duration,
-    send_count: &mut u32,
-    last_hash_by_target: &mut std::collections::HashMap<String, String>,
-    active_rule: &mut Option<String>,
-    active_rule_by_target: &mut std::collections::HashMap<String, Option<String>>,
-) -> bool {
+struct ExternalControlState<'a> {
+    loop_state: &'a mut LoopState,
+    hold_started: &'a mut Option<std::time::Instant>,
+    held_total: &'a mut std::time::Duration,
+    send_count: &'a mut u32,
+    last_hash_by_target: &'a mut std::collections::HashMap<String, String>,
+    active_rule: &'a mut Option<String>,
+    active_rule_by_target: &'a mut std::collections::HashMap<String, Option<String>>,
+}
+
+fn apply_external_control(command: FleetControlCommand, state: ExternalControlState<'_>) -> bool {
+    let ExternalControlState {
+        loop_state,
+        hold_started,
+        held_total,
+        send_count,
+        last_hash_by_target,
+        active_rule,
+        active_rule_by_target,
+    } = state;
     match command {
         FleetControlCommand::Stop => true,
         FleetControlCommand::Hold => {
@@ -2714,19 +2739,7 @@ impl FleetPaneRenderer for LegacyFleetPaneRenderer {
     }
 
     fn render_detail_lines(&self, args: FleetDetailRenderArgs<'_>) -> Vec<String> {
-        fleet_detail_lines(
-            args.selected_run,
-            args.profile_filter,
-            args.show_stale,
-            args.mismatch_only,
-            args.state_filter,
-            args.search_query,
-            args.counts,
-            args.sort_mode,
-            args.view_preset,
-            args.marked_count,
-            args.pending_action,
-        )
+        fleet_detail_lines(&args)
     }
 }
 
@@ -2782,16 +2795,16 @@ fn run_fleet_manager_tui_inner(embedded: bool, profile_filter: Option<&str>) -> 
                     fleet_phase_label(phase)
                 )
             })?;
-            runs = fleet_manager_visible_runs(
-                &all_runs,
+            runs = fleet_manager_visible_runs(FleetVisibleArgs {
+                runs: &all_runs,
                 profile_filter,
                 show_stale,
                 mismatch_only,
                 state_filter,
-                &search_query,
+                search_query: &search_query,
                 sort_mode,
                 view_preset,
-            );
+            });
             counts = fleet_manager_counts(&all_runs);
             last_refresh = std::time::Instant::now();
             needs_refresh = false;
@@ -3966,13 +3979,15 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
         if let Some(command) = fleet_registry.consume_control_command()? {
             let stop = apply_external_control(
                 command,
-                &mut loop_state,
-                &mut hold_started,
-                &mut held_total,
-                &mut send_count,
-                &mut last_hash_by_target,
-                &mut active_rule,
-                &mut active_rule_by_target,
+                ExternalControlState {
+                    loop_state: &mut loop_state,
+                    hold_started: &mut hold_started,
+                    held_total: &mut held_total,
+                    send_count: &mut send_count,
+                    last_hash_by_target: &mut last_hash_by_target,
+                    active_rule: &mut active_rule,
+                    active_rule_by_target: &mut active_rule_by_target,
+                },
             );
             if let Some(tui_state) = tui.as_mut() {
                 tui_state.push_log(format!(
@@ -5886,17 +5901,19 @@ fn validate(args: ValidateArgs) -> Result<()> {
     }
     let resolved = resolve_config(
         config,
-        None,
-        args.iterations,
-        args.skip_tmux,
-        None,
-        None,
-        false,
-        false,
-        false,
-        None,
-        None,
-        None,
+        ResolveConfigArgs {
+            target_override: None,
+            iterations_override: args.iterations,
+            skip_tmux: args.skip_tmux,
+            tail_override: None,
+            head_override: None,
+            once: false,
+            single_line: false,
+            tui: false,
+            trigger_edge_override: None,
+            recheck_before_send_override: None,
+            profile_id: None,
+        },
     )?;
     print_validation(&resolved);
     Ok(())
@@ -6837,20 +6854,7 @@ struct LegacyFooterRenderer;
 
 impl StatusBarRenderer for LegacyStatusBarRenderer {
     fn render(&self, args: StatusBarRenderArgs<'_>) -> String {
-        render_status_bar(
-            args.state,
-            args.layout,
-            args.icon_mode,
-            args.style,
-            args.width,
-            args.config,
-            args.current,
-            args.total,
-            args.rule_id,
-            args.elapsed,
-            args.remaining_duration,
-            args.process_usage,
-        )
+        render_status_bar(&args)
     }
 }
 
@@ -6951,6 +6955,7 @@ impl TuiState {
         self.footer_note = note;
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn update(
         &mut self,
         state: LoopState,
@@ -7471,20 +7476,19 @@ fn render_active_list_popup(
     lines
 }
 
-fn render_status_bar(
-    state: LoopState,
-    layout: LayoutMode,
-    icon_mode: IconMode,
-    style: StyleConfig,
-    width: u16,
-    config: &ResolvedConfig,
-    current: u32,
-    total: u32,
-    rule_id: Option<&str>,
-    elapsed: &str,
-    remaining_duration: Option<&str>,
-    process_usage: Option<&str>,
-) -> String {
+fn render_status_bar(args: &StatusBarRenderArgs<'_>) -> String {
+    let state = args.state;
+    let layout = args.layout;
+    let icon_mode = args.icon_mode;
+    let style = args.style;
+    let width = args.width;
+    let config = args.config;
+    let current = args.current;
+    let total = args.total;
+    let rule_id = args.rule_id;
+    let elapsed = args.elapsed;
+    let remaining_duration = args.remaining_duration;
+    let process_usage = args.process_usage;
     let (icon, label) = state_label(state, icon_mode);
     let progress = if config.infinite {
         "inf".to_string()
@@ -8023,8 +8027,7 @@ struct ExecInFlight {
     started_at: std::time::Instant,
 }
 
-fn resolve_config(
-    mut config: Config,
+struct ResolveConfigArgs {
     target_override: Option<Vec<String>>,
     iterations_override: Option<u32>,
     skip_tmux: bool,
@@ -8036,7 +8039,22 @@ fn resolve_config(
     trigger_edge_override: Option<bool>,
     recheck_before_send_override: Option<bool>,
     profile_id: Option<String>,
-) -> Result<ResolvedConfig> {
+}
+
+fn resolve_config(mut config: Config, args: ResolveConfigArgs) -> Result<ResolvedConfig> {
+    let ResolveConfigArgs {
+        target_override,
+        iterations_override,
+        skip_tmux,
+        tail_override,
+        head_override,
+        once,
+        single_line,
+        tui,
+        trigger_edge_override,
+        recheck_before_send_override,
+        profile_id,
+    } = args;
     if let Some(targets) = target_override
         && let Some(first) = targets.first()
     {
@@ -9613,8 +9631,20 @@ runs:
         };
         let config = resolve_run_config(&args).unwrap();
         let resolved = resolve_config(
-            config, None, None, true, args.tail, args.head, args.once, false, false, None, None,
-            None,
+            config,
+            ResolveConfigArgs {
+                target_override: None,
+                iterations_override: None,
+                skip_tmux: true,
+                tail_override: args.tail,
+                head_override: args.head,
+                once: args.once,
+                single_line: false,
+                tui: false,
+                trigger_edge_override: None,
+                recheck_before_send_override: None,
+                profile_id: None,
+            },
         )
         .unwrap();
         assert!(matches!(resolved.capture_window, CaptureWindow::Tail(123)));
@@ -9757,7 +9787,20 @@ runs:
         };
         let config = resolve_run_config(&args).unwrap();
         let resolved = resolve_config(
-            config, None, None, true, args.tail, args.head, false, false, false, None, None, None,
+            config,
+            ResolveConfigArgs {
+                target_override: None,
+                iterations_override: None,
+                skip_tmux: true,
+                tail_override: args.tail,
+                head_override: args.head,
+                once: false,
+                single_line: false,
+                tui: false,
+                trigger_edge_override: None,
+                recheck_before_send_override: None,
+                profile_id: None,
+            },
         )
         .unwrap();
         assert!(matches!(resolved.capture_window, CaptureWindow::Head(7)));
@@ -9800,7 +9843,20 @@ runs:
         };
         let config = resolve_run_config(&args).unwrap();
         let resolved = resolve_config(
-            config, None, None, true, args.tail, args.head, false, false, false, None, None, None,
+            config,
+            ResolveConfigArgs {
+                target_override: None,
+                iterations_override: None,
+                skip_tmux: true,
+                tail_override: args.tail,
+                head_override: args.head,
+                once: false,
+                single_line: false,
+                tui: false,
+                trigger_edge_override: None,
+                recheck_before_send_override: None,
+                profile_id: None,
+            },
         )
         .unwrap();
         assert_eq!(
@@ -9845,17 +9901,19 @@ runs:
         };
         let err = resolve_config(
             config,
-            None,
-            None,
-            true,
-            Some(1),
-            None,
-            false,
-            false,
-            false,
-            None,
-            None,
-            None,
+            ResolveConfigArgs {
+                target_override: None,
+                iterations_override: None,
+                skip_tmux: true,
+                tail_override: Some(1),
+                head_override: None,
+                once: false,
+                single_line: false,
+                tui: false,
+                trigger_edge_override: None,
+                recheck_before_send_override: None,
+                profile_id: None,
+            },
         )
         .unwrap_err();
         assert!(err.to_string().contains("file source not found"));
@@ -9896,17 +9954,19 @@ runs:
 
         let resolved = resolve_config(
             config,
-            None,
-            None,
-            true,
-            None,
-            None,
-            false,
-            false,
-            false,
-            None,
-            None,
-            Some("watcher".to_string()),
+            ResolveConfigArgs {
+                target_override: None,
+                iterations_override: None,
+                skip_tmux: true,
+                tail_override: None,
+                head_override: None,
+                once: false,
+                single_line: false,
+                tui: false,
+                trigger_edge_override: None,
+                recheck_before_send_override: None,
+                profile_id: Some("watcher".to_string()),
+            },
         )
         .unwrap();
 
@@ -10076,13 +10136,15 @@ runs:
 
         let should_stop = apply_external_control(
             FleetControlCommand::Renew,
-            &mut loop_state,
-            &mut hold_started,
-            &mut held_total,
-            &mut send_count,
-            &mut last_hash_by_target,
-            &mut active_rule,
-            &mut active_rule_by_target,
+            ExternalControlState {
+                loop_state: &mut loop_state,
+                hold_started: &mut hold_started,
+                held_total: &mut held_total,
+                send_count: &mut send_count,
+                last_hash_by_target: &mut last_hash_by_target,
+                active_rule: &mut active_rule,
+                active_rule_by_target: &mut active_rule_by_target,
+            },
         );
 
         assert!(!should_stop);
@@ -10175,20 +10237,7 @@ runs:
             process_usage: Some("cpu 12.3% mem 42.0mb"),
         };
 
-        let direct = render_status_bar(
-            args.state,
-            args.layout,
-            args.icon_mode,
-            args.style,
-            args.width,
-            args.config,
-            args.current,
-            args.total,
-            args.rule_id,
-            args.elapsed,
-            args.remaining_duration,
-            args.process_usage,
-        );
+        let direct = render_status_bar(&args);
         let via_adapter = LegacyStatusBarRenderer.render(args);
         assert_eq!(via_adapter, direct);
     }
@@ -10231,25 +10280,25 @@ runs:
     #[test]
     fn render_status_bar_golden_compact_segments() {
         let config = status_bar_test_config();
-        let line = render_status_bar(
-            LoopState::Running,
-            LayoutMode::Compact,
-            IconMode::Ascii,
-            StyleConfig {
+        let line = render_status_bar(&StatusBarRenderArgs {
+            state: LoopState::Running,
+            layout: LayoutMode::Compact,
+            icon_mode: IconMode::Ascii,
+            style: StyleConfig {
                 use_color: false,
                 use_bg: false,
                 use_unicode_ellipsis: false,
                 dim_logs: true,
             },
-            120,
-            &config,
-            5,
-            10,
-            Some("Concluded"),
-            "00:10",
-            Some("1m20s"),
-            Some("cpu 12.3% mem 42.0mb"),
-        );
+            width: 120,
+            config: &config,
+            current: 5,
+            total: 10,
+            rule_id: Some("Concluded"),
+            elapsed: "00:10",
+            remaining_duration: Some("1m20s"),
+            process_usage: Some("cpu 12.3% mem 42.0mb"),
+        });
 
         assert_contains_in_order(
             &line,
@@ -10272,25 +10321,25 @@ runs:
     #[test]
     fn render_status_bar_golden_standard_segments() {
         let config = status_bar_test_config();
-        let line = render_status_bar(
-            LoopState::Running,
-            LayoutMode::Standard,
-            IconMode::Ascii,
-            StyleConfig {
+        let line = render_status_bar(&StatusBarRenderArgs {
+            state: LoopState::Running,
+            layout: LayoutMode::Standard,
+            icon_mode: IconMode::Ascii,
+            style: StyleConfig {
                 use_color: false,
                 use_bg: false,
                 use_unicode_ellipsis: true,
                 dim_logs: true,
             },
-            160,
-            &config,
-            5,
-            10,
-            Some("Concluded"),
-            "00:10",
-            Some("1m20s"),
-            Some("cpu 12.3% mem 42.0mb"),
-        );
+            width: 160,
+            config: &config,
+            current: 5,
+            total: 10,
+            rule_id: Some("Concluded"),
+            elapsed: "00:10",
+            remaining_duration: Some("1m20s"),
+            process_usage: Some("cpu 12.3% mem 42.0mb"),
+        });
 
         assert_contains_in_order(
             &line,
@@ -10313,25 +10362,25 @@ runs:
     #[test]
     fn render_status_bar_golden_wide_segments() {
         let config = status_bar_test_config();
-        let line = render_status_bar(
-            LoopState::Running,
-            LayoutMode::Wide,
-            IconMode::Ascii,
-            StyleConfig {
+        let line = render_status_bar(&StatusBarRenderArgs {
+            state: LoopState::Running,
+            layout: LayoutMode::Wide,
+            icon_mode: IconMode::Ascii,
+            style: StyleConfig {
                 use_color: false,
                 use_bg: false,
                 use_unicode_ellipsis: true,
                 dim_logs: true,
             },
-            200,
-            &config,
-            5,
-            10,
-            Some("Concluded"),
-            "00:10",
-            Some("1m20s"),
-            Some("cpu 12.3% mem 42.0mb"),
-        );
+            width: 200,
+            config: &config,
+            current: 5,
+            total: 10,
+            rule_id: Some("Concluded"),
+            elapsed: "00:10",
+            remaining_duration: Some("1m20s"),
+            process_usage: Some("cpu 12.3% mem 42.0mb"),
+        });
 
         assert_contains_in_order(
             &line,
@@ -10354,25 +10403,25 @@ runs:
     fn render_status_bar_unicode_snapshot_contract() {
         let mut config = status_bar_test_config();
         config.infinite = true;
-        let line = render_status_bar(
-            LoopState::Running,
-            LayoutMode::Standard,
-            IconMode::Nerd,
-            StyleConfig {
+        let line = render_status_bar(&StatusBarRenderArgs {
+            state: LoopState::Running,
+            layout: LayoutMode::Standard,
+            icon_mode: IconMode::Nerd,
+            style: StyleConfig {
                 use_color: false,
                 use_bg: false,
                 use_unicode_ellipsis: true,
                 dim_logs: true,
             },
-            160,
-            &config,
-            2,
-            0,
-            Some("This is a very long trigger string that should truncate"),
-            "00:10",
-            Some("2m10s"),
-            Some("cpu 9.1% mem 22.4mb"),
-        );
+            width: 160,
+            config: &config,
+            current: 2,
+            total: 0,
+            rule_id: Some("This is a very long trigger string that should truncate"),
+            elapsed: "00:10",
+            remaining_duration: Some("2m10s"),
+            process_usage: Some("cpu 9.1% mem 22.4mb"),
+        });
 
         assert!(line.contains("iter ∞"));
         assert!(line.contains(" · "));
@@ -10383,25 +10432,25 @@ runs:
     #[test]
     fn render_status_bar_no_color_snapshot_contract() {
         let config = status_bar_test_config();
-        let line = render_status_bar(
-            LoopState::Holding,
-            LayoutMode::Wide,
-            IconMode::Nerd,
-            StyleConfig {
+        let line = render_status_bar(&StatusBarRenderArgs {
+            state: LoopState::Holding,
+            layout: LayoutMode::Wide,
+            icon_mode: IconMode::Nerd,
+            style: StyleConfig {
                 use_color: false,
                 use_bg: false,
                 use_unicode_ellipsis: true,
                 dim_logs: true,
             },
-            180,
-            &config,
-            3,
-            10,
-            Some("Concluded"),
-            "00:12",
-            Some("45s"),
-            None,
-        );
+            width: 180,
+            config: &config,
+            current: 3,
+            total: 10,
+            rule_id: Some("Concluded"),
+            elapsed: "00:12",
+            remaining_duration: Some("45s"),
+            process_usage: None,
+        });
 
         assert!(!line.contains("\x1B["));
         assert!(line.contains("target ai:5.0"));
@@ -10449,25 +10498,25 @@ runs:
             prompt_edit_max_chars: DEFAULT_PROMPT_EDIT_MAX_CHARS,
             duration: None,
         };
-        let bar = render_status_bar(
-            LoopState::Running,
-            LayoutMode::Compact,
-            IconMode::Ascii,
-            StyleConfig {
+        let bar = render_status_bar(&StatusBarRenderArgs {
+            state: LoopState::Running,
+            layout: LayoutMode::Compact,
+            icon_mode: IconMode::Ascii,
+            style: StyleConfig {
                 use_color: false,
                 use_bg: false,
                 use_unicode_ellipsis: false,
                 dim_logs: true,
             },
-            80,
-            &config,
-            5,
-            10,
-            Some("Concluded"),
-            "00:10",
-            None,
-            None,
-        );
+            width: 80,
+            config: &config,
+            current: 5,
+            total: 10,
+            rule_id: Some("Concluded"),
+            elapsed: "00:10",
+            remaining_duration: None,
+            process_usage: None,
+        });
         assert!(bar.contains("RUN"));
         assert!(bar.contains("5/10"));
         assert!(bar.contains("ai:5.0"));
@@ -10513,25 +10562,25 @@ runs:
             prompt_edit_max_chars: DEFAULT_PROMPT_EDIT_MAX_CHARS,
             duration: None,
         };
-        let bar = render_status_bar(
-            LoopState::Running,
-            LayoutMode::Standard,
-            IconMode::Ascii,
-            StyleConfig {
+        let bar = render_status_bar(&StatusBarRenderArgs {
+            state: LoopState::Running,
+            layout: LayoutMode::Standard,
+            icon_mode: IconMode::Ascii,
+            style: StyleConfig {
                 use_color: false,
                 use_bg: false,
                 use_unicode_ellipsis: true,
                 dim_logs: true,
             },
-            160,
-            &config,
-            1,
-            10,
-            Some("This is a very long trigger string that should truncate"),
-            "00:10",
-            Some("1m20s"),
-            None,
-        );
+            width: 160,
+            config: &config,
+            current: 1,
+            total: 10,
+            rule_id: Some("This is a very long trigger string that should truncate"),
+            elapsed: "00:10",
+            remaining_duration: Some("1m20s"),
+            process_usage: None,
+        });
         assert!(bar.contains("trg"));
         assert!(bar.contains("rem 1m20s"));
         assert!(bar.contains("…"));
@@ -10577,25 +10626,25 @@ runs:
             prompt_edit_max_chars: DEFAULT_PROMPT_EDIT_MAX_CHARS,
             duration: None,
         };
-        let bar = render_status_bar(
-            LoopState::Running,
-            LayoutMode::Standard,
-            IconMode::Ascii,
-            StyleConfig {
+        let bar = render_status_bar(&StatusBarRenderArgs {
+            state: LoopState::Running,
+            layout: LayoutMode::Standard,
+            icon_mode: IconMode::Ascii,
+            style: StyleConfig {
                 use_color: false,
                 use_bg: false,
                 use_unicode_ellipsis: true,
                 dim_logs: true,
             },
-            120,
-            &config,
-            1,
-            3,
-            Some("exec:running"),
-            "00:05",
-            None,
-            Some("cpu 12.3% mem 42.0mb"),
-        );
+            width: 120,
+            config: &config,
+            current: 1,
+            total: 3,
+            rule_id: Some("exec:running"),
+            elapsed: "00:05",
+            remaining_duration: None,
+            process_usage: Some("cpu 12.3% mem 42.0mb"),
+        });
         assert!(bar.contains("evt exec:running"));
         assert!(bar.contains("cpu 12.3% mem 42.0mb"));
     }
@@ -11142,29 +11191,29 @@ runs:
             false,
         );
 
-        let hidden = fleet_manager_visible_runs(
-            &vec![active.clone(), stale.clone()],
-            None,
-            false,
-            false,
-            FleetStateFilter::All,
-            "",
-            FleetSortMode::LastSeen,
-            FleetViewPreset::Default,
-        );
+        let hidden = fleet_manager_visible_runs(FleetVisibleArgs {
+            runs: &vec![active.clone(), stale.clone()],
+            profile_filter: None,
+            show_stale: false,
+            mismatch_only: false,
+            state_filter: FleetStateFilter::All,
+            search_query: "",
+            sort_mode: FleetSortMode::LastSeen,
+            view_preset: FleetViewPreset::Default,
+        });
         assert_eq!(hidden.len(), 1);
         assert_eq!(hidden[0].record.id, "run-1");
 
-        let all = fleet_manager_visible_runs(
-            &vec![active, stale],
-            None,
-            true,
-            false,
-            FleetStateFilter::All,
-            "",
-            FleetSortMode::LastSeen,
-            FleetViewPreset::Default,
-        );
+        let all = fleet_manager_visible_runs(FleetVisibleArgs {
+            runs: &vec![active, stale],
+            profile_filter: None,
+            show_stale: true,
+            mismatch_only: false,
+            state_filter: FleetStateFilter::All,
+            search_query: "",
+            sort_mode: FleetSortMode::LastSeen,
+            view_preset: FleetViewPreset::Default,
+        });
         assert_eq!(all.len(), 2);
     }
 
@@ -11187,16 +11236,16 @@ runs:
             false,
             true,
         );
-        let filtered = fleet_manager_visible_runs(
-            &vec![run_match, run_mismatch.clone()],
-            None,
-            true,
-            true,
-            FleetStateFilter::All,
-            "",
-            FleetSortMode::LastSeen,
-            FleetViewPreset::Default,
-        );
+        let filtered = fleet_manager_visible_runs(FleetVisibleArgs {
+            runs: &vec![run_match, run_mismatch.clone()],
+            profile_filter: None,
+            show_stale: true,
+            mismatch_only: true,
+            state_filter: FleetStateFilter::All,
+            search_query: "",
+            sort_mode: FleetSortMode::LastSeen,
+            view_preset: FleetViewPreset::Default,
+        });
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].record.id, run_mismatch.record.id);
     }
@@ -11213,16 +11262,16 @@ runs:
             false,
             false,
         );
-        let filtered = fleet_manager_visible_runs(
-            &vec![waiting, holding.clone()],
-            None,
-            true,
-            false,
-            FleetStateFilter::Holding,
-            "",
-            FleetSortMode::LastSeen,
-            FleetViewPreset::Default,
-        );
+        let filtered = fleet_manager_visible_runs(FleetVisibleArgs {
+            runs: &vec![waiting, holding.clone()],
+            profile_filter: None,
+            show_stale: true,
+            mismatch_only: false,
+            state_filter: FleetStateFilter::Holding,
+            search_query: "",
+            sort_mode: FleetSortMode::LastSeen,
+            view_preset: FleetViewPreset::Default,
+        });
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].record.id, holding.record.id);
     }
@@ -11234,28 +11283,28 @@ runs:
             false,
             false,
         );
-        let by_name = fleet_manager_visible_runs(
-            &vec![run.clone()],
-            None,
-            true,
-            false,
-            FleetStateFilter::All,
-            "planner",
-            FleetSortMode::LastSeen,
-            FleetViewPreset::Default,
-        );
+        let by_name = fleet_manager_visible_runs(FleetVisibleArgs {
+            runs: &vec![run.clone()],
+            profile_filter: None,
+            show_stale: true,
+            mismatch_only: false,
+            state_filter: FleetStateFilter::All,
+            search_query: "planner",
+            sort_mode: FleetSortMode::LastSeen,
+            view_preset: FleetViewPreset::Default,
+        });
         assert_eq!(by_name.len(), 1);
 
-        let by_target = fleet_manager_visible_runs(
-            &vec![run],
-            None,
-            true,
-            false,
-            FleetStateFilter::All,
-            "ai:1",
-            FleetSortMode::LastSeen,
-            FleetViewPreset::Default,
-        );
+        let by_target = fleet_manager_visible_runs(FleetVisibleArgs {
+            runs: &vec![run],
+            profile_filter: None,
+            show_stale: true,
+            mismatch_only: false,
+            state_filter: FleetStateFilter::All,
+            search_query: "ai:1",
+            sort_mode: FleetSortMode::LastSeen,
+            view_preset: FleetViewPreset::Default,
+        });
         assert_eq!(by_target.len(), 1);
     }
 
@@ -11388,19 +11437,7 @@ runs:
             marked_count: 1,
             pending_action: Some(&pending),
         };
-        let direct = fleet_detail_lines(
-            args.selected_run,
-            args.profile_filter,
-            args.show_stale,
-            args.mismatch_only,
-            args.state_filter,
-            args.search_query,
-            args.counts,
-            args.sort_mode,
-            args.view_preset,
-            args.marked_count,
-            args.pending_action,
-        );
+        let direct = fleet_detail_lines(&args);
         let via_adapter = LegacyFleetPaneRenderer.render_detail_lines(args);
         assert_eq!(via_adapter, direct);
     }
