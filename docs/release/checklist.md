@@ -13,5 +13,6 @@
 
 ## Post-Release
 - Bump `Cargo.toml` to next development version.
-- Run one real tmux smoke command (`loopmux run --once`) and capture pane evidence.
+- Run post-release tmux smoke: `make smoke-post-release`.
+- Optional overrides: `LOOPMUX_SMOKE_SESSION`, `LOOPMUX_SMOKE_TARGET`, `LOOPMUX_SMOKE_PROMPT`, `LOOPMUX_SMOKE_LOG`.
 - Log smoke results and release references in `docs/changelog.md`.
