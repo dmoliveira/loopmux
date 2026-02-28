@@ -55,6 +55,7 @@ This plan is the source of truth for hardening loopmux TUI reliability and evalu
 4. Prefer deterministic tests over ad-hoc manual verification; keep flaky timing assertions out of CI.
 5. New abstractions must pay for themselves with at least one testability or failure-isolation win.
 6. Raw mode ownership must be centralized behind a single guard path; ad-hoc enable/disable calls are transitional only.
+7. Any PR touching lifecycle/render loop paths must include a compact reliability evidence table (SLO and perf deltas) in the PR body.
 
 ## Definition of done
 
@@ -103,7 +104,7 @@ A task is done only when all are true:
 
 ## Epic E0 - Baseline and guardrails
 
-Status: `` doing
+Status: `` done
 
 Goal: lock current behavior, remove blind spots, and define objective reliability baseline.
 
@@ -145,17 +146,53 @@ Important decisions to remember:
 
 ### Task E0.T2 - Reliability metrics definition
 
-Status: `` not started
+Status: `` done
 
 Subtasks:
 
-- `` E0.T2.S1 Define stability SLOs (terminal recovery success, redraw failure tolerance).
-- `` E0.T2.S2 Define perf guardrails (max frame/update budget under nominal load).
-- `` E0.T2.S3 Add lightweight instrumentation plan for local/CI evidence.
+- `` E0.T2.S1 Define stability SLOs (terminal recovery success, redraw failure tolerance).
+- `` E0.T2.S2 Define perf guardrails (max frame/update budget under nominal load).
+- `` E0.T2.S3 Add lightweight instrumentation plan for local/CI evidence.
+
+Reliability SLOs (E0.T2.S1):
+
+- SLO-R1 Terminal recovery: 99.9% successful terminal restoration after `loopmux run --tui` exits (normal stop, expected error, interrupted run) across release validation sessions.
+- SLO-R2 Recovery latency: terminal restoration completes within 250 ms p95 after shutdown path starts.
+- SLO-R3 Render resilience: 0 unhandled render I/O errors; when write/flush fails, transition to explicit fallback/exit path within 1 event loop tick.
+- SLO-R4 Fleet manager stability: no stuck raw-mode sessions after `loopmux runs tui` exit across smoke matrix.
+
+Performance guardrails (E0.T2.S2):
+
+- PERF-P1 Frame budget: render/update path p95 <= 16 ms during nominal run mode (supports smooth 60 Hz ceiling, even if polling is slower).
+- PERF-P2 Tail latency ceiling: render/update path p99 <= 33 ms under nominal load.
+- PERF-P3 Input latency: keypress-to-action dispatch p95 <= 50 ms in run and fleet views.
+- PERF-P4 Sampling isolation: any process usage sampling work must stay out of frame-critical path or be cached with TTL >= 1 s.
+
+Measurement windows and sampling:
+
+- Use 3 terminal profiles: narrow (80x24), standard (120x30), wide (160x45).
+- For each profile, run at least 300 event-loop iterations and capture p50/p95/p99 for frame and input latency.
+- Record failures and percentile summaries in PR notes for lifecycle/render-related changes.
+
+Instrumentation and validation plan (E0.T2.S3):
+
+- Add lightweight local counters/timers around TUI loop phases (`tick`, `input`, `update`, `draw`) behind a dev-facing flag (`LOOPMUX_TUI_METRICS=1`).
+- Emit one structured summary line at shutdown and optional JSONL event when metrics are enabled; keep default output unchanged.
+- Keep no external dependency: use in-process timing (`Instant`) and existing logger path for evidence.
+- CI check pattern for stability-sensitive changes:
+  - run targeted tests,
+  - run one deterministic metrics smoke (`--tui` in simulated profile),
+  - fail only on hard regression thresholds, not normal variance noise.
+
+Closure update (2026-02-28):
+
+- Validation evidence: docs-only changes validated with `git diff --check`; regression safety check `cargo test -q` passed (96 tests).
+- Outcome: E0 baseline/metrics work is complete; next active implementation epic is E1 lifecycle hardening.
 
 Important decisions to remember:
 
 - SLOs must be observable with existing tooling; no heavy telemetry dependency.
+- Regression thresholds are advisory until E1 lands instrumentation hooks; after E1 they become merge-gating for touched paths.
 
 ## Epic E1 - Lifecycle hardening on crossterm
 
@@ -308,3 +345,5 @@ When any task/subtask changes to `` done, update this file in the same PR:
 - `2026-02-28` `PLAN-002` Define explicit acceptance criteria around terminal recovery, render error policy, and testability parity.
 - `2026-02-28` `PLAN-003` E0.T1.S2 baseline confirms raw-mode restoration risk on early `?` exits; E1.T1 must land RAII + panic-safe restore first.
 - `2026-02-28` `PLAN-004` E0.T1.S3 baseline confirms render/input/update coupling and hot-path process sampling; E2.T2 must phase-separate loop responsibilities.
+- `2026-02-28` `PLAN-005` E0.T2 sets explicit SLOs for terminal recovery, render failure handling, and fleet exit hygiene to measure hardening progress.
+- `2026-02-28` `PLAN-006` E0.T2 chooses in-process lightweight instrumentation (no external telemetry dependency) and PR-level evidence tables for lifecycle/render changes.
