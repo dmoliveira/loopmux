@@ -3969,7 +3969,6 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                     max_sends,
                     active_rule.as_deref(),
                     active_elapsed,
-                    "",
                 )?;
             }
             logger.log(LogEvent::stopped(&config, "duration", send_count))?;
@@ -4040,7 +4039,6 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                     max_sends,
                                     active_rule.as_deref(),
                                     effective_elapsed(run_started, held_total, hold_started),
-                                    "",
                                 )?;
                                 break;
                             }
@@ -4198,7 +4196,6 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                     max_sends,
                     active_rule.as_deref(),
                     effective_elapsed(run_started, held_total, hold_started),
-                    "",
                 )?;
             }
             if open_fleet_manager {
@@ -4370,7 +4367,6 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                     max_sends,
                     active_rule.as_deref(),
                     active_elapsed,
-                    "",
                 )?;
             }
 
@@ -4586,7 +4582,6 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                             max_sends,
                             plan.rule_id.as_deref(),
                             effective_elapsed(run_started, held_total, hold_started),
-                            "",
                         )?;
                     }
                     sleep_with_heartbeat(
@@ -4689,7 +4684,6 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                     max_sends,
                                     plan.rule_id.as_deref(),
                                     effective_elapsed(run_started, held_total, hold_started),
-                                    "",
                                 )?;
                             }
                         }
@@ -4740,7 +4734,6 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                 max_sends,
                                 plan.rule_id.as_deref(),
                                 effective_elapsed(run_started, held_total, hold_started),
-                                &status,
                             )?;
                         }
                     } else {
@@ -4788,7 +4781,6 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                         max_sends,
                         active_rule.as_deref(),
                         effective_elapsed(run_started, held_total, hold_started),
-                        "",
                     )?;
                 }
                 if ui_mode == UiMode::Plain {
@@ -4809,7 +4801,6 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                         max_sends,
                         active_rule.as_deref(),
                         effective_elapsed(run_started, held_total, hold_started),
-                        "",
                     )?;
                 }
                 if ui_mode == UiMode::Plain {
@@ -4857,7 +4848,6 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                     max_sends,
                                     active_rule.as_deref(),
                                     effective_elapsed(run_started, held_total, hold_started),
-                                    "",
                                 )?;
                                 logger.log(LogEvent::stopped(&config, "manual", send_count))?;
                                 break;
@@ -5016,7 +5006,6 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                     max_sends,
                     active_rule.as_deref(),
                     effective_elapsed(run_started, held_total, hold_started),
-                    "",
                 )?;
             }
             if open_fleet_manager {
@@ -5222,7 +5211,6 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                     max_sends,
                                     active_rule.as_deref(),
                                     effective_elapsed(run_started, held_total, hold_started),
-                                    "",
                                 )?;
                                 should_exit_loop = true;
                                 break;
@@ -5259,7 +5247,6 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                         max_sends,
                         active_rule.as_deref(),
                         effective_elapsed(run_started, held_total, hold_started),
-                        "",
                     )?;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
@@ -5311,7 +5298,6 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
             max_sends,
             active_rule.as_deref(),
             effective_elapsed(run_started, held_total, hold_started),
-            "",
         )?;
         std::thread::sleep(std::time::Duration::from_secs(3));
     }
@@ -6955,7 +6941,6 @@ impl TuiState {
         self.footer_note = note;
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn update(
         &mut self,
         state: LoopState,
@@ -6964,7 +6949,6 @@ impl TuiState {
         total: u32,
         rule_id: Option<&str>,
         active_elapsed: std::time::Duration,
-        _last_status: &str,
     ) -> Result<()> {
         let elapsed = format_std_duration(active_elapsed);
         let remaining_duration = config
