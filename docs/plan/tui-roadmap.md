@@ -54,6 +54,7 @@ This plan is the source of truth for hardening loopmux TUI reliability and evalu
 3. No hidden behavior toggles: all runtime switches are documented in README/specs before close.
 4. Prefer deterministic tests over ad-hoc manual verification; keep flaky timing assertions out of CI.
 5. New abstractions must pay for themselves with at least one testability or failure-isolation win.
+6. Raw mode ownership must be centralized behind a single guard path; ad-hoc enable/disable calls are transitional only.
 
 ## Definition of done
 
@@ -113,8 +114,16 @@ Status: `` doing
 Subtasks:
 
 - `` E0.T1.S1 Capture current controls and mode matrix (run/fleet/plain/single-line).
-- `` E0.T1.S2 Document terminal lifecycle entry/exit paths and known failure gaps.
+- `` E0.T1.S2 Document terminal lifecycle entry/exit paths and known failure gaps.
 - `` E0.T1.S3 Capture current redraw/update/input coupling map for refactor planning.
+
+Lifecycle baseline notes (E0.T1.S2):
+
+- Entry points: raw mode is enabled in run TUI init (`src/main.rs:6362`) and fleet manager entry (`src/main.rs:2473`).
+- Normal exits: raw mode is disabled by `TuiState::shutdown` (`src/main.rs:6605`) on run-loop completion (`src/main.rs:4952`) and after fleet manager returns (`src/main.rs:2475`).
+- Gap: run loop has many fallible `?` operations after TUI init (example `src/main.rs:3585`, `src/main.rs:3625`, `src/main.rs:4947`) before explicit shutdown (`src/main.rs:4953`), so early errors can skip restoration.
+- Gap: there is no explicit panic restoration hook around TUI lifecycle; panic behavior relies on process teardown and can wedge the terminal in practice.
+- Decision: E1.T1 will implement a centralized RAII terminal guard with panic-safe restoration as mandatory before broader refactors.
 
 Important decisions to remember:
 
