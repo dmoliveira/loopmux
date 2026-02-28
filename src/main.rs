@@ -916,17 +916,19 @@ fn run(args: RunArgs) -> Result<()> {
     let identity = resolve_run_identity(run_name.as_deref());
     let resolved = resolve_config(
         config,
-        None,
-        args.iterations,
-        false,
-        args.tail,
-        args.head,
-        args.once,
-        args.single_line,
-        args.tui,
-        args.no_trigger_edge.then_some(false),
-        args.no_recheck_before_send.then_some(false),
-        None,
+        ResolveConfigArgs {
+            target_override: None,
+            iterations_override: args.iterations,
+            skip_tmux: false,
+            tail_override: args.tail,
+            head_override: args.head,
+            once: args.once,
+            single_line: args.single_line,
+            tui: args.tui,
+            trigger_edge_override: args.no_trigger_edge.then_some(false),
+            recheck_before_send_override: args.no_recheck_before_send.then_some(false),
+            profile_id: None,
+        },
     )?;
 
     if args.dry_run {
@@ -1263,17 +1265,19 @@ fn selected_workspace_profiles(
 fn validate_workspace_profile(profile: &ResolvedRunProfile) -> Result<ResolvedConfig> {
     resolve_config(
         profile.config.clone(),
-        None,
-        None,
-        false,
-        None,
-        None,
-        false,
-        false,
-        false,
-        None,
-        None,
-        Some(profile.id.clone()),
+        ResolveConfigArgs {
+            target_override: None,
+            iterations_override: None,
+            skip_tmux: false,
+            tail_override: None,
+            head_override: None,
+            once: false,
+            single_line: false,
+            tui: false,
+            trigger_edge_override: None,
+            recheck_before_send_override: None,
+            profile_id: Some(profile.id.clone()),
+        },
     )
 }
 
@@ -5897,17 +5901,19 @@ fn validate(args: ValidateArgs) -> Result<()> {
     }
     let resolved = resolve_config(
         config,
-        None,
-        args.iterations,
-        args.skip_tmux,
-        None,
-        None,
-        false,
-        false,
-        false,
-        None,
-        None,
-        None,
+        ResolveConfigArgs {
+            target_override: None,
+            iterations_override: args.iterations,
+            skip_tmux: args.skip_tmux,
+            tail_override: None,
+            head_override: None,
+            once: false,
+            single_line: false,
+            tui: false,
+            trigger_edge_override: None,
+            recheck_before_send_override: None,
+            profile_id: None,
+        },
     )?;
     print_validation(&resolved);
     Ok(())
@@ -8020,8 +8026,7 @@ struct ExecInFlight {
     started_at: std::time::Instant,
 }
 
-fn resolve_config(
-    mut config: Config,
+struct ResolveConfigArgs {
     target_override: Option<Vec<String>>,
     iterations_override: Option<u32>,
     skip_tmux: bool,
@@ -8033,7 +8038,22 @@ fn resolve_config(
     trigger_edge_override: Option<bool>,
     recheck_before_send_override: Option<bool>,
     profile_id: Option<String>,
-) -> Result<ResolvedConfig> {
+}
+
+fn resolve_config(mut config: Config, args: ResolveConfigArgs) -> Result<ResolvedConfig> {
+    let ResolveConfigArgs {
+        target_override,
+        iterations_override,
+        skip_tmux,
+        tail_override,
+        head_override,
+        once,
+        single_line,
+        tui,
+        trigger_edge_override,
+        recheck_before_send_override,
+        profile_id,
+    } = args;
     if let Some(targets) = target_override
         && let Some(first) = targets.first()
     {
@@ -9610,8 +9630,20 @@ runs:
         };
         let config = resolve_run_config(&args).unwrap();
         let resolved = resolve_config(
-            config, None, None, true, args.tail, args.head, args.once, false, false, None, None,
-            None,
+            config,
+            ResolveConfigArgs {
+                target_override: None,
+                iterations_override: None,
+                skip_tmux: true,
+                tail_override: args.tail,
+                head_override: args.head,
+                once: args.once,
+                single_line: false,
+                tui: false,
+                trigger_edge_override: None,
+                recheck_before_send_override: None,
+                profile_id: None,
+            },
         )
         .unwrap();
         assert!(matches!(resolved.capture_window, CaptureWindow::Tail(123)));
@@ -9754,7 +9786,20 @@ runs:
         };
         let config = resolve_run_config(&args).unwrap();
         let resolved = resolve_config(
-            config, None, None, true, args.tail, args.head, false, false, false, None, None, None,
+            config,
+            ResolveConfigArgs {
+                target_override: None,
+                iterations_override: None,
+                skip_tmux: true,
+                tail_override: args.tail,
+                head_override: args.head,
+                once: false,
+                single_line: false,
+                tui: false,
+                trigger_edge_override: None,
+                recheck_before_send_override: None,
+                profile_id: None,
+            },
         )
         .unwrap();
         assert!(matches!(resolved.capture_window, CaptureWindow::Head(7)));
@@ -9797,7 +9842,20 @@ runs:
         };
         let config = resolve_run_config(&args).unwrap();
         let resolved = resolve_config(
-            config, None, None, true, args.tail, args.head, false, false, false, None, None, None,
+            config,
+            ResolveConfigArgs {
+                target_override: None,
+                iterations_override: None,
+                skip_tmux: true,
+                tail_override: args.tail,
+                head_override: args.head,
+                once: false,
+                single_line: false,
+                tui: false,
+                trigger_edge_override: None,
+                recheck_before_send_override: None,
+                profile_id: None,
+            },
         )
         .unwrap();
         assert_eq!(
@@ -9842,17 +9900,19 @@ runs:
         };
         let err = resolve_config(
             config,
-            None,
-            None,
-            true,
-            Some(1),
-            None,
-            false,
-            false,
-            false,
-            None,
-            None,
-            None,
+            ResolveConfigArgs {
+                target_override: None,
+                iterations_override: None,
+                skip_tmux: true,
+                tail_override: Some(1),
+                head_override: None,
+                once: false,
+                single_line: false,
+                tui: false,
+                trigger_edge_override: None,
+                recheck_before_send_override: None,
+                profile_id: None,
+            },
         )
         .unwrap_err();
         assert!(err.to_string().contains("file source not found"));
@@ -9893,17 +9953,19 @@ runs:
 
         let resolved = resolve_config(
             config,
-            None,
-            None,
-            true,
-            None,
-            None,
-            false,
-            false,
-            false,
-            None,
-            None,
-            Some("watcher".to_string()),
+            ResolveConfigArgs {
+                target_override: None,
+                iterations_override: None,
+                skip_tmux: true,
+                tail_override: None,
+                head_override: None,
+                once: false,
+                single_line: false,
+                tui: false,
+                trigger_edge_override: None,
+                recheck_before_send_override: None,
+                profile_id: Some("watcher".to_string()),
+            },
         )
         .unwrap();
 
