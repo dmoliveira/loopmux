@@ -2653,6 +2653,29 @@ fn fleet_phase_label(phase: FleetLoopPhase) -> &'static str {
     }
 }
 
+fn fleet_mark_resize(force_full_redraw: &mut bool, needs_refresh: &mut bool) {
+    *force_full_redraw = true;
+    *needs_refresh = true;
+}
+
+fn fleet_step_selection_left(selected: usize, runs_len: usize) -> usize {
+    if runs_len == 0 {
+        0
+    } else if selected == 0 {
+        runs_len - 1
+    } else {
+        selected - 1
+    }
+}
+
+fn fleet_step_selection_right(selected: usize, runs_len: usize) -> usize {
+    if runs_len == 0 {
+        0
+    } else {
+        (selected + 1) % runs_len
+    }
+}
+
 fn run_fleet_manager_tui_inner(embedded: bool, profile_filter: Option<&str>) -> Result<()> {
     let mut selected: usize = 0;
     let mut selected_run_id: Option<String> = None;
@@ -2851,8 +2874,7 @@ fn run_fleet_manager_tui_inner(embedded: bool, profile_filter: Option<&str>) -> 
                 )
             })? {
                 Event::Resize(_, _) => {
-                    force_full_redraw = true;
-                    needs_refresh = true;
+                    fleet_mark_resize(&mut force_full_redraw, &mut needs_refresh);
                 }
                 Event::Key(KeyEvent { code, .. }) => {
                     if search_mode {
@@ -2900,18 +2922,14 @@ fn run_fleet_manager_tui_inner(embedded: bool, profile_filter: Option<&str>) -> 
                         }
                         KeyCode::Char('<') | KeyCode::Left => {
                             if !runs.is_empty() {
-                                selected = if selected == 0 {
-                                    runs.len() - 1
-                                } else {
-                                    selected - 1
-                                };
+                                selected = fleet_step_selection_left(selected, runs.len());
                                 selected_run_id = Some(runs[selected].record.id.clone());
                             }
                             pending_action = None;
                         }
                         KeyCode::Char('>') | KeyCode::Right => {
                             if !runs.is_empty() {
-                                selected = (selected + 1) % runs.len();
+                                selected = fleet_step_selection_right(selected, runs.len());
                                 selected_run_id = Some(runs[selected].record.id.clone());
                             }
                             pending_action = None;
@@ -10750,6 +10768,43 @@ runs:
     fn fleet_stop_snippet_uses_run_id() {
         let snippet = fleet_stop_snippet("run-123");
         assert_eq!(snippet, "loopmux runs stop run-123");
+    }
+
+    #[test]
+    fn fleet_resize_marks_refresh_flags_idempotently() {
+        let mut force_full_redraw = false;
+        let mut needs_refresh = false;
+
+        for _ in 0..1_000 {
+            fleet_mark_resize(&mut force_full_redraw, &mut needs_refresh);
+        }
+
+        assert!(force_full_redraw);
+        assert!(needs_refresh);
+    }
+
+    #[test]
+    fn fleet_selection_burst_navigation_wraps_without_panic() {
+        let len = 7;
+        let mut selected = 0;
+
+        for _ in 0..10_000 {
+            selected = fleet_step_selection_right(selected, len);
+        }
+        assert_eq!(selected, 10_000 % len);
+
+        for _ in 0..10_000 {
+            selected = fleet_step_selection_left(selected, len);
+        }
+        assert_eq!(selected, 0);
+    }
+
+    #[test]
+    fn fleet_selection_steps_are_safe_for_empty_lists() {
+        assert_eq!(fleet_step_selection_left(0, 0), 0);
+        assert_eq!(fleet_step_selection_right(0, 0), 0);
+        assert_eq!(fleet_step_selection_left(5, 0), 0);
+        assert_eq!(fleet_step_selection_right(5, 0), 0);
     }
 
     #[test]
