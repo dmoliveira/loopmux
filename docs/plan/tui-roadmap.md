@@ -145,13 +145,33 @@ Important decisions to remember:
 
 ### Task E0.T2 - Reliability metrics definition
 
-Status: `` not started
+Status: `` doing
 
 Subtasks:
 
-- `` E0.T2.S1 Define stability SLOs (terminal recovery success, redraw failure tolerance).
-- `` E0.T2.S2 Define perf guardrails (max frame/update budget under nominal load).
-- `` E0.T2.S3 Add lightweight instrumentation plan for local/CI evidence.
+- `` E0.T2.S1 Define stability SLOs (terminal recovery success, redraw failure tolerance).
+- `` E0.T2.S2 Define perf guardrails (max frame/update budget under nominal load).
+- `` E0.T2.S3 Add lightweight instrumentation plan for local/CI evidence.
+
+Reliability SLOs (E0.T2.S1):
+
+- SLO-R1 Terminal recovery: 99.9% successful terminal restoration after `loopmux run --tui` exits (normal stop, expected error, interrupted run) across release validation sessions.
+- SLO-R2 Recovery latency: terminal restoration completes within 250 ms p95 after shutdown path starts.
+- SLO-R3 Render resilience: 0 unhandled render I/O errors; when write/flush fails, transition to explicit fallback/exit path within 1 event loop tick.
+- SLO-R4 Fleet manager stability: no stuck raw-mode sessions after `loopmux runs tui` exit across smoke matrix.
+
+Performance guardrails (E0.T2.S2):
+
+- PERF-P1 Frame budget: render/update path p95 <= 16 ms during nominal run mode (supports smooth 60 Hz ceiling, even if polling is slower).
+- PERF-P2 Tail latency ceiling: render/update path p99 <= 33 ms under nominal load.
+- PERF-P3 Input latency: keypress-to-action dispatch p95 <= 50 ms in run and fleet views.
+- PERF-P4 Sampling isolation: any process usage sampling work must stay out of frame-critical path or be cached with TTL >= 1 s.
+
+Measurement windows and sampling:
+
+- Use 3 terminal profiles: narrow (80x24), standard (120x30), wide (160x45).
+- For each profile, run at least 300 event-loop iterations and capture p50/p95/p99 for frame and input latency.
+- Record failures and percentile summaries in PR notes for lifecycle/render-related changes.
 
 Important decisions to remember:
 
