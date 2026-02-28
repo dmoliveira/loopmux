@@ -10153,6 +10153,65 @@ runs:
     }
 
     #[test]
+    fn render_status_bar_unicode_snapshot_contract() {
+        let mut config = status_bar_test_config();
+        config.infinite = true;
+        let line = render_status_bar(
+            LoopState::Running,
+            LayoutMode::Standard,
+            IconMode::Nerd,
+            StyleConfig {
+                use_color: false,
+                use_bg: false,
+                use_unicode_ellipsis: true,
+                dim_logs: true,
+            },
+            160,
+            &config,
+            2,
+            0,
+            Some("This is a very long trigger string that should truncate"),
+            "00:10",
+            Some("2m10s"),
+            Some("cpu 9.1% mem 22.4mb"),
+        );
+
+        assert!(line.contains("iter ∞"));
+        assert!(line.contains(" · "));
+        assert!(line.contains("…"));
+        assert!(line.contains("cpu 9.1% mem 22.4mb"));
+    }
+
+    #[test]
+    fn render_status_bar_no_color_snapshot_contract() {
+        let config = status_bar_test_config();
+        let line = render_status_bar(
+            LoopState::Holding,
+            LayoutMode::Wide,
+            IconMode::Nerd,
+            StyleConfig {
+                use_color: false,
+                use_bg: false,
+                use_unicode_ellipsis: true,
+                dim_logs: true,
+            },
+            180,
+            &config,
+            3,
+            10,
+            Some("Concluded"),
+            "00:12",
+            Some("45s"),
+            None,
+        );
+
+        assert!(!line.contains("\x1B["));
+        assert!(line.contains("target ai:5.0"));
+        assert!(line.contains("trg Concluded"));
+        assert!(line.contains("last 00:12"));
+    }
+
+    #[test]
     fn render_status_bar_compact() {
         let config = ResolvedConfig {
             profile_id: None,
