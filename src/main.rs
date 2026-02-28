@@ -2595,6 +2595,40 @@ impl Drop for RawModeGuard {
     }
 }
 
+const TUI_RENDER_RETRY_LIMIT: usize = 3;
+const TUI_RENDER_RETRY_DELAY: Duration = Duration::from_millis(15);
+
+fn render_with_retry(
+    context: &str,
+    mut render_step: impl FnMut() -> std::io::Result<()>,
+) -> Result<()> {
+    let mut last_error: Option<std::io::Error> = None;
+    for attempt in 1..=TUI_RENDER_RETRY_LIMIT {
+        match render_step() {
+            Ok(()) => {
+                if attempt > 1 {
+                    eprintln!("loopmux: tui render recovered context={context} attempts={attempt}");
+                }
+                return Ok(());
+            }
+            Err(err) => {
+                eprintln!(
+                    "loopmux: tui render degraded context={context} attempt={attempt}/{TUI_RENDER_RETRY_LIMIT} error={err}"
+                );
+                last_error = Some(err);
+                if attempt < TUI_RENDER_RETRY_LIMIT {
+                    std::thread::sleep(TUI_RENDER_RETRY_DELAY);
+                }
+            }
+        }
+    }
+
+    let err = last_error.unwrap_or_else(|| std::io::Error::other("unknown render failure"));
+    bail!(
+        "tui render fallback=exit context={context} attempts={TUI_RENDER_RETRY_LIMIT} error={err}"
+    );
+}
+
 fn run_fleet_manager_tui(profile_filter: Option<&str>) -> Result<()> {
     let _raw_mode_guard = RawModeGuard::acquire("failed to enable raw mode for fleet manager")?;
     run_fleet_manager_tui_inner(false, profile_filter)
@@ -2760,19 +2794,22 @@ fn run_fleet_manager_tui_inner(embedded: bool, profile_filter: Option<&str>) -> 
         }
 
         if force_full_redraw || screen_lines != last_lines {
-            let mut out = std::io::stdout();
-            if force_full_redraw {
-                let _ = out.queue(MoveTo(0, 0));
-                let _ = out.queue(Clear(ClearType::All));
-            }
-            for (row, line) in screen_lines.iter().enumerate() {
-                if force_full_redraw || last_lines.get(row) != Some(line) {
-                    let _ = out.queue(MoveTo(0, row as u16));
-                    let _ = out.queue(Clear(ClearType::CurrentLine));
-                    let _ = write!(out, "{}", line);
+            render_with_retry("fleet-manager", || {
+                let mut out = std::io::stdout();
+                if force_full_redraw {
+                    out.queue(MoveTo(0, 0))?;
+                    out.queue(Clear(ClearType::All))?;
                 }
-            }
-            let _ = out.flush();
+                for (row, line) in screen_lines.iter().enumerate() {
+                    if force_full_redraw || last_lines.get(row) != Some(line) {
+                        out.queue(MoveTo(0, row as u16))?;
+                        out.queue(Clear(ClearType::CurrentLine))?;
+                        write!(out, "{}", line)?;
+                    }
+                }
+                out.flush()?;
+                Ok(())
+            })?;
             last_lines = screen_lines;
             force_full_redraw = false;
         }
@@ -6604,23 +6641,6 @@ impl TuiState {
                 .collect::<Vec<_>>()
         };
 
-        let mut out = std::io::stdout();
-        let _ = out.queue(MoveTo(0, 0));
-        let _ = out.queue(Clear(ClearType::All));
-        let _ = write!(out, "{bar}");
-
-        for idx in 0..log_height {
-            let raw_line = display_lines.get(idx).cloned().unwrap_or_default();
-            let mut line = fit_line(&raw_line, width as usize, self.style.use_unicode_ellipsis);
-            if self.style.use_color && self.style.dim_logs && !line.is_empty() {
-                let log_prefix = style_prefix(Some(log_line_color(&raw_line)), None, false);
-                line = format!("{log_prefix}{line}\x1B[0m");
-            }
-            let _ = out.queue(MoveTo(0, (idx + 1) as u16));
-            let _ = out.queue(Clear(ClearType::CurrentLine));
-            let _ = write!(out, "{line}");
-        }
-
         let footer_row = self.height.saturating_sub(1);
         let footer_summary = if state == LoopState::Stopped {
             Some(render_footer_summary(config, current, total, &elapsed))
@@ -6643,10 +6663,30 @@ impl TuiState {
             Some(footer_note_owned.as_str()),
             self.overlay_help.as_deref(),
         );
-        let _ = out.queue(MoveTo(0, footer_row));
-        let _ = out.queue(Clear(ClearType::CurrentLine));
-        let _ = write!(out, "{footer}");
-        let _ = out.flush();
+        render_with_retry("run-view", || {
+            let mut out = std::io::stdout();
+            out.queue(MoveTo(0, 0))?;
+            out.queue(Clear(ClearType::All))?;
+            write!(out, "{bar}")?;
+
+            for idx in 0..log_height {
+                let raw_line = display_lines.get(idx).cloned().unwrap_or_default();
+                let mut line = fit_line(&raw_line, width as usize, self.style.use_unicode_ellipsis);
+                if self.style.use_color && self.style.dim_logs && !line.is_empty() {
+                    let log_prefix = style_prefix(Some(log_line_color(&raw_line)), None, false);
+                    line = format!("{log_prefix}{line}\x1B[0m");
+                }
+                out.queue(MoveTo(0, (idx + 1) as u16))?;
+                out.queue(Clear(ClearType::CurrentLine))?;
+                write!(out, "{line}")?;
+            }
+
+            out.queue(MoveTo(0, footer_row))?;
+            out.queue(Clear(ClearType::CurrentLine))?;
+            write!(out, "{footer}")?;
+            out.flush()?;
+            Ok(())
+        })?;
         Ok(())
     }
 
