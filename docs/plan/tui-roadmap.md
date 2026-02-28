@@ -324,30 +324,38 @@ Important decisions to remember:
 
 ## Epic E3 - Test matrix and regression net
 
-Status: `` doing
+Status: `` done
 
 Goal: establish fast confidence loops for TUI changes.
 
 ### Task E3.T1 - Render and layout snapshots
 
-Status: `` doing
+Status: `` done
 
 Subtasks:
 
 - `` E3.T1.S1 Add compact/standard/wide golden snapshots.
 - `` E3.T1.S2 Add unicode/no-color snapshots.
-- `` E3.T1.S3 Add snapshot update guidance and diff policy.
+- `` E3.T1.S3 Add snapshot update guidance and diff policy.
 
 Implementation notes (2026-02-28):
 
 - Added deterministic layout-golden contract tests for compact/standard/wide status bars using ordered token assertions.
 - Added shared test fixtures/helpers (`status_bar_test_config`, `assert_contains_in_order`) to keep snapshot intent explicit and reduce duplication.
 - Added unicode/no-color snapshot contracts covering unicode separators/ellipsis behavior and no-ANSI rendering guarantees.
+- Added snapshot update/diff guidance policy for future golden changes and CI triage.
 
-Closure update (partial, 2026-02-28):
+Snapshot update and diff policy (E3.T1.S3):
+
+- Any snapshot/golden assertion update must include a brief rationale in PR summary (behavioral change, bug fix, intentional copy update, or width policy change).
+- If expected output changes, include before/after token evidence in PR body for compact/standard/wide (and unicode/no-color when impacted).
+- Treat unexpected snapshot drift as regression by default; require explicit maintainer acknowledgment before merge.
+- Prefer updating helper-based golden fixtures only after targeted tests demonstrate the new behavior is intentional.
+
+Closure update (2026-02-28):
 
 - Validation evidence: `cargo fmt --check` and `cargo test -q` (120 passed).
-- Outcome: E3.T1.S1/S2 complete; E3.T1.S3 remains pending.
+- Outcome: E3.T1 complete.
 
 Important decisions to remember:
 
@@ -449,3 +457,4 @@ When any task/subtask changes to `` done, update this file in the same PR:
 - `2026-02-28` `PLAN-017` E3.T2.S3 centralizes UI mode fallback selection with `resolve_ui_mode` and locks non-interactive behavior through contract tests.
 - `2026-02-28` `PLAN-018` E3.T1.S1 introduces compact/standard/wide layout golden contracts with ordered token assertions to stabilize status-bar composition.
 - `2026-02-28` `PLAN-019` E3.T1.S2 adds unicode/no-color snapshot contracts to preserve separator/ellipsis behavior and ANSI-free output guarantees.
+- `2026-02-28` `PLAN-020` E3.T1.S3 defines explicit snapshot-update rationale and diff-evidence policy so golden churn stays intentional.
