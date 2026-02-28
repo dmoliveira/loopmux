@@ -202,17 +202,24 @@ Goal: make current architecture resilient before introducing `ratatui`.
 
 ### Task E1.T1 - Terminal lifecycle guard
 
-Status: `` not started
+Status: `` doing
 
 Subtasks:
 
-- `` E1.T1.S1 Introduce RAII terminal guard for raw mode lifecycle.
-- `` E1.T1.S2 Add panic-safe restoration hook and idempotent shutdown logic.
+- `` E1.T1.S1 Introduce RAII terminal guard for raw mode lifecycle.
+- `` E1.T1.S2 Add panic-safe restoration hook and idempotent shutdown logic.
 - `` E1.T1.S3 Add tests for restoration guarantees on error and panic simulation.
+
+Implementation notes (2026-02-28):
+
+- Added `RawModeGuard` with depth tracking and `Drop` restoration to centralize raw-mode ownership.
+- Installed a panic hook guard path that disables raw mode when panic occurs while TUI guard depth is active.
+- Migrated run/fleet raw-mode activation to the shared guard path; removed ad-hoc fleet enable/disable calls.
 
 Important decisions to remember:
 
 - Guard implementation must not require global mutable state for correctness.
+- Nested/embedded TUI flows must remain safe under one shared guard model (depth-tracked acquisition/release).
 
 ### Task E1.T2 - Render I/O error policy
 
@@ -347,3 +354,4 @@ When any task/subtask changes to `` done, update this file in the same PR:
 - `2026-02-28` `PLAN-004` E0.T1.S3 baseline confirms render/input/update coupling and hot-path process sampling; E2.T2 must phase-separate loop responsibilities.
 - `2026-02-28` `PLAN-005` E0.T2 sets explicit SLOs for terminal recovery, render failure handling, and fleet exit hygiene to measure hardening progress.
 - `2026-02-28` `PLAN-006` E0.T2 chooses in-process lightweight instrumentation (no external telemetry dependency) and PR-level evidence tables for lifecycle/render changes.
+- `2026-02-28` `PLAN-007` E1.T1 adopts depth-tracked RAII raw-mode guard plus panic-hook restoration to prevent terminal wedging on early exits and panic paths.
