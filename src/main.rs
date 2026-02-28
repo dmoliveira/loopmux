@@ -2638,6 +2638,21 @@ fn run_fleet_manager_tui_embedded() -> Result<()> {
     run_fleet_manager_tui_inner(true, None)
 }
 
+#[derive(Clone, Copy)]
+enum FleetLoopPhase {
+    Tick,
+    Render,
+    Input,
+}
+
+fn fleet_phase_label(phase: FleetLoopPhase) -> &'static str {
+    match phase {
+        FleetLoopPhase::Tick => "tick",
+        FleetLoopPhase::Render => "render",
+        FleetLoopPhase::Input => "input",
+    }
+}
+
 fn run_fleet_manager_tui_inner(embedded: bool, profile_filter: Option<&str>) -> Result<()> {
     let mut selected: usize = 0;
     let mut selected_run_id: Option<String> = None;
@@ -2662,8 +2677,14 @@ fn run_fleet_manager_tui_inner(embedded: bool, profile_filter: Option<&str>) -> 
     let mut counts = (0, 0, 0, 0);
 
     loop {
+        let mut phase = FleetLoopPhase::Tick;
         if needs_refresh || last_refresh.elapsed() >= refresh_interval {
-            all_runs = load_fleet_runs()?;
+            all_runs = load_fleet_runs().with_context(|| {
+                format!(
+                    "fleet manager refresh failed in {} phase",
+                    fleet_phase_label(phase)
+                )
+            })?;
             runs = fleet_manager_visible_runs(
                 &all_runs,
                 profile_filter,
@@ -2699,6 +2720,7 @@ fn run_fleet_manager_tui_inner(embedded: bool, profile_filter: Option<&str>) -> 
             }
         }
 
+        phase = FleetLoopPhase::Render;
         let (width, height) = crossterm::terminal::size().unwrap_or((120, 30));
         let header = fleet_header_line(
             runs.len(),
@@ -2794,7 +2816,8 @@ fn run_fleet_manager_tui_inner(embedded: bool, profile_filter: Option<&str>) -> 
         }
 
         if force_full_redraw || screen_lines != last_lines {
-            render_with_retry("fleet-manager", || {
+            let render_context = format!("fleet-manager-{}", fleet_phase_label(phase));
+            render_with_retry(&render_context, || {
                 let mut out = std::io::stdout();
                 if force_full_redraw {
                     out.queue(MoveTo(0, 0))?;
@@ -2814,8 +2837,19 @@ fn run_fleet_manager_tui_inner(embedded: bool, profile_filter: Option<&str>) -> 
             force_full_redraw = false;
         }
 
-        if event::poll(Duration::from_millis(80)).context("fleet manager poll failed")? {
-            match event::read()? {
+        phase = FleetLoopPhase::Input;
+        if event::poll(Duration::from_millis(80)).with_context(|| {
+            format!(
+                "fleet manager poll failed in {} phase",
+                fleet_phase_label(phase)
+            )
+        })? {
+            match event::read().with_context(|| {
+                format!(
+                    "fleet manager read failed in {} phase",
+                    fleet_phase_label(phase)
+                )
+            })? {
                 Event::Resize(_, _) => {
                     force_full_redraw = true;
                     needs_refresh = true;
