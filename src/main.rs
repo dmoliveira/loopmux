@@ -3076,10 +3076,7 @@ fn run_fleet_manager_tui_inner(embedded: bool, profile_filter: Option<&str>) -> 
                                     run_id: run.record.id.clone(),
                                     run_name: run.record.name.clone(),
                                 });
-                                message = format!(
-                                    "confirm stop {}: press Enter, or c to cancel",
-                                    run.record.name
-                                );
+                                message = fleet_single_stop_confirmation(&run.record.name);
                             } else {
                                 message = "no run selected".to_string();
                             }
@@ -3131,7 +3128,7 @@ fn run_fleet_manager_tui_inner(embedded: bool, profile_filter: Option<&str>) -> 
                         }
                         KeyCode::Char('c') => {
                             pending_action = None;
-                            message = "pending action cleared".to_string();
+                            message = fleet_pending_action_cleared_message().to_string();
                         }
                         KeyCode::Char('i') => {
                             pending_action = None;
@@ -3219,6 +3216,22 @@ fn apply_view_preset(
     }
 }
 
+fn fleet_single_stop_confirmation(run_name: &str) -> String {
+    format!("confirm stop {}: press Enter, or c to cancel", run_name)
+}
+
+fn fleet_bulk_confirmation(command: FleetControlCommand, run_count: usize) -> String {
+    format!(
+        "confirm bulk {} for {} run(s): press Enter, or c to cancel",
+        fleet_command_label(command),
+        run_count
+    )
+}
+
+fn fleet_pending_action_cleared_message() -> &'static str {
+    "pending action cleared"
+}
+
 fn arm_bulk_action(
     command: FleetControlCommand,
     selected_ids: &HashSet<String>,
@@ -3240,11 +3253,7 @@ fn arm_bulk_action(
     targets.sort_by(|a, b| a.record.name.cmp(&b.record.name));
     let run_ids = targets.iter().map(|run| run.record.id.clone()).collect();
     let run_names: Vec<String> = targets.iter().map(|run| run.record.name.clone()).collect();
-    *message = format!(
-        "confirm bulk {} for {} run(s): press Enter, or c to cancel",
-        fleet_command_label(command),
-        run_names.len()
-    );
+    *message = fleet_bulk_confirmation(command, run_names.len());
     Some(PendingFleetAction::Bulk {
         command,
         run_ids,
@@ -10959,6 +10968,85 @@ runs:
             fleet_control_key(&KeyCode::Esc),
             Some(FleetControlKey::Quit)
         );
+    }
+
+    #[test]
+    fn fleet_confirmation_message_contracts_are_stable() {
+        assert_eq!(
+            fleet_single_stop_confirmation("planner-a"),
+            "confirm stop planner-a: press Enter, or c to cancel"
+        );
+        assert_eq!(
+            fleet_bulk_confirmation(FleetControlCommand::Hold, 3),
+            "confirm bulk hold for 3 run(s): press Enter, or c to cancel"
+        );
+        assert_eq!(
+            fleet_pending_action_cleared_message(),
+            "pending action cleared"
+        );
+    }
+
+    #[test]
+    fn arm_bulk_action_contract_uses_marked_runs_and_sorted_names() {
+        let runs = vec![
+            fleet_listed(
+                fleet_test_record("run-2", "zeta", "holding", 1, LOOPMUX_VERSION),
+                false,
+                false,
+            ),
+            fleet_listed(
+                fleet_test_record("run-1", "alpha", "waiting", 2, LOOPMUX_VERSION),
+                false,
+                false,
+            ),
+        ];
+        let selected_ids =
+            std::collections::HashSet::from(["run-2".to_string(), "run-1".to_string()]);
+        let mut message = String::new();
+
+        let pending = arm_bulk_action(
+            FleetControlCommand::Stop,
+            &selected_ids,
+            &runs,
+            0,
+            &mut message,
+        );
+
+        assert_eq!(
+            message,
+            "confirm bulk stop for 2 run(s): press Enter, or c to cancel"
+        );
+        let pending = pending.expect("pending bulk action expected");
+        match pending {
+            PendingFleetAction::Bulk {
+                command,
+                run_ids,
+                run_names,
+            } => {
+                assert!(matches!(command, FleetControlCommand::Stop));
+                assert_eq!(run_names, vec!["alpha".to_string(), "zeta".to_string()]);
+                assert_eq!(run_ids, vec!["run-1".to_string(), "run-2".to_string()]);
+            }
+            _ => panic!("expected bulk pending action"),
+        }
+    }
+
+    #[test]
+    fn arm_bulk_action_contract_requires_selected_target() {
+        let runs = Vec::<FleetListedRun>::new();
+        let selected_ids = std::collections::HashSet::new();
+        let mut message = String::new();
+
+        let pending = arm_bulk_action(
+            FleetControlCommand::Renew,
+            &selected_ids,
+            &runs,
+            0,
+            &mut message,
+        );
+
+        assert!(pending.is_none());
+        assert_eq!(message, "no runs selected for bulk action");
     }
 
     #[test]
