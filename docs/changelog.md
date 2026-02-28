@@ -26,3 +26,8 @@
 - `cargo fmt --check`
 - `cargo test -q` (124 passed)
 - `cargo clippy -- -D warnings`
+
+### Post-Release Smoke
+- Real tmux smoke passed on a temporary target (`loopmux-smoke:1.0`) with one successful send and clean stop.
+- Command used: `cargo run -- run -t loopmux-smoke:1.0 -n 1 --prompt "echo LOOPMUX_SMOKE_SENT" --trigger ".*" --once --no-trigger-edge --trigger-confirm-seconds 0`.
+- Pane evidence captured: `LOOPMUX_SMOKE_SENT`.
