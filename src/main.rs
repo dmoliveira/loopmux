@@ -2553,11 +2553,11 @@ struct RawModeGuard {
 impl RawModeGuard {
     fn acquire(context: &str) -> Result<Self> {
         install_raw_mode_panic_hook();
-        if RAW_MODE_DEPTH.fetch_add(1, Ordering::SeqCst) == 0 {
-            if let Err(err) = enable_raw_mode_guarded() {
-                RAW_MODE_DEPTH.fetch_sub(1, Ordering::SeqCst);
-                return Err(err).context(context.to_string());
-            }
+        if RAW_MODE_DEPTH.fetch_add(1, Ordering::SeqCst) == 0
+            && let Err(err) = enable_raw_mode_guarded()
+        {
+            RAW_MODE_DEPTH.fetch_sub(1, Ordering::SeqCst);
+            return Err(err).context(context.to_string());
         }
         Ok(Self { active: true })
     }
