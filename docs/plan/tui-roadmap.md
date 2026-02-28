@@ -284,7 +284,7 @@ Status: `` doing
 
 Subtasks:
 
-- `` E2.T2.S1 Introduce explicit tick/input/render phases.
+- `` E2.T2.S1 Introduce explicit tick/input/render phases.
 - `` E2.T2.S2 Decouple expensive sampling from frame rendering.
 - `` E2.T2.S3 Stress test resize and burst-input behavior.
 
@@ -293,16 +293,18 @@ Implementation notes (2026-02-28):
 - Moved process usage sampling out of render hot path by splitting refresh from render consumption in `TuiState`.
 - Added explicit per-loop refresh step in `run_loop` before render updates, preserving cached summary display semantics.
 - Rendering now consumes cached usage summary only; no direct `ps` command execution in `TuiState::update`.
+- Introduced explicit fleet manager loop phases (`tick`, `render`, `input`) with phase-scoped error contexts to make control flow deterministic and debuggable.
 
 Closure update (partial, 2026-02-28):
 
 - Validation evidence: `cargo fmt --check` and `cargo test -q` (100 passed).
-- Outcome: E2.T2.S2 is complete; E2.T2.S1/S3 remain pending.
+- Outcome: E2.T2.S1/S2 are complete; E2.T2.S3 remains pending.
 
 Important decisions to remember:
 
 - Rendering must be side-effect minimal; no slow external process calls in hot path.
 - Sampling refresh is best-effort and must not block render/update path on command failure.
+- Phase boundaries should be explicit in loop code so diagnostics can attribute failures to tick, render, or input.
 
 ## Epic E3 - Test matrix and regression net
 
@@ -393,3 +395,4 @@ When any task/subtask changes to `` done, update this file in the same PR:
 - `2026-02-28` `PLAN-008` E1.T1.S3 validates guard lifecycle semantics via test-only raw-mode shims and panic regression coverage, including underflow prevention.
 - `2026-02-28` `PLAN-009` E1.T2 replaces ignored render I/O with bounded retries and explicit controlled-exit fallback plus degradation/recovery events.
 - `2026-02-28` `PLAN-010` E2.T2.S2 decouples process usage sampling from render by introducing explicit refresh ticks and cached consumption during draw.
+- `2026-02-28` `PLAN-011` E2.T2.S1 introduces explicit fleet loop phases and phase-aware error contexts to improve determinism and triage.
