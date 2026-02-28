@@ -2911,28 +2911,37 @@ fn run_fleet_manager_tui_inner(embedded: bool, profile_filter: Option<&str>) -> 
                         continue;
                     }
 
+                    if let Some(control_key) = fleet_control_key(&code) {
+                        match control_key {
+                            FleetControlKey::Quit => break,
+                            FleetControlKey::MoveLeft => {
+                                if !runs.is_empty() {
+                                    selected = fleet_step_selection_left(selected, runs.len());
+                                    selected_run_id = Some(runs[selected].record.id.clone());
+                                }
+                                pending_action = None;
+                                needs_refresh = true;
+                                continue;
+                            }
+                            FleetControlKey::MoveRight => {
+                                if !runs.is_empty() {
+                                    selected = fleet_step_selection_right(selected, runs.len());
+                                    selected_run_id = Some(runs[selected].record.id.clone());
+                                }
+                                pending_action = None;
+                                needs_refresh = true;
+                                continue;
+                            }
+                        }
+                    }
+
                     match code {
-                        KeyCode::Esc | KeyCode::Char('q') => break,
                         KeyCode::Enter => {
                             if let Some(action) = pending_action.take() {
                                 message = apply_pending_fleet_action(&action);
                             } else {
                                 message = apply_selected_fleet_jump(&runs, selected);
                             }
-                        }
-                        KeyCode::Char('<') | KeyCode::Left => {
-                            if !runs.is_empty() {
-                                selected = fleet_step_selection_left(selected, runs.len());
-                                selected_run_id = Some(runs[selected].record.id.clone());
-                            }
-                            pending_action = None;
-                        }
-                        KeyCode::Char('>') | KeyCode::Right => {
-                            if !runs.is_empty() {
-                                selected = fleet_step_selection_right(selected, runs.len());
-                                selected_run_id = Some(runs[selected].record.id.clone());
-                            }
-                            pending_action = None;
                         }
                         KeyCode::Char(' ') => {
                             if let Some(run) = runs.get(selected) {
@@ -6179,6 +6188,76 @@ enum TuiAction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FleetControlKey {
+    Quit,
+    MoveLeft,
+    MoveRight,
+}
+
+fn fleet_control_key(code: &KeyCode) -> Option<FleetControlKey> {
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => Some(FleetControlKey::Quit),
+        KeyCode::Char('<') | KeyCode::Left => Some(FleetControlKey::MoveLeft),
+        KeyCode::Char('>') | KeyCode::Right => Some(FleetControlKey::MoveRight),
+        _ => None,
+    }
+}
+
+fn map_run_tui_key_action(
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    prompt_editor_open: bool,
+    prompt_confirm_open: bool,
+) -> Option<TuiAction> {
+    if modifiers.contains(KeyModifiers::CONTROL) && matches!(code, KeyCode::Char('c')) {
+        return Some(TuiAction::Stop);
+    }
+    if prompt_editor_open {
+        return match code {
+            KeyCode::Char('e') => Some(TuiAction::PromptEditorToggle),
+            KeyCode::Up => Some(TuiAction::ActiveListUp),
+            KeyCode::Down => Some(TuiAction::ActiveListDown),
+            KeyCode::Enter => Some(TuiAction::ActiveListToggleSelection),
+            KeyCode::Char(' ') => Some(TuiAction::ActiveListToggleSelection),
+            KeyCode::Char('d') => Some(TuiAction::PromptEditorDeleteSelected),
+            KeyCode::Char('c') => Some(TuiAction::PromptEditorClearHistory),
+            KeyCode::Char('u') => Some(TuiAction::PromptEditorUndo),
+            KeyCode::Char('y') if prompt_confirm_open => Some(TuiAction::PromptEditorConfirmYes),
+            KeyCode::Char('n') | KeyCode::Char('N') if prompt_confirm_open => {
+                Some(TuiAction::PromptEditorConfirmNo)
+            }
+            KeyCode::Backspace => Some(TuiAction::PromptEditorBackspace),
+            KeyCode::Esc => Some(TuiAction::ActiveListClose),
+            KeyCode::Char(ch) if !ch.is_control() => Some(TuiAction::PromptEditorInput(ch)),
+            _ => None,
+        };
+    }
+    match code {
+        KeyCode::Char('p') => Some(TuiAction::Pause),
+        KeyCode::Char('r') => Some(TuiAction::Resume),
+        KeyCode::Char('h') => Some(TuiAction::HoldToggle),
+        KeyCode::Char('f') => Some(TuiAction::Fleet),
+        KeyCode::Char('e') => Some(TuiAction::PromptEditorToggle),
+        KeyCode::Char('l') => Some(TuiAction::ActiveListToggle),
+        KeyCode::Up => Some(TuiAction::ActiveListUp),
+        KeyCode::Down => Some(TuiAction::ActiveListDown),
+        KeyCode::Left => Some(TuiAction::ActiveListLeft),
+        KeyCode::Right => Some(TuiAction::ActiveListRight),
+        KeyCode::Enter => Some(TuiAction::ActiveListToggleSelection),
+        KeyCode::Char(' ') => Some(TuiAction::ActiveListToggleSelection),
+        KeyCode::Char('a') => Some(TuiAction::ActiveListEnableAll),
+        KeyCode::Char('d') => Some(TuiAction::ActiveListDisableAll),
+        KeyCode::Char('g') => Some(TuiAction::ToggleLogView),
+        KeyCode::Esc => Some(TuiAction::ActiveListClose),
+        KeyCode::Char('R') => Some(TuiAction::Renew),
+        KeyCode::Char('s') => Some(TuiAction::Stop),
+        KeyCode::Char('n') => Some(TuiAction::Next),
+        KeyCode::Char('q') => Some(TuiAction::Quit),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LogViewMode {
     Chronological,
     GroupedByPane,
@@ -6840,58 +6919,7 @@ impl TuiState {
                 Event::Key(KeyEvent {
                     code, modifiers, ..
                 }) => {
-                    if modifiers.contains(KeyModifiers::CONTROL)
-                        && matches!(code, KeyCode::Char('c'))
-                    {
-                        Some(TuiAction::Stop)
-                    } else if prompt_editor_open {
-                        match code {
-                            KeyCode::Char('e') => Some(TuiAction::PromptEditorToggle),
-                            KeyCode::Up => Some(TuiAction::ActiveListUp),
-                            KeyCode::Down => Some(TuiAction::ActiveListDown),
-                            KeyCode::Enter => Some(TuiAction::ActiveListToggleSelection),
-                            KeyCode::Char(' ') => Some(TuiAction::ActiveListToggleSelection),
-                            KeyCode::Char('d') => Some(TuiAction::PromptEditorDeleteSelected),
-                            KeyCode::Char('c') => Some(TuiAction::PromptEditorClearHistory),
-                            KeyCode::Char('u') => Some(TuiAction::PromptEditorUndo),
-                            KeyCode::Char('y') if prompt_confirm_open => {
-                                Some(TuiAction::PromptEditorConfirmYes)
-                            }
-                            KeyCode::Char('n') | KeyCode::Char('N') if prompt_confirm_open => {
-                                Some(TuiAction::PromptEditorConfirmNo)
-                            }
-                            KeyCode::Backspace => Some(TuiAction::PromptEditorBackspace),
-                            KeyCode::Esc => Some(TuiAction::ActiveListClose),
-                            KeyCode::Char(ch) if !ch.is_control() => {
-                                Some(TuiAction::PromptEditorInput(ch))
-                            }
-                            _ => None,
-                        }
-                    } else {
-                        match code {
-                            KeyCode::Char('p') => Some(TuiAction::Pause),
-                            KeyCode::Char('r') => Some(TuiAction::Resume),
-                            KeyCode::Char('h') => Some(TuiAction::HoldToggle),
-                            KeyCode::Char('f') => Some(TuiAction::Fleet),
-                            KeyCode::Char('e') => Some(TuiAction::PromptEditorToggle),
-                            KeyCode::Char('l') => Some(TuiAction::ActiveListToggle),
-                            KeyCode::Up => Some(TuiAction::ActiveListUp),
-                            KeyCode::Down => Some(TuiAction::ActiveListDown),
-                            KeyCode::Left => Some(TuiAction::ActiveListLeft),
-                            KeyCode::Right => Some(TuiAction::ActiveListRight),
-                            KeyCode::Enter => Some(TuiAction::ActiveListToggleSelection),
-                            KeyCode::Char(' ') => Some(TuiAction::ActiveListToggleSelection),
-                            KeyCode::Char('a') => Some(TuiAction::ActiveListEnableAll),
-                            KeyCode::Char('d') => Some(TuiAction::ActiveListDisableAll),
-                            KeyCode::Char('g') => Some(TuiAction::ToggleLogView),
-                            KeyCode::Esc => Some(TuiAction::ActiveListClose),
-                            KeyCode::Char('R') => Some(TuiAction::Renew),
-                            KeyCode::Char('s') => Some(TuiAction::Stop),
-                            KeyCode::Char('n') => Some(TuiAction::Next),
-                            KeyCode::Char('q') => Some(TuiAction::Quit),
-                            _ => None,
-                        }
-                    }
+                    map_run_tui_key_action(code, modifiers, prompt_editor_open, prompt_confirm_open)
                 }
                 _ => None,
             });
@@ -10863,6 +10891,74 @@ runs:
         assert_eq!(fleet_step_selection_right(0, 0), 0);
         assert_eq!(fleet_step_selection_left(5, 0), 0);
         assert_eq!(fleet_step_selection_right(5, 0), 0);
+    }
+
+    #[test]
+    fn run_keymap_contract_includes_legacy_hotkeys() {
+        assert_eq!(
+            map_run_tui_key_action(KeyCode::Char('h'), KeyModifiers::NONE, false, false),
+            Some(TuiAction::HoldToggle)
+        );
+        assert_eq!(
+            map_run_tui_key_action(KeyCode::Char('p'), KeyModifiers::NONE, false, false),
+            Some(TuiAction::Pause)
+        );
+        assert_eq!(
+            map_run_tui_key_action(KeyCode::Char('r'), KeyModifiers::NONE, false, false),
+            Some(TuiAction::Resume)
+        );
+        assert_eq!(
+            map_run_tui_key_action(KeyCode::Char('s'), KeyModifiers::NONE, false, false),
+            Some(TuiAction::Stop)
+        );
+        assert_eq!(
+            map_run_tui_key_action(KeyCode::Char('q'), KeyModifiers::NONE, false, false),
+            Some(TuiAction::Quit)
+        );
+    }
+
+    #[test]
+    fn run_keymap_contract_keeps_prompt_editor_confirmation_keys() {
+        assert_eq!(
+            map_run_tui_key_action(KeyCode::Char('y'), KeyModifiers::NONE, true, true),
+            Some(TuiAction::PromptEditorConfirmYes)
+        );
+        assert_eq!(
+            map_run_tui_key_action(KeyCode::Char('N'), KeyModifiers::NONE, true, true),
+            Some(TuiAction::PromptEditorConfirmNo)
+        );
+        assert_eq!(
+            map_run_tui_key_action(KeyCode::Char('c'), KeyModifiers::NONE, true, false),
+            Some(TuiAction::PromptEditorClearHistory)
+        );
+    }
+
+    #[test]
+    fn fleet_keymap_contract_keeps_navigation_aliases() {
+        assert_eq!(
+            fleet_control_key(&KeyCode::Left),
+            Some(FleetControlKey::MoveLeft)
+        );
+        assert_eq!(
+            fleet_control_key(&KeyCode::Char('<')),
+            Some(FleetControlKey::MoveLeft)
+        );
+        assert_eq!(
+            fleet_control_key(&KeyCode::Right),
+            Some(FleetControlKey::MoveRight)
+        );
+        assert_eq!(
+            fleet_control_key(&KeyCode::Char('>')),
+            Some(FleetControlKey::MoveRight)
+        );
+        assert_eq!(
+            fleet_control_key(&KeyCode::Char('q')),
+            Some(FleetControlKey::Quit)
+        );
+        assert_eq!(
+            fleet_control_key(&KeyCode::Esc),
+            Some(FleetControlKey::Quit)
+        );
     }
 
     #[test]
