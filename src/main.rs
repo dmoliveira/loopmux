@@ -3818,14 +3818,11 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
     );
     let mut logger = Logger::new(config.logging.clone())?;
     let mut fleet_registry = FleetRunRegistry::new(identity.clone(), config.profile_id.clone())?;
-    let tui_enabled = config.tui && std::io::stdout().is_terminal();
-    let ui_mode = if tui_enabled {
-        UiMode::Tui
-    } else if config.single_line {
-        UiMode::SingleLine
-    } else {
-        UiMode::Plain
-    };
+    let ui_mode = resolve_ui_mode(
+        config.tui,
+        config.single_line,
+        std::io::stdout().is_terminal(),
+    );
     let log_icon_mode = detect_icon_mode();
     let log_use_unicode = supports_unicode();
     let mut loop_state = LoopState::Running;
@@ -6131,6 +6128,20 @@ enum UiMode {
     Plain,
     SingleLine,
     Tui,
+}
+
+fn resolve_ui_mode(
+    tui_requested: bool,
+    single_line_requested: bool,
+    stdout_is_terminal: bool,
+) -> UiMode {
+    if tui_requested && stdout_is_terminal {
+        UiMode::Tui
+    } else if single_line_requested {
+        UiMode::SingleLine
+    } else {
+        UiMode::Plain
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10940,6 +10951,25 @@ runs:
             map_run_tui_key_action(KeyCode::Char('c'), KeyModifiers::NONE, true, false),
             Some(TuiAction::PromptEditorClearHistory)
         );
+    }
+
+    #[test]
+    fn resolve_ui_mode_prefers_tui_on_interactive_terminal() {
+        assert_eq!(resolve_ui_mode(true, false, true), UiMode::Tui);
+        assert_eq!(resolve_ui_mode(true, true, true), UiMode::Tui);
+    }
+
+    #[test]
+    fn resolve_ui_mode_falls_back_when_not_interactive() {
+        assert_eq!(resolve_ui_mode(true, false, false), UiMode::Plain);
+        assert_eq!(resolve_ui_mode(true, true, false), UiMode::SingleLine);
+    }
+
+    #[test]
+    fn resolve_ui_mode_respects_single_line_without_tui() {
+        assert_eq!(resolve_ui_mode(false, true, false), UiMode::SingleLine);
+        assert_eq!(resolve_ui_mode(false, true, true), UiMode::SingleLine);
+        assert_eq!(resolve_ui_mode(false, false, false), UiMode::Plain);
     }
 
     #[test]
