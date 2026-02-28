@@ -4,7 +4,7 @@ REPO ?=
 TAP_REPO ?=
 NO_BREW ?=0
 
-.PHONY: help release
+.PHONY: help release smoke-post-release
 
 help: ## Show available targets
 	@printf "$(PROJECT) release tooling\n\n"
@@ -19,3 +19,6 @@ release: ## Run full release flow (VERSION=x.y.z)
 	if [ -n "$(TAP_REPO)" ]; then args="$$args --tap-repo $(TAP_REPO)"; fi; \
 	if [ "$(NO_BREW)" = "1" ]; then args="$$args --no-brew"; fi; \
 	./release/ship.sh "$(VERSION)" $$args
+
+smoke-post-release: ## Run tmux post-release smoke helper
+	@./scripts/tmux-post-release-smoke.sh
