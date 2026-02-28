@@ -3724,6 +3724,9 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
         fleet_registry.update(&config.target_label, loop_state, send_count, config.poll)?;
         let mut force_rescan = false;
         let active_elapsed = effective_elapsed(run_started, held_total, hold_started);
+        if let Some(tui_state) = tui.as_mut() {
+            tui_state.refresh_process_usage_summary();
+        }
         if let Some(limit) = config.duration {
             if active_elapsed >= limit {
                 if ui_mode == UiMode::Tui {
@@ -6548,13 +6551,19 @@ impl TuiState {
     }
 
     fn process_usage_summary(&mut self) -> Option<String> {
-        if let Some(sample) = self.usage_sample.as_ref() {
-            if sample.captured_at.elapsed() < Duration::from_secs(1) {
-                return Some(sample.summary.clone());
-            }
+        self.usage_sample
+            .as_ref()
+            .map(|sample| sample.summary.clone())
+    }
+
+    fn refresh_process_usage_summary(&mut self) {
+        if let Some(sample) = self.usage_sample.as_ref()
+            && sample.captured_at.elapsed() < Duration::from_secs(1)
+        {
+            return;
         }
 
-        let output = std::process::Command::new("ps")
+        let output = match std::process::Command::new("ps")
             .args([
                 "-o",
                 "%cpu=",
@@ -6564,17 +6573,29 @@ impl TuiState {
                 &std::process::id().to_string(),
             ])
             .output()
-            .ok()?;
+        {
+            Ok(output) => output,
+            Err(_) => {
+                self.usage_sample = None;
+                return;
+            }
+        };
         if !output.status.success() {
-            return None;
+            self.usage_sample = None;
+            return;
         }
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let summary = parse_process_usage_summary(&stdout)?;
+        let summary = match parse_process_usage_summary(&stdout) {
+            Some(summary) => summary,
+            None => {
+                self.usage_sample = None;
+                return;
+            }
+        };
         self.usage_sample = Some(ProcessUsageSample {
             captured_at: Instant::now(),
-            summary: summary.clone(),
+            summary,
         });
-        Some(summary)
     }
 
     fn set_overlay_lines(&mut self, lines: Option<Vec<String>>) {
