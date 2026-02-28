@@ -42,7 +42,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Run a loop against a tmux target scope.
-    Run(RunArgs),
+    Run(Box<RunArgs>),
     /// Validate configuration without sending anything.
     Validate(ValidateArgs),
     /// Print a starter YAML config to stdout.
@@ -862,7 +862,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Command::Run(args)) => run(args),
+        Some(Command::Run(args)) => run(*args),
         Some(Command::Validate(args)) => validate(args),
         Some(Command::Init(args)) => init(args),
         Some(Command::Simulate(args)) => simulate(args),
