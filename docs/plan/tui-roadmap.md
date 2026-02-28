@@ -432,7 +432,7 @@ Status: `` doing
 Subtasks:
 
 - `` E4.T2.S1 Introduce adapter interface for draw backend.
-- `` E4.T2.S2 Port status/header/footer first with parity checks.
+- `` E4.T2.S2 Port status/header/footer first with parity checks.
 - `` E4.T2.S3 Port list/detail panes and remove dual-path debt.
 
 Implementation notes (2026-02-28):
@@ -440,16 +440,18 @@ Implementation notes (2026-02-28):
 - Added `StatusBarRenderer` adapter interface and `StatusBarRenderArgs` to isolate status-bar draw backend boundary.
 - Added legacy implementation `LegacyStatusBarRenderer` and wired `TuiState` to use adapter rendering with no behavior change.
 - Added parity regression test to assert adapter-rendered output equals direct legacy render output.
+- Added `FooterRenderer` adapter boundary and legacy implementation with parity regression test for footer output.
 
 Closure update (partial, 2026-02-28):
 
-- Validation evidence: `cargo fmt --check` and `cargo test -q` (121 passed).
-- Outcome: E4.T2.S1 complete; E4.T2.S2/S3 remain pending.
+- Validation evidence: `cargo fmt --check` and `cargo test -q` (122 passed).
+- Outcome: E4.T2.S1/S2 complete; E4.T2.S3 remains pending.
 
 Important decisions to remember:
 
 - Keep dual backend window short and time-boxed to avoid long-lived complexity.
 - Adapter seams must ship with parity assertions to prove no behavior change before backend swaps.
+- Port status/header/footer via adapters before list/detail panes so migration risk stays bounded.
 
 ## Task closure protocol
 
@@ -484,3 +486,4 @@ When any task/subtask changes to `` done, update this file in the same PR:
 - `2026-02-28` `PLAN-020` E3.T1.S3 defines explicit snapshot-update rationale and diff-evidence policy so golden churn stays intentional.
 - `2026-02-28` `PLAN-021` E4.T1 defines ratatui feasibility, compatibility/rollback strategy, and migration entry/stop criteria in a dedicated RFC.
 - `2026-02-28` `PLAN-022` E4.T2.S1 introduces a legacy-backed status-bar adapter boundary with explicit parity tests prior to backend migration.
+- `2026-02-28` `PLAN-023` E4.T2.S2 extends adapter migration to footer rendering with parity checks, completing status/header/footer adapterization.

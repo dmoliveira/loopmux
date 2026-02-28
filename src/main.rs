@@ -6723,6 +6723,7 @@ struct TuiState {
     overlay_help: Option<String>,
     footer_note: Option<String>,
     status_bar_renderer: Box<dyn StatusBarRenderer>,
+    footer_renderer: Box<dyn FooterRenderer>,
     process_usage_provider: Box<dyn ProcessUsageProvider>,
     usage_sample: Option<ProcessUsageSample>,
     log_view: LogViewMode,
@@ -6756,7 +6757,20 @@ trait StatusBarRenderer {
     fn render(&self, args: StatusBarRenderArgs<'_>) -> String;
 }
 
+struct FooterRenderArgs<'a> {
+    style: StyleConfig,
+    width: u16,
+    summary: Option<&'a str>,
+    note: Option<&'a str>,
+    overlay_help: Option<&'a str>,
+}
+
+trait FooterRenderer {
+    fn render(&self, args: FooterRenderArgs<'_>) -> String;
+}
+
 struct LegacyStatusBarRenderer;
+struct LegacyFooterRenderer;
 
 impl StatusBarRenderer for LegacyStatusBarRenderer {
     fn render(&self, args: StatusBarRenderArgs<'_>) -> String {
@@ -6773,6 +6787,18 @@ impl StatusBarRenderer for LegacyStatusBarRenderer {
             args.elapsed,
             args.remaining_duration,
             args.process_usage,
+        )
+    }
+}
+
+impl FooterRenderer for LegacyFooterRenderer {
+    fn render(&self, args: FooterRenderArgs<'_>) -> String {
+        render_footer(
+            args.style,
+            args.width,
+            args.summary,
+            args.note,
+            args.overlay_help,
         )
     }
 }
@@ -6810,6 +6836,7 @@ impl TuiState {
             overlay_help: None,
             footer_note: None,
             status_bar_renderer: Box::new(LegacyStatusBarRenderer),
+            footer_renderer: Box::new(LegacyFooterRenderer),
             process_usage_provider: Box::new(SystemProcessUsageProvider),
             usage_sample: None,
             log_view: LogViewMode::Chronological,
@@ -6928,13 +6955,13 @@ impl TuiState {
         } else {
             view_note.to_string()
         };
-        let footer = render_footer(
-            self.style,
+        let footer = self.footer_renderer.render(FooterRenderArgs {
+            style: self.style,
             width,
-            footer_summary.as_deref(),
-            Some(footer_note_owned.as_str()),
-            self.overlay_help.as_deref(),
-        );
+            summary: footer_summary.as_deref(),
+            note: Some(footer_note_owned.as_str()),
+            overlay_help: self.overlay_help.as_deref(),
+        });
         render_with_retry("run-view", || {
             let mut out = std::io::stdout();
             out.queue(MoveTo(0, 0))?;
@@ -10100,6 +10127,31 @@ runs:
             args.process_usage,
         );
         let via_adapter = LegacyStatusBarRenderer.render(args);
+        assert_eq!(via_adapter, direct);
+    }
+
+    #[test]
+    fn legacy_footer_renderer_matches_direct_render() {
+        let args = FooterRenderArgs {
+            style: StyleConfig {
+                use_color: false,
+                use_bg: false,
+                use_unicode_ellipsis: true,
+                dim_logs: true,
+            },
+            width: 120,
+            summary: Some("iter 5/10"),
+            note: Some("view chrono"),
+            overlay_help: None,
+        };
+        let direct = render_footer(
+            args.style,
+            args.width,
+            args.summary,
+            args.note,
+            args.overlay_help,
+        );
+        let via_adapter = LegacyFooterRenderer.render(args);
         assert_eq!(via_adapter, direct);
     }
 
