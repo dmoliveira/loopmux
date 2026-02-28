@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Once;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -2469,11 +2471,61 @@ fn summarize_exec_stream(bytes: &[u8], use_unicode: bool) -> String {
     truncate_text(first, 120, use_unicode)
 }
 
+static RAW_MODE_DEPTH: AtomicUsize = AtomicUsize::new(0);
+static RAW_MODE_HOOK_INIT: Once = Once::new();
+
+fn install_raw_mode_panic_hook() {
+    RAW_MODE_HOOK_INIT.call_once(|| {
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |panic_info| {
+            if RAW_MODE_DEPTH.load(Ordering::SeqCst) > 0 {
+                let _ = disable_raw_mode();
+                RAW_MODE_DEPTH.store(0, Ordering::SeqCst);
+            }
+            previous_hook(panic_info);
+        }));
+    });
+}
+
+struct RawModeGuard {
+    active: bool,
+}
+
+impl RawModeGuard {
+    fn acquire(context: &str) -> Result<Self> {
+        install_raw_mode_panic_hook();
+        if RAW_MODE_DEPTH.fetch_add(1, Ordering::SeqCst) == 0 {
+            if let Err(err) = enable_raw_mode() {
+                RAW_MODE_DEPTH.fetch_sub(1, Ordering::SeqCst);
+                return Err(err).context(context.to_string());
+            }
+        }
+        Ok(Self { active: true })
+    }
+
+    fn release(&mut self) -> Result<()> {
+        if !self.active {
+            return Ok(());
+        }
+        self.active = false;
+        let previous = RAW_MODE_DEPTH.fetch_sub(1, Ordering::SeqCst);
+        if previous <= 1 {
+            RAW_MODE_DEPTH.store(0, Ordering::SeqCst);
+            disable_raw_mode().context("failed to disable raw mode")?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = self.release();
+    }
+}
+
 fn run_fleet_manager_tui(profile_filter: Option<&str>) -> Result<()> {
-    enable_raw_mode().context("failed to enable raw mode for fleet manager")?;
-    let result = run_fleet_manager_tui_inner(false, profile_filter);
-    let _ = disable_raw_mode();
-    result
+    let _raw_mode_guard = RawModeGuard::acquire("failed to enable raw mode for fleet manager")?;
+    run_fleet_manager_tui_inner(false, profile_filter)
 }
 
 fn run_fleet_manager_tui_embedded() -> Result<()> {
@@ -6339,6 +6391,7 @@ impl InjectionFilterState {
 }
 
 struct TuiState {
+    raw_mode_guard: RawModeGuard,
     width: u16,
     height: u16,
     icon_mode: IconMode,
@@ -6359,10 +6412,11 @@ struct ProcessUsageSample {
 
 impl TuiState {
     fn new(_config: &ResolvedConfig) -> Result<Self> {
-        enable_raw_mode().context("failed to enable raw mode")?;
+        let raw_mode_guard = RawModeGuard::acquire("failed to enable raw mode")?;
         let (width, height) = crossterm::terminal::size().unwrap_or((80, 24));
         let style = detect_style();
         Ok(Self {
+            raw_mode_guard,
             width,
             height,
             icon_mode: detect_icon_mode(),
@@ -6603,7 +6657,7 @@ impl TuiState {
     }
 
     fn shutdown(&mut self) -> Result<()> {
-        disable_raw_mode().context("failed to disable raw mode")?;
+        self.raw_mode_guard.release()?;
         Ok(())
     }
 }
