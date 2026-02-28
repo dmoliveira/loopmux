@@ -9979,6 +9979,179 @@ runs:
         assert!(parse_duration("5x").is_err());
     }
 
+    fn status_bar_test_config() -> ResolvedConfig {
+        ResolvedConfig {
+            profile_id: None,
+            exec_command: None,
+            target_scope: TargetScope::Pane("ai:5.0".to_string()),
+            target_label: "ai:5.0".to_string(),
+            explicit_targets: None,
+            file_sources: Vec::new(),
+            iterations: Some(10),
+            infinite: false,
+            has_prompt: true,
+            rule_eval: RuleEval::FirstMatch,
+            rules: Vec::new(),
+            delay: None,
+            trigger_confirm_seconds: DEFAULT_TRIGGER_CONFIRM_SECONDS,
+            prompt_placeholders: Vec::new(),
+            template_vars: Vec::new(),
+            default_action: Action {
+                pre: None,
+                prompt: Some(PromptBlock::Single("hi".to_string())),
+                post: None,
+            },
+            logging: LoggingConfigResolved {
+                path: None,
+                format: LogFormatResolved::Text,
+            },
+            capture_window: CaptureWindow::Tail(200),
+            once: false,
+            single_line: false,
+            tui: false,
+            poll: 5,
+            initial_poll: 5,
+            log_preview_lines: 3,
+            trigger_edge: true,
+            recheck_before_send: true,
+            fanout: FanoutMode::Matched,
+            prompt_edit_max_chars: DEFAULT_PROMPT_EDIT_MAX_CHARS,
+            duration: None,
+        }
+    }
+
+    fn assert_contains_in_order(line: &str, tokens: &[&str]) {
+        let mut start = 0usize;
+        for token in tokens {
+            let found = line[start..]
+                .find(token)
+                .unwrap_or_else(|| panic!("token '{token}' missing from line: {line}"));
+            start += found + token.len();
+        }
+    }
+
+    #[test]
+    fn render_status_bar_golden_compact_segments() {
+        let config = status_bar_test_config();
+        let line = render_status_bar(
+            LoopState::Running,
+            LayoutMode::Compact,
+            IconMode::Ascii,
+            StyleConfig {
+                use_color: false,
+                use_bg: false,
+                use_unicode_ellipsis: false,
+                dim_logs: true,
+            },
+            120,
+            &config,
+            5,
+            10,
+            Some("Concluded"),
+            "00:10",
+            Some("1m20s"),
+            Some("cpu 12.3% mem 42.0mb"),
+        );
+
+        assert_contains_in_order(
+            &line,
+            &[
+                "RUN",
+                "iter 5/10",
+                "50%",
+                "rem 1m20s",
+                "run -",
+                "cpu 12.3% mem 42.0mb",
+                "trg Concluded",
+                &format!("v{LOOPMUX_VERSION}"),
+                "ai:5.0",
+            ],
+        );
+        assert!(!line.contains("last 00:10"));
+        assert!(!line.contains("target ai:5.0"));
+    }
+
+    #[test]
+    fn render_status_bar_golden_standard_segments() {
+        let config = status_bar_test_config();
+        let line = render_status_bar(
+            LoopState::Running,
+            LayoutMode::Standard,
+            IconMode::Ascii,
+            StyleConfig {
+                use_color: false,
+                use_bg: false,
+                use_unicode_ellipsis: true,
+                dim_logs: true,
+            },
+            160,
+            &config,
+            5,
+            10,
+            Some("Concluded"),
+            "00:10",
+            Some("1m20s"),
+            Some("cpu 12.3% mem 42.0mb"),
+        );
+
+        assert_contains_in_order(
+            &line,
+            &[
+                "RUN",
+                "iter 5/10",
+                "50%",
+                "rem 1m20s",
+                "run -",
+                "cpu 12.3% mem 42.0mb",
+                "trg Concluded",
+                "last 00:10",
+                &format!("v{LOOPMUX_VERSION}"),
+                "ai:5.0",
+            ],
+        );
+        assert!(!line.contains("target ai:5.0"));
+    }
+
+    #[test]
+    fn render_status_bar_golden_wide_segments() {
+        let config = status_bar_test_config();
+        let line = render_status_bar(
+            LoopState::Running,
+            LayoutMode::Wide,
+            IconMode::Ascii,
+            StyleConfig {
+                use_color: false,
+                use_bg: false,
+                use_unicode_ellipsis: true,
+                dim_logs: true,
+            },
+            200,
+            &config,
+            5,
+            10,
+            Some("Concluded"),
+            "00:10",
+            Some("1m20s"),
+            Some("cpu 12.3% mem 42.0mb"),
+        );
+
+        assert_contains_in_order(
+            &line,
+            &[
+                "RUN",
+                "iter 5/10",
+                "50%",
+                "rem 1m20s",
+                "run -",
+                "cpu 12.3% mem 42.0mb",
+                "trg Concluded",
+                "last 00:10",
+                &format!("v{LOOPMUX_VERSION}"),
+                "target ai:5.0",
+            ],
+        );
+    }
+
     #[test]
     fn render_status_bar_compact() {
         let config = ResolvedConfig {
