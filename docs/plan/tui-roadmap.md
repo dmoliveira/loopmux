@@ -196,7 +196,7 @@ Important decisions to remember:
 
 ## Epic E1 - Lifecycle hardening on crossterm
 
-Status: `` doing
+Status: `` done
 
 Goal: make current architecture resilient before introducing `ratatui`.
 
@@ -234,17 +234,29 @@ Important decisions to remember:
 
 ### Task E1.T2 - Render I/O error policy
 
-Status: `` not started
+Status: `` done
 
 Subtasks:
 
-- `` E1.T2.S1 Remove ignored write/flush results in render paths.
-- `` E1.T2.S2 Implement bounded retry and fallback policy.
-- `` E1.T2.S3 Add logs/events for render degradation and fallback transitions.
+- `` E1.T2.S1 Remove ignored write/flush results in render paths.
+- `` E1.T2.S2 Implement bounded retry and fallback policy.
+- `` E1.T2.S3 Add logs/events for render degradation and fallback transitions.
+
+Implementation notes (2026-02-28):
+
+- Replaced ignored `queue`/`write`/`flush` results in both run-view and fleet-manager render paths with checked I/O handling.
+- Added shared `render_with_retry` helper with bounded retry budget and delay (`TUI_RENDER_RETRY_LIMIT=3`, `TUI_RENDER_RETRY_DELAY=15ms`).
+- Added explicit degradation/recovery/fallback events via stderr (`tui render degraded`, `tui render recovered`, `fallback=exit`).
+
+Closure update (2026-02-28):
+
+- Validation evidence: `cargo fmt --check` and `cargo test -q` (100 passed).
+- Outcome: E1 lifecycle hardening tasks are complete; next active implementation epic is E2 architecture split.
 
 Important decisions to remember:
 
 - Favor explicit controlled exit over continuing in corrupted terminal state.
+- Retry budget must remain bounded; no unbounded render retry loops in interactive paths.
 
 ## Epic E2 - Architecture split for determinism
 
@@ -367,3 +379,4 @@ When any task/subtask changes to `` done, update this file in the same PR:
 - `2026-02-28` `PLAN-006` E0.T2 chooses in-process lightweight instrumentation (no external telemetry dependency) and PR-level evidence tables for lifecycle/render changes.
 - `2026-02-28` `PLAN-007` E1.T1 adopts depth-tracked RAII raw-mode guard plus panic-hook restoration to prevent terminal wedging on early exits and panic paths.
 - `2026-02-28` `PLAN-008` E1.T1.S3 validates guard lifecycle semantics via test-only raw-mode shims and panic regression coverage, including underflow prevention.
+- `2026-02-28` `PLAN-009` E1.T2 replaces ignored render I/O with bounded retries and explicit controlled-exit fallback plus degradation/recovery events.
