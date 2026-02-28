@@ -54,6 +54,7 @@ This plan is the source of truth for hardening loopmux TUI reliability and evalu
 3. No hidden behavior toggles: all runtime switches are documented in README/specs before close.
 4. Prefer deterministic tests over ad-hoc manual verification; keep flaky timing assertions out of CI.
 5. New abstractions must pay for themselves with at least one testability or failure-isolation win.
+6. Raw mode ownership must be centralized behind a single guard path; ad-hoc enable/disable calls are transitional only.
 
 ## Definition of done
 
@@ -108,13 +109,34 @@ Goal: lock current behavior, remove blind spots, and define objective reliabilit
 
 ### Task E0.T1 - Baseline behavior inventory
 
-Status: `` doing
+Status: `` done
 
 Subtasks:
 
 - `` E0.T1.S1 Capture current controls and mode matrix (run/fleet/plain/single-line).
-- `` E0.T1.S2 Document terminal lifecycle entry/exit paths and known failure gaps.
-- `` E0.T1.S3 Capture current redraw/update/input coupling map for refactor planning.
+- `` E0.T1.S2 Document terminal lifecycle entry/exit paths and known failure gaps.
+- `` E0.T1.S3 Capture current redraw/update/input coupling map for refactor planning.
+
+Lifecycle baseline notes (E0.T1.S2):
+
+- Entry points: raw mode is enabled in run TUI init (`src/main.rs:6362`) and fleet manager entry (`src/main.rs:2473`).
+- Normal exits: raw mode is disabled by `TuiState::shutdown` (`src/main.rs:6605`) on run-loop completion (`src/main.rs:4952`) and after fleet manager returns (`src/main.rs:2475`).
+- Gap: run loop has many fallible `?` operations after TUI init (example `src/main.rs:3585`, `src/main.rs:3625`, `src/main.rs:4947`) before explicit shutdown (`src/main.rs:4953`), so early errors can skip restoration.
+- Gap: there is no explicit panic restoration hook around TUI lifecycle; panic behavior relies on process teardown and can wedge the terminal in practice.
+- Decision: E1.T1 will implement a centralized RAII terminal guard with panic-safe restoration as mandatory before broader refactors.
+
+Coupling baseline notes (E0.T1.S3):
+
+- Run mode coupling: one control loop interleaves input polling (`src/main.rs:3625`, `src/main.rs:4447`) and state transitions with rendering via `tui_state.update(...)` (`src/main.rs:3577`, `src/main.rs:4888`).
+- Render coupling: `TuiState::update` computes view model and performs terminal writes in the same function (`src/main.rs:6429` onward), making draw failures and state updates non-separable.
+- Hot-path side effect: render update calls `process_usage_summary()` (`src/main.rs:6449`) which may execute `ps` (`src/main.rs:6394`), introducing external command latency into frame generation.
+- Fleet manager coupling: redraw, diffing, input poll, and action dispatch share a single loop (`src/main.rs:2506` onward; input poll at `src/main.rs:2656`).
+- Decision: E2.T2 will introduce explicit tick/input/render phases and move process sampling out of the frame path before any backend migration.
+
+Closure update (2026-02-28):
+
+- Validation evidence: docs-only change validated with `git diff --check`.
+- Outcome: E0.T1 baseline inventory is complete; next active item is E0.T2 reliability metrics definition.
 
 Important decisions to remember:
 
@@ -284,3 +306,5 @@ When any task/subtask changes to `` done, update this file in the same PR:
 
 - `2026-02-28` `PLAN-001` Adopt hardening-first sequence: stabilize `crossterm` lifecycle before committing to `ratatui` migration.
 - `2026-02-28` `PLAN-002` Define explicit acceptance criteria around terminal recovery, render error policy, and testability parity.
+- `2026-02-28` `PLAN-003` E0.T1.S2 baseline confirms raw-mode restoration risk on early `?` exits; E1.T1 must land RAII + panic-safe restore first.
+- `2026-02-28` `PLAN-004` E0.T1.S3 baseline confirms render/input/update coupling and hot-path process sampling; E2.T2 must phase-separate loop responsibilities.
