@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Once;
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -10,7 +12,9 @@ use clap::{Parser, Subcommand};
 use crossterm::QueueableCommand;
 use crossterm::cursor::MoveTo;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode};
+use crossterm::terminal::{Clear, ClearType};
+#[cfg(not(test))]
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use regex::Regex;
 use serde::Deserialize;
 use serde::Serialize;
@@ -2473,13 +2477,68 @@ fn summarize_exec_stream(bytes: &[u8], use_unicode: bool) -> String {
 
 static RAW_MODE_DEPTH: AtomicUsize = AtomicUsize::new(0);
 static RAW_MODE_HOOK_INIT: Once = Once::new();
+#[cfg(test)]
+static RAW_MODE_ENABLE_CALLS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static RAW_MODE_DISABLE_CALLS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static RAW_MODE_FAIL_ENABLE: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static RAW_MODE_FAIL_DISABLE: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static RAW_MODE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(not(test))]
+fn enable_raw_mode_guarded() -> std::io::Result<()> {
+    enable_raw_mode()
+}
+
+#[cfg(not(test))]
+fn disable_raw_mode_guarded() -> std::io::Result<()> {
+    disable_raw_mode()
+}
+
+#[cfg(test)]
+fn enable_raw_mode_guarded() -> std::io::Result<()> {
+    RAW_MODE_ENABLE_CALLS.fetch_add(1, Ordering::SeqCst);
+    if RAW_MODE_FAIL_ENABLE.swap(false, Ordering::SeqCst) {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "simulated enable raw mode failure",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+fn disable_raw_mode_guarded() -> std::io::Result<()> {
+    RAW_MODE_DISABLE_CALLS.fetch_add(1, Ordering::SeqCst);
+    if RAW_MODE_FAIL_DISABLE.swap(false, Ordering::SeqCst) {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "simulated disable raw mode failure",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+fn reset_raw_mode_test_state() {
+    RAW_MODE_DEPTH.store(0, Ordering::SeqCst);
+    RAW_MODE_ENABLE_CALLS.store(0, Ordering::SeqCst);
+    RAW_MODE_DISABLE_CALLS.store(0, Ordering::SeqCst);
+    RAW_MODE_FAIL_ENABLE.store(false, Ordering::SeqCst);
+    RAW_MODE_FAIL_DISABLE.store(false, Ordering::SeqCst);
+}
 
 fn install_raw_mode_panic_hook() {
     RAW_MODE_HOOK_INIT.call_once(|| {
         let previous_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |panic_info| {
             if RAW_MODE_DEPTH.load(Ordering::SeqCst) > 0 {
-                let _ = disable_raw_mode();
+                let _ = disable_raw_mode_guarded();
                 RAW_MODE_DEPTH.store(0, Ordering::SeqCst);
             }
             previous_hook(panic_info);
@@ -2494,11 +2553,11 @@ struct RawModeGuard {
 impl RawModeGuard {
     fn acquire(context: &str) -> Result<Self> {
         install_raw_mode_panic_hook();
-        if RAW_MODE_DEPTH.fetch_add(1, Ordering::SeqCst) == 0 {
-            if let Err(err) = enable_raw_mode() {
-                RAW_MODE_DEPTH.fetch_sub(1, Ordering::SeqCst);
-                return Err(err).context(context.to_string());
-            }
+        if RAW_MODE_DEPTH.fetch_add(1, Ordering::SeqCst) == 0
+            && let Err(err) = enable_raw_mode_guarded()
+        {
+            RAW_MODE_DEPTH.fetch_sub(1, Ordering::SeqCst);
+            return Err(err).context(context.to_string());
         }
         Ok(Self { active: true })
     }
@@ -2508,10 +2567,23 @@ impl RawModeGuard {
             return Ok(());
         }
         self.active = false;
-        let previous = RAW_MODE_DEPTH.fetch_sub(1, Ordering::SeqCst);
-        if previous <= 1 {
-            RAW_MODE_DEPTH.store(0, Ordering::SeqCst);
-            disable_raw_mode().context("failed to disable raw mode")?;
+        let mut previous = RAW_MODE_DEPTH.load(Ordering::SeqCst);
+        loop {
+            if previous == 0 {
+                return Ok(());
+            }
+            match RAW_MODE_DEPTH.compare_exchange(
+                previous,
+                previous - 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(current) => previous = current,
+            }
+        }
+        if previous == 1 {
+            disable_raw_mode_guarded().context("failed to disable raw mode")?;
         }
         Ok(())
     }
@@ -10583,6 +10655,77 @@ runs:
     fn fleet_stop_snippet_uses_run_id() {
         let snippet = fleet_stop_snippet("run-123");
         assert_eq!(snippet, "loopmux runs stop run-123");
+    }
+
+    #[test]
+    fn raw_mode_guard_nested_release_enables_once_disables_once() {
+        let _test_guard = RAW_MODE_TEST_LOCK.lock().unwrap();
+        reset_raw_mode_test_state();
+
+        let mut outer = RawModeGuard::acquire("outer acquire failed").unwrap();
+        let mut inner = RawModeGuard::acquire("inner acquire failed").unwrap();
+
+        assert_eq!(RAW_MODE_DEPTH.load(Ordering::SeqCst), 2);
+        assert_eq!(RAW_MODE_ENABLE_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(RAW_MODE_DISABLE_CALLS.load(Ordering::SeqCst), 0);
+
+        outer.release().unwrap();
+        assert_eq!(RAW_MODE_DEPTH.load(Ordering::SeqCst), 1);
+        assert_eq!(RAW_MODE_DISABLE_CALLS.load(Ordering::SeqCst), 0);
+
+        inner.release().unwrap();
+        assert_eq!(RAW_MODE_DEPTH.load(Ordering::SeqCst), 0);
+        assert_eq!(RAW_MODE_DISABLE_CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn raw_mode_guard_release_is_idempotent() {
+        let _test_guard = RAW_MODE_TEST_LOCK.lock().unwrap();
+        reset_raw_mode_test_state();
+
+        let mut guard = RawModeGuard::acquire("acquire failed").unwrap();
+        guard.release().unwrap();
+        guard.release().unwrap();
+
+        assert_eq!(RAW_MODE_DEPTH.load(Ordering::SeqCst), 0);
+        assert_eq!(RAW_MODE_ENABLE_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(RAW_MODE_DISABLE_CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn raw_mode_guard_acquire_failure_restores_depth() {
+        let _test_guard = RAW_MODE_TEST_LOCK.lock().unwrap();
+        reset_raw_mode_test_state();
+
+        RAW_MODE_FAIL_ENABLE.store(true, Ordering::SeqCst);
+        let err = match RawModeGuard::acquire("failed to enable raw mode for test") {
+            Ok(_) => panic!("expected guard acquire failure"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string()
+                .contains("failed to enable raw mode for test"),
+            "error should include caller context"
+        );
+        assert_eq!(RAW_MODE_DEPTH.load(Ordering::SeqCst), 0);
+        assert_eq!(RAW_MODE_ENABLE_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(RAW_MODE_DISABLE_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn raw_mode_guard_panic_hook_restores_without_underflow() {
+        let _test_guard = RAW_MODE_TEST_LOCK.lock().unwrap();
+        reset_raw_mode_test_state();
+
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = RawModeGuard::acquire("panic acquire failed").unwrap();
+            panic!("simulated panic while raw mode active");
+        });
+
+        assert_eq!(RAW_MODE_DEPTH.load(Ordering::SeqCst), 0);
+        assert_eq!(RAW_MODE_ENABLE_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(RAW_MODE_DISABLE_CALLS.load(Ordering::SeqCst), 1);
     }
 }
 
