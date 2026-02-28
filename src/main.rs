@@ -6955,6 +6955,7 @@ impl TuiState {
         self.footer_note = note;
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn update(
         &mut self,
         state: LoopState,
