@@ -266,17 +266,29 @@ Goal: separate model/update/draw/input to reduce coupling and increase testabili
 
 ### Task E2.T1 - Loop state model extraction
 
-Status: `` not started
+Status: `` doing
 
 Subtasks:
 
-- `` E2.T1.S1 Extract pure state structs and transition functions.
+- `` E2.T1.S1 Extract pure state structs and transition functions.
 - `` E2.T1.S2 Isolate side effects behind trait boundaries.
-- `` E2.T1.S3 Add deterministic transition tests for key flows.
+- `` E2.T1.S3 Add deterministic transition tests for key flows.
+
+Implementation notes (2026-02-28):
+
+- Extracted hold-action transition seam into `plan_hold_action` and `apply_hold_transition` to centralize pause/resume/hold-toggle state logic.
+- Wired the seam across all three TUI interaction loops (holding, active, and wait loops) without changing external key behavior.
+- Added deterministic transition tests for hold plans and transition application semantics.
+
+Closure update (partial, 2026-02-28):
+
+- Validation evidence: `cargo fmt --check` and `cargo test -q` (106 passed).
+- Outcome: E2.T1.S1/S3 complete; E2.T1.S2 remains pending.
 
 Important decisions to remember:
 
 - Extract only proven seams first; avoid broad file split churn in one PR.
+- Transition seam extraction should keep side effects localized and make future trait-boundary isolation incremental.
 
 ### Task E2.T2 - Event loop rationalization
 
@@ -399,3 +411,4 @@ When any task/subtask changes to `` done, update this file in the same PR:
 - `2026-02-28` `PLAN-010` E2.T2.S2 decouples process usage sampling from render by introducing explicit refresh ticks and cached consumption during draw.
 - `2026-02-28` `PLAN-011` E2.T2.S1 introduces explicit fleet loop phases and phase-aware error contexts to improve determinism and triage.
 - `2026-02-28` `PLAN-012` E2.T2.S3 adds deterministic resize/burst stress tests to lock in panic-free behavior and selection-wrap invariants.
+- `2026-02-28` `PLAN-013` E2.T1.S1/S3 establish a pure hold-transition planning seam plus deterministic transition tests to reduce duplicated control logic.
