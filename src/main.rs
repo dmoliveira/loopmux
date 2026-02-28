@@ -5630,19 +5630,19 @@ fn matches_rule(rule: &Rule, output: &str) -> Result<bool> {
     if !matches {
         return Ok(false);
     }
-    if let Some(exclude) = &rule.exclude {
-        if matches_criteria(exclude, output)? {
-            return Ok(false);
-        }
+    if let Some(exclude) = &rule.exclude
+        && matches_criteria(exclude, output)?
+    {
+        return Ok(false);
     }
     Ok(true)
 }
 
 fn matches_criteria(criteria: &MatchCriteria, output: &str) -> Result<bool> {
-    if let Some(trigger_expr) = &criteria.trigger_expr {
-        if eval_trigger_expr(&parse_trigger_expr(trigger_expr)?, output) {
-            return Ok(true);
-        }
+    if let Some(trigger_expr) = &criteria.trigger_expr
+        && eval_trigger_expr(&parse_trigger_expr(trigger_expr)?, output)
+    {
+        return Ok(true);
     }
     if let Some(exact_line) = &criteria.exact_line {
         let expected = exact_line.trim();
@@ -5656,15 +5656,15 @@ fn matches_criteria(criteria: &MatchCriteria, output: &str) -> Result<bool> {
             return Ok(true);
         }
     }
-    if let Some(contains) = &criteria.contains {
-        if output.contains(contains) {
-            return Ok(true);
-        }
+    if let Some(contains) = &criteria.contains
+        && output.contains(contains)
+    {
+        return Ok(true);
     }
-    if let Some(prefix) = &criteria.starts_with {
-        if output.starts_with(prefix) {
-            return Ok(true);
-        }
+    if let Some(prefix) = &criteria.starts_with
+        && output.starts_with(prefix)
+    {
+        return Ok(true);
     }
     Ok(false)
 }
@@ -7652,7 +7652,7 @@ fn sanitize_tui_log_line(line: &str) -> String {
         if ch == '\u{1b}' {
             if matches!(chars.peek(), Some('[')) {
                 let _ = chars.next();
-                while let Some(next) = chars.next() {
+                for next in chars.by_ref() {
                     if ('@'..='~').contains(&next) {
                         break;
                     }
@@ -8037,11 +8037,11 @@ fn resolve_config(
     recheck_before_send_override: Option<bool>,
     profile_id: Option<String>,
 ) -> Result<ResolvedConfig> {
-    if let Some(targets) = target_override {
-        if let Some(first) = targets.first() {
-            config.target = Some(first.clone());
-            config.targets = Some(targets);
-        }
+    if let Some(targets) = target_override
+        && let Some(first) = targets.first()
+    {
+        config.target = Some(first.clone());
+        config.targets = Some(targets);
     }
     if let Some(iterations) = iterations_override {
         config.iterations = Some(iterations);
@@ -8080,10 +8080,10 @@ fn resolve_config(
             .clone()
             .unwrap_or_else(|| config.target.clone().into_iter().collect())
     };
-    if exec_command.is_none() {
-        if let Some(files) = &config.files {
-            validate_file_sources(files)?;
-        }
+    if exec_command.is_none()
+        && let Some(files) = &config.files
+    {
+        validate_file_sources(files)?;
     }
 
     let explicit_targets = if exec_command.is_some() {
@@ -8714,10 +8714,10 @@ fn validate_delay(delay: &DelayConfig) -> Result<()> {
             if backoff.factor < 1.0 {
                 bail!("delay.backoff.factor must be >= 1.0");
             }
-            if let Some(max) = backoff.max {
-                if max < backoff.base {
-                    bail!("delay.backoff.max must be >= base");
-                }
+            if let Some(max) = backoff.max
+                && max < backoff.base
+            {
+                bail!("delay.backoff.max must be >= base");
             }
         }
     }
