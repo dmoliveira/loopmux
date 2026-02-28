@@ -2676,6 +2676,81 @@ fn fleet_step_selection_right(selected: usize, runs_len: usize) -> usize {
     }
 }
 
+struct FleetDetailRenderArgs<'a> {
+    selected_run: Option<&'a FleetListedRun>,
+    profile_filter: Option<&'a str>,
+    show_stale: bool,
+    mismatch_only: bool,
+    state_filter: FleetStateFilter,
+    search_query: &'a str,
+    counts: (usize, usize, usize, usize),
+    sort_mode: FleetSortMode,
+    view_preset: FleetViewPreset,
+    marked_count: usize,
+    pending_action: Option<&'a PendingFleetAction>,
+}
+
+trait FleetPaneRenderer {
+    fn render_list_lines(
+        &self,
+        runs: &[FleetListedRun],
+        content_rows: usize,
+        selected: usize,
+        selected_ids: &HashSet<String>,
+    ) -> Vec<String>;
+
+    fn render_detail_lines(&self, args: FleetDetailRenderArgs<'_>) -> Vec<String>;
+}
+
+struct LegacyFleetPaneRenderer;
+
+impl FleetPaneRenderer for LegacyFleetPaneRenderer {
+    fn render_list_lines(
+        &self,
+        runs: &[FleetListedRun],
+        content_rows: usize,
+        selected: usize,
+        selected_ids: &HashSet<String>,
+    ) -> Vec<String> {
+        fleet_run_list_lines(runs, content_rows, selected, selected_ids)
+    }
+
+    fn render_detail_lines(&self, args: FleetDetailRenderArgs<'_>) -> Vec<String> {
+        fleet_detail_lines(
+            args.selected_run,
+            args.profile_filter,
+            args.show_stale,
+            args.mismatch_only,
+            args.state_filter,
+            args.search_query,
+            args.counts,
+            args.sort_mode,
+            args.view_preset,
+            args.marked_count,
+            args.pending_action,
+        )
+    }
+}
+
+fn fleet_run_list_lines(
+    runs: &[FleetListedRun],
+    content_rows: usize,
+    selected: usize,
+    selected_ids: &HashSet<String>,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (idx, run) in runs.iter().take(content_rows).enumerate() {
+        let line = fleet_run_list_line(
+            run,
+            idx == selected,
+            selected_ids.contains(&run.record.id),
+            true,
+        );
+        lines.push(line);
+    }
+    lines
+}
+
 fn run_fleet_manager_tui_inner(embedded: bool, profile_filter: Option<&str>) -> Result<()> {
     let mut selected: usize = 0;
     let mut selected_run_id: Option<String> = None;
@@ -2698,6 +2773,7 @@ fn run_fleet_manager_tui_inner(embedded: bool, profile_filter: Option<&str>) -> 
     let mut all_runs: Vec<FleetListedRun> = Vec::new();
     let mut runs: Vec<FleetListedRun> = Vec::new();
     let mut counts = (0, 0, 0, 0);
+    let pane_renderer = LegacyFleetPaneRenderer;
 
     loop {
         let mut phase = FleetLoopPhase::Tick;
@@ -2763,31 +2839,22 @@ fn run_fleet_manager_tui_inner(embedded: bool, profile_filter: Option<&str>) -> 
         );
 
         let content_rows = height.saturating_sub(3) as usize;
-        let mut lines = Vec::new();
-        for (idx, run) in runs.iter().take(content_rows).enumerate() {
-            let line = fleet_run_list_line(
-                run,
-                idx == selected,
-                selected_ids.contains(&run.record.id),
-                true,
-            );
-            lines.push(line);
-        }
+        let lines = pane_renderer.render_list_lines(&runs, content_rows, selected, &selected_ids);
 
         let selected_run = runs.get(selected);
-        let details = fleet_detail_lines(
+        let details = pane_renderer.render_detail_lines(FleetDetailRenderArgs {
             selected_run,
             profile_filter,
             show_stale,
             mismatch_only,
             state_filter,
-            &search_query,
+            search_query: &search_query,
             counts,
             sort_mode,
             view_preset,
-            selected_ids.len(),
-            pending_action.as_ref(),
-        );
+            marked_count: selected_ids.len(),
+            pending_action: pending_action.as_ref(),
+        });
 
         let footer = format!(
             "nav <-/-> · mark space · clear a · presets p/1-4 · sort o · filters x/v/f · search / · single h/r/n/R/s · bulk S/H/P/N/U · enter confirm · c cancel · i id · y stop-cmd · q/esc {} · {}",
@@ -11278,6 +11345,68 @@ runs:
         assert_eq!(fleet_step_selection_right(0, 0), 0);
         assert_eq!(fleet_step_selection_left(5, 0), 0);
         assert_eq!(fleet_step_selection_right(5, 0), 0);
+    }
+
+    #[test]
+    fn legacy_fleet_pane_renderer_list_matches_direct_render() {
+        let runs = vec![
+            fleet_listed(
+                fleet_test_record("run-1", "alpha", "running", 2, LOOPMUX_VERSION),
+                false,
+                false,
+            ),
+            fleet_listed(
+                fleet_test_record("run-2", "beta", "holding", 5, LOOPMUX_VERSION),
+                false,
+                false,
+            ),
+        ];
+        let selected_ids = std::collections::HashSet::from(["run-2".to_string()]);
+        let direct = fleet_run_list_lines(&runs, 4, 1, &selected_ids);
+        let via_adapter = LegacyFleetPaneRenderer.render_list_lines(&runs, 4, 1, &selected_ids);
+        assert_eq!(via_adapter, direct);
+    }
+
+    #[test]
+    fn legacy_fleet_pane_renderer_details_matches_direct_render() {
+        let selected = fleet_listed(
+            fleet_test_record("run-1", "alpha", "running", 2, LOOPMUX_VERSION),
+            false,
+            false,
+        );
+        let pending = PendingFleetAction::SingleStop {
+            run_id: "run-1".to_string(),
+            run_name: "alpha".to_string(),
+        };
+
+        let args = FleetDetailRenderArgs {
+            selected_run: Some(&selected),
+            profile_filter: Some("alpha"),
+            show_stale: true,
+            mismatch_only: false,
+            state_filter: FleetStateFilter::All,
+            search_query: "alpha",
+            counts: (1, 1, 0, 0),
+            sort_mode: FleetSortMode::LastSeen,
+            view_preset: FleetViewPreset::Default,
+            marked_count: 1,
+            pending_action: Some(&pending),
+        };
+        let direct = fleet_detail_lines(
+            args.selected_run,
+            args.profile_filter,
+            args.show_stale,
+            args.mismatch_only,
+            args.state_filter,
+            args.search_query,
+            args.counts,
+            args.sort_mode,
+            args.view_preset,
+            args.marked_count,
+            args.pending_action,
+        );
+        let via_adapter = LegacyFleetPaneRenderer.render_detail_lines(args);
+        assert_eq!(via_adapter, direct);
     }
 
     #[test]
