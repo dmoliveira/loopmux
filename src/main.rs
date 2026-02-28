@@ -6623,6 +6623,7 @@ struct TuiState {
     overlay_lines: Option<Vec<String>>,
     overlay_help: Option<String>,
     footer_note: Option<String>,
+    process_usage_provider: Box<dyn ProcessUsageProvider>,
     usage_sample: Option<ProcessUsageSample>,
     log_view: LogViewMode,
 }
@@ -6630,6 +6631,26 @@ struct TuiState {
 struct ProcessUsageSample {
     captured_at: Instant,
     summary: String,
+}
+
+trait ProcessUsageProvider {
+    fn sample(&self, pid: u32) -> Option<String>;
+}
+
+struct SystemProcessUsageProvider;
+
+impl ProcessUsageProvider for SystemProcessUsageProvider {
+    fn sample(&self, pid: u32) -> Option<String> {
+        let output = std::process::Command::new("ps")
+            .args(["-o", "%cpu=", "-o", "rss=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        parse_process_usage_summary(&stdout)
+    }
 }
 
 impl TuiState {
@@ -6648,6 +6669,7 @@ impl TuiState {
             overlay_lines: None,
             overlay_help: None,
             footer_note: None,
+            process_usage_provider: Box::new(SystemProcessUsageProvider),
             usage_sample: None,
             log_view: LogViewMode::Chronological,
         })
@@ -6673,29 +6695,7 @@ impl TuiState {
             return;
         }
 
-        let output = match std::process::Command::new("ps")
-            .args([
-                "-o",
-                "%cpu=",
-                "-o",
-                "rss=",
-                "-p",
-                &std::process::id().to_string(),
-            ])
-            .output()
-        {
-            Ok(output) => output,
-            Err(_) => {
-                self.usage_sample = None;
-                return;
-            }
-        };
-        if !output.status.success() {
-            self.usage_sample = None;
-            return;
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let summary = match parse_process_usage_summary(&stdout) {
+        let summary = match self.process_usage_provider.sample(std::process::id()) {
             Some(summary) => summary,
             None => {
                 self.usage_sample = None;
