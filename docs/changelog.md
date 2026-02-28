@@ -2,6 +2,11 @@
 
 ## 2026-02-28
 
+### References
+- PR #114: Complete clippy structural debt pass 2 (`https://github.com/dmoliveira/loopmux/pull/114`)
+- PR #115: Remove unused TUI status argument from update loop (`https://github.com/dmoliveira/loopmux/pull/115`)
+- PR #116: Add changelog notes for recent clippy and TUI cleanups (`https://github.com/dmoliveira/loopmux/pull/116`)
+
 ### Executive Summary
 - Completed structural clippy debt cleanup and a follow-up TUI API cleanup while keeping runtime behavior stable.
 - Restored strict Rust quality gates on main with formatting, tests, and clippy all green.
