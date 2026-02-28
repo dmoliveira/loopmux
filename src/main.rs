@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Once;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
