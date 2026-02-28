@@ -6848,20 +6848,7 @@ struct LegacyFooterRenderer;
 
 impl StatusBarRenderer for LegacyStatusBarRenderer {
     fn render(&self, args: StatusBarRenderArgs<'_>) -> String {
-        render_status_bar(
-            args.state,
-            args.layout,
-            args.icon_mode,
-            args.style,
-            args.width,
-            args.config,
-            args.current,
-            args.total,
-            args.rule_id,
-            args.elapsed,
-            args.remaining_duration,
-            args.process_usage,
-        )
+        render_status_bar(&args)
     }
 }
 
@@ -7482,20 +7469,19 @@ fn render_active_list_popup(
     lines
 }
 
-fn render_status_bar(
-    state: LoopState,
-    layout: LayoutMode,
-    icon_mode: IconMode,
-    style: StyleConfig,
-    width: u16,
-    config: &ResolvedConfig,
-    current: u32,
-    total: u32,
-    rule_id: Option<&str>,
-    elapsed: &str,
-    remaining_duration: Option<&str>,
-    process_usage: Option<&str>,
-) -> String {
+fn render_status_bar(args: &StatusBarRenderArgs<'_>) -> String {
+    let state = args.state;
+    let layout = args.layout;
+    let icon_mode = args.icon_mode;
+    let style = args.style;
+    let width = args.width;
+    let config = args.config;
+    let current = args.current;
+    let total = args.total;
+    let rule_id = args.rule_id;
+    let elapsed = args.elapsed;
+    let remaining_duration = args.remaining_duration;
+    let process_usage = args.process_usage;
     let (icon, label) = state_label(state, icon_mode);
     let progress = if config.infinite {
         "inf".to_string()
@@ -10188,20 +10174,7 @@ runs:
             process_usage: Some("cpu 12.3% mem 42.0mb"),
         };
 
-        let direct = render_status_bar(
-            args.state,
-            args.layout,
-            args.icon_mode,
-            args.style,
-            args.width,
-            args.config,
-            args.current,
-            args.total,
-            args.rule_id,
-            args.elapsed,
-            args.remaining_duration,
-            args.process_usage,
-        );
+        let direct = render_status_bar(&args);
         let via_adapter = LegacyStatusBarRenderer.render(args);
         assert_eq!(via_adapter, direct);
     }
@@ -10244,25 +10217,25 @@ runs:
     #[test]
     fn render_status_bar_golden_compact_segments() {
         let config = status_bar_test_config();
-        let line = render_status_bar(
-            LoopState::Running,
-            LayoutMode::Compact,
-            IconMode::Ascii,
-            StyleConfig {
+        let line = render_status_bar(&StatusBarRenderArgs {
+            state: LoopState::Running,
+            layout: LayoutMode::Compact,
+            icon_mode: IconMode::Ascii,
+            style: StyleConfig {
                 use_color: false,
                 use_bg: false,
                 use_unicode_ellipsis: false,
                 dim_logs: true,
             },
-            120,
-            &config,
-            5,
-            10,
-            Some("Concluded"),
-            "00:10",
-            Some("1m20s"),
-            Some("cpu 12.3% mem 42.0mb"),
-        );
+            width: 120,
+            config: &config,
+            current: 5,
+            total: 10,
+            rule_id: Some("Concluded"),
+            elapsed: "00:10",
+            remaining_duration: Some("1m20s"),
+            process_usage: Some("cpu 12.3% mem 42.0mb"),
+        });
 
         assert_contains_in_order(
             &line,
@@ -10285,25 +10258,25 @@ runs:
     #[test]
     fn render_status_bar_golden_standard_segments() {
         let config = status_bar_test_config();
-        let line = render_status_bar(
-            LoopState::Running,
-            LayoutMode::Standard,
-            IconMode::Ascii,
-            StyleConfig {
+        let line = render_status_bar(&StatusBarRenderArgs {
+            state: LoopState::Running,
+            layout: LayoutMode::Standard,
+            icon_mode: IconMode::Ascii,
+            style: StyleConfig {
                 use_color: false,
                 use_bg: false,
                 use_unicode_ellipsis: true,
                 dim_logs: true,
             },
-            160,
-            &config,
-            5,
-            10,
-            Some("Concluded"),
-            "00:10",
-            Some("1m20s"),
-            Some("cpu 12.3% mem 42.0mb"),
-        );
+            width: 160,
+            config: &config,
+            current: 5,
+            total: 10,
+            rule_id: Some("Concluded"),
+            elapsed: "00:10",
+            remaining_duration: Some("1m20s"),
+            process_usage: Some("cpu 12.3% mem 42.0mb"),
+        });
 
         assert_contains_in_order(
             &line,
@@ -10326,25 +10299,25 @@ runs:
     #[test]
     fn render_status_bar_golden_wide_segments() {
         let config = status_bar_test_config();
-        let line = render_status_bar(
-            LoopState::Running,
-            LayoutMode::Wide,
-            IconMode::Ascii,
-            StyleConfig {
+        let line = render_status_bar(&StatusBarRenderArgs {
+            state: LoopState::Running,
+            layout: LayoutMode::Wide,
+            icon_mode: IconMode::Ascii,
+            style: StyleConfig {
                 use_color: false,
                 use_bg: false,
                 use_unicode_ellipsis: true,
                 dim_logs: true,
             },
-            200,
-            &config,
-            5,
-            10,
-            Some("Concluded"),
-            "00:10",
-            Some("1m20s"),
-            Some("cpu 12.3% mem 42.0mb"),
-        );
+            width: 200,
+            config: &config,
+            current: 5,
+            total: 10,
+            rule_id: Some("Concluded"),
+            elapsed: "00:10",
+            remaining_duration: Some("1m20s"),
+            process_usage: Some("cpu 12.3% mem 42.0mb"),
+        });
 
         assert_contains_in_order(
             &line,
@@ -10367,25 +10340,25 @@ runs:
     fn render_status_bar_unicode_snapshot_contract() {
         let mut config = status_bar_test_config();
         config.infinite = true;
-        let line = render_status_bar(
-            LoopState::Running,
-            LayoutMode::Standard,
-            IconMode::Nerd,
-            StyleConfig {
+        let line = render_status_bar(&StatusBarRenderArgs {
+            state: LoopState::Running,
+            layout: LayoutMode::Standard,
+            icon_mode: IconMode::Nerd,
+            style: StyleConfig {
                 use_color: false,
                 use_bg: false,
                 use_unicode_ellipsis: true,
                 dim_logs: true,
             },
-            160,
-            &config,
-            2,
-            0,
-            Some("This is a very long trigger string that should truncate"),
-            "00:10",
-            Some("2m10s"),
-            Some("cpu 9.1% mem 22.4mb"),
-        );
+            width: 160,
+            config: &config,
+            current: 2,
+            total: 0,
+            rule_id: Some("This is a very long trigger string that should truncate"),
+            elapsed: "00:10",
+            remaining_duration: Some("2m10s"),
+            process_usage: Some("cpu 9.1% mem 22.4mb"),
+        });
 
         assert!(line.contains("iter ∞"));
         assert!(line.contains(" · "));
@@ -10396,25 +10369,25 @@ runs:
     #[test]
     fn render_status_bar_no_color_snapshot_contract() {
         let config = status_bar_test_config();
-        let line = render_status_bar(
-            LoopState::Holding,
-            LayoutMode::Wide,
-            IconMode::Nerd,
-            StyleConfig {
+        let line = render_status_bar(&StatusBarRenderArgs {
+            state: LoopState::Holding,
+            layout: LayoutMode::Wide,
+            icon_mode: IconMode::Nerd,
+            style: StyleConfig {
                 use_color: false,
                 use_bg: false,
                 use_unicode_ellipsis: true,
                 dim_logs: true,
             },
-            180,
-            &config,
-            3,
-            10,
-            Some("Concluded"),
-            "00:12",
-            Some("45s"),
-            None,
-        );
+            width: 180,
+            config: &config,
+            current: 3,
+            total: 10,
+            rule_id: Some("Concluded"),
+            elapsed: "00:12",
+            remaining_duration: Some("45s"),
+            process_usage: None,
+        });
 
         assert!(!line.contains("\x1B["));
         assert!(line.contains("target ai:5.0"));
@@ -10462,25 +10435,25 @@ runs:
             prompt_edit_max_chars: DEFAULT_PROMPT_EDIT_MAX_CHARS,
             duration: None,
         };
-        let bar = render_status_bar(
-            LoopState::Running,
-            LayoutMode::Compact,
-            IconMode::Ascii,
-            StyleConfig {
+        let bar = render_status_bar(&StatusBarRenderArgs {
+            state: LoopState::Running,
+            layout: LayoutMode::Compact,
+            icon_mode: IconMode::Ascii,
+            style: StyleConfig {
                 use_color: false,
                 use_bg: false,
                 use_unicode_ellipsis: false,
                 dim_logs: true,
             },
-            80,
-            &config,
-            5,
-            10,
-            Some("Concluded"),
-            "00:10",
-            None,
-            None,
-        );
+            width: 80,
+            config: &config,
+            current: 5,
+            total: 10,
+            rule_id: Some("Concluded"),
+            elapsed: "00:10",
+            remaining_duration: None,
+            process_usage: None,
+        });
         assert!(bar.contains("RUN"));
         assert!(bar.contains("5/10"));
         assert!(bar.contains("ai:5.0"));
@@ -10526,25 +10499,25 @@ runs:
             prompt_edit_max_chars: DEFAULT_PROMPT_EDIT_MAX_CHARS,
             duration: None,
         };
-        let bar = render_status_bar(
-            LoopState::Running,
-            LayoutMode::Standard,
-            IconMode::Ascii,
-            StyleConfig {
+        let bar = render_status_bar(&StatusBarRenderArgs {
+            state: LoopState::Running,
+            layout: LayoutMode::Standard,
+            icon_mode: IconMode::Ascii,
+            style: StyleConfig {
                 use_color: false,
                 use_bg: false,
                 use_unicode_ellipsis: true,
                 dim_logs: true,
             },
-            160,
-            &config,
-            1,
-            10,
-            Some("This is a very long trigger string that should truncate"),
-            "00:10",
-            Some("1m20s"),
-            None,
-        );
+            width: 160,
+            config: &config,
+            current: 1,
+            total: 10,
+            rule_id: Some("This is a very long trigger string that should truncate"),
+            elapsed: "00:10",
+            remaining_duration: Some("1m20s"),
+            process_usage: None,
+        });
         assert!(bar.contains("trg"));
         assert!(bar.contains("rem 1m20s"));
         assert!(bar.contains("…"));
@@ -10590,25 +10563,25 @@ runs:
             prompt_edit_max_chars: DEFAULT_PROMPT_EDIT_MAX_CHARS,
             duration: None,
         };
-        let bar = render_status_bar(
-            LoopState::Running,
-            LayoutMode::Standard,
-            IconMode::Ascii,
-            StyleConfig {
+        let bar = render_status_bar(&StatusBarRenderArgs {
+            state: LoopState::Running,
+            layout: LayoutMode::Standard,
+            icon_mode: IconMode::Ascii,
+            style: StyleConfig {
                 use_color: false,
                 use_bg: false,
                 use_unicode_ellipsis: true,
                 dim_logs: true,
             },
-            120,
-            &config,
-            1,
-            3,
-            Some("exec:running"),
-            "00:05",
-            None,
-            Some("cpu 12.3% mem 42.0mb"),
-        );
+            width: 120,
+            config: &config,
+            current: 1,
+            total: 3,
+            rule_id: Some("exec:running"),
+            elapsed: "00:05",
+            remaining_duration: None,
+            process_usage: Some("cpu 12.3% mem 42.0mb"),
+        });
         assert!(bar.contains("evt exec:running"));
         assert!(bar.contains("cpu 12.3% mem 42.0mb"));
     }
