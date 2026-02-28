@@ -335,23 +335,25 @@ Status: `` doing
 Subtasks:
 
 - `` E3.T1.S1 Add compact/standard/wide golden snapshots.
-- `` E3.T1.S2 Add unicode/no-color snapshots.
+- `` E3.T1.S2 Add unicode/no-color snapshots.
 - `` E3.T1.S3 Add snapshot update guidance and diff policy.
 
 Implementation notes (2026-02-28):
 
 - Added deterministic layout-golden contract tests for compact/standard/wide status bars using ordered token assertions.
 - Added shared test fixtures/helpers (`status_bar_test_config`, `assert_contains_in_order`) to keep snapshot intent explicit and reduce duplication.
+- Added unicode/no-color snapshot contracts covering unicode separators/ellipsis behavior and no-ANSI rendering guarantees.
 
 Closure update (partial, 2026-02-28):
 
-- Validation evidence: `cargo fmt --check` and `cargo test -q` (118 passed).
-- Outcome: E3.T1.S1 complete; E3.T1.S2/S3 remain pending.
+- Validation evidence: `cargo fmt --check` and `cargo test -q` (120 passed).
+- Outcome: E3.T1.S1/S2 complete; E3.T1.S3 remains pending.
 
 Important decisions to remember:
 
 - Snapshot churn must stay intentional; include rationale on updates.
 - Golden assertions should pin layout-specific token ordering while remaining resilient to safe padding differences.
+- Unicode/no-color contracts should assert semantic output constraints (separators, ellipsis, ANSI absence) without coupling to terminal-specific glyph widths.
 
 ### Task E3.T2 - Interaction contract tests
 
@@ -446,3 +448,4 @@ When any task/subtask changes to `` done, update this file in the same PR:
 - `2026-02-28` `PLAN-016` E3.T2.S2 promotes destructive confirmation and cancel wording to shared helpers and validates arm/cancel contracts with deterministic tests.
 - `2026-02-28` `PLAN-017` E3.T2.S3 centralizes UI mode fallback selection with `resolve_ui_mode` and locks non-interactive behavior through contract tests.
 - `2026-02-28` `PLAN-018` E3.T1.S1 introduces compact/standard/wide layout golden contracts with ordered token assertions to stabilize status-bar composition.
+- `2026-02-28` `PLAN-019` E3.T1.S2 adds unicode/no-color snapshot contracts to preserve separator/ellipsis behavior and ANSI-free output guarantees.
