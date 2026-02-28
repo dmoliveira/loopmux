@@ -1206,10 +1206,8 @@ fn load_workspace_profile_context(
     path_override: Option<&PathBuf>,
 ) -> Result<(PathBuf, Vec<ResolvedRunProfile>, PathBuf)> {
     let config_path = resolve_workspace_config_path(path_override)?;
-    if !config_path.exists() {
-        if path_override.is_none() {
-            ensure_default_workspace_config_exists(&config_path)?;
-        }
+    if !config_path.exists() && path_override.is_none() {
+        ensure_default_workspace_config_exists(&config_path)?;
     }
     if !config_path.exists() {
         bail!("workspace config not found at {}", config_path.display());
@@ -1251,7 +1249,7 @@ fn resolve_workspace_config_path(path_override: Option<&PathBuf>) -> Result<Path
 
 fn selected_workspace_profiles(
     profiles: &[ResolvedRunProfile],
-    cwd: &PathBuf,
+    cwd: &Path,
     all: bool,
 ) -> Vec<ResolvedRunProfile> {
     profiles
@@ -1468,7 +1466,7 @@ fn config_has_profile_definition(config: &Config) -> bool {
             .is_some_and(|targets| !targets.is_empty())
 }
 
-fn resolve_workspace_import_path(base_config_path: &PathBuf, value: &str) -> Result<PathBuf> {
+fn resolve_workspace_import_path(base_config_path: &Path, value: &str) -> Result<PathBuf> {
     let expanded = if let Some(stripped) = value.strip_prefix("~/") {
         let home = std::env::var("HOME").context("HOME not set for import expansion")?;
         PathBuf::from(home).join(stripped)
@@ -1487,7 +1485,7 @@ fn resolve_workspace_import_path(base_config_path: &PathBuf, value: &str) -> Res
     Ok(parent.join(expanded))
 }
 
-fn profile_matches_cwd(profile: &ResolvedRunProfile, cwd: &PathBuf) -> bool {
+fn profile_matches_cwd(profile: &ResolvedRunProfile, cwd: &Path) -> bool {
     let Some(patterns) = profile.when.cwd_matches.as_ref() else {
         return true;
     };
@@ -1586,20 +1584,20 @@ fn hydrate_run_args_from_history(mut args: RunArgs) -> Result<RunArgs> {
     if args.log_preview_lines.is_none() {
         args.log_preview_lines = entry.log_preview_lines;
     }
-    if !args.no_trigger_edge {
-        if let Some(trigger_edge) = entry.trigger_edge {
-            args.no_trigger_edge = !trigger_edge;
-        }
+    if !args.no_trigger_edge
+        && let Some(trigger_edge) = entry.trigger_edge
+    {
+        args.no_trigger_edge = !trigger_edge;
     }
-    if !args.no_recheck_before_send {
-        if let Some(recheck_before_send) = entry.recheck_before_send {
-            args.no_recheck_before_send = !recheck_before_send;
-        }
+    if !args.no_recheck_before_send
+        && let Some(recheck_before_send) = entry.recheck_before_send
+    {
+        args.no_recheck_before_send = !recheck_before_send;
     }
-    if args.fanout == FanoutMode::Matched {
-        if let Some(fanout) = entry.fanout {
-            args.fanout = fanout;
-        }
+    if args.fanout == FanoutMode::Matched
+        && let Some(fanout) = entry.fanout
+    {
+        args.fanout = fanout;
     }
     if args.duration.is_none() {
         args.duration = entry.duration;
@@ -1645,7 +1643,7 @@ fn resolve_run_identity(name_override: Option<&str>) -> RunIdentity {
     let now = OffsetDateTime::now_utc().unix_timestamp_nanos();
     let id = format!("run-{now}-{pid}");
     let name = name_override
-        .map(|value| sanitize_run_name(value))
+        .map(sanitize_run_name)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(auto_run_name);
     RunIdentity { id, name }
@@ -3521,7 +3519,7 @@ fn load_run_history_from_path(path: &Path) -> Result<RunHistory> {
     if !path.exists() {
         return Ok(RunHistory::default());
     }
-    let content = std::fs::read_to_string(&path)
+    let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read history file: {}", path.display()))?;
     let history: RunHistory = serde_json::from_str(&content)
         .with_context(|| format!("failed to parse history file: {}", path.display()))?;
@@ -3719,22 +3717,21 @@ fn load_prompt_history_items_from_paths(
     let mut seen = HashSet::new();
     let mut items = Vec::new();
 
-    if persisted_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&persisted_path) {
-            if let Ok(persisted) = serde_json::from_str::<Vec<PromptHistoryItem>>(&content) {
-                for item in persisted {
-                    let text = item.text.trim().to_string();
-                    if text.is_empty() || !seen.insert(text.clone()) {
-                        continue;
-                    }
-                    items.push(PromptHistoryItem {
-                        created_at: item.created_at,
-                        text,
-                    });
-                    if items.len() >= limit {
-                        return Ok(items);
-                    }
-                }
+    if persisted_path.exists()
+        && let Ok(content) = std::fs::read_to_string(persisted_path)
+        && let Ok(persisted) = serde_json::from_str::<Vec<PromptHistoryItem>>(&content)
+    {
+        for item in persisted {
+            let text = item.text.trim().to_string();
+            if text.is_empty() || !seen.insert(text.clone()) {
+                continue;
+            }
+            items.push(PromptHistoryItem {
+                created_at: item.created_at,
+                text,
+            });
+            if items.len() >= limit {
+                return Ok(items);
             }
         }
     }
@@ -3917,13 +3914,13 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
             println!("loopmux: iterations = {max_sends}");
         }
         println!("loopmux: started at {start_timestamp}");
-    } else if ui_mode == UiMode::Tui {
-        if let Some(tui_state) = tui.as_mut() {
-            tui_state.push_log(format!(
-                "[{}] started target={} run={} ({})",
-                start_timestamp, config.target_label, identity.name, identity.id
-            ));
-        }
+    } else if ui_mode == UiMode::Tui
+        && let Some(tui_state) = tui.as_mut()
+    {
+        tui_state.push_log(format!(
+            "[{}] started target={} run={} ({})",
+            start_timestamp, config.target_label, identity.name, identity.id
+        ));
     }
     logger.log(LogEvent::started(&config, start_timestamp.clone()))?;
     let run_started = std::time::Instant::now();
@@ -3939,31 +3936,31 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
         if let Some(tui_state) = tui.as_mut() {
             tui_state.refresh_process_usage_summary();
         }
-        if let Some(limit) = config.duration {
-            if active_elapsed >= limit {
-                if ui_mode == UiMode::Tui {
-                    if let Some(tui_state) = tui.as_mut() {
-                        let elapsed = format_std_duration(active_elapsed);
-                        tui_state.push_log(format!(
-                            "[{}] stopped reason=duration sends={} elapsed={}",
-                            timestamp_now(),
-                            send_count,
-                            elapsed
-                        ));
-                        tui_state.update(
-                            LoopState::Stopped,
-                            &config,
-                            send_count,
-                            max_sends,
-                            active_rule.as_deref(),
-                            active_elapsed,
-                            "",
-                        )?;
-                    }
-                }
-                logger.log(LogEvent::stopped(&config, "duration", send_count))?;
-                break;
+        if let Some(limit) = config.duration
+            && active_elapsed >= limit
+        {
+            if ui_mode == UiMode::Tui
+                && let Some(tui_state) = tui.as_mut()
+            {
+                let elapsed = format_std_duration(active_elapsed);
+                tui_state.push_log(format!(
+                    "[{}] stopped reason=duration sends={} elapsed={}",
+                    timestamp_now(),
+                    send_count,
+                    elapsed
+                ));
+                tui_state.update(
+                    LoopState::Stopped,
+                    &config,
+                    send_count,
+                    max_sends,
+                    active_rule.as_deref(),
+                    active_elapsed,
+                    "",
+                )?;
             }
+            logger.log(LogEvent::stopped(&config, "duration", send_count))?;
+            break;
         }
 
         if let Some(command) = fleet_registry.consume_control_command()? {
@@ -4190,14 +4187,14 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                 )?;
             }
             if open_fleet_manager {
-                if let Err(err) = run_fleet_manager_tui_embedded() {
-                    if let Some(tui_state) = tui.as_mut() {
-                        tui_state.push_log(format!(
-                            "[{}] fleet manager error=\"{}\"",
-                            timestamp_now(),
-                            truncate_text(&err.to_string(), 100, true)
-                        ));
-                    }
+                if let Err(err) = run_fleet_manager_tui_embedded()
+                    && let Some(tui_state) = tui.as_mut()
+                {
+                    tui_state.push_log(format!(
+                        "[{}] fleet manager error=\"{}\"",
+                        timestamp_now(),
+                        truncate_text(&err.to_string(), 100, true)
+                    ));
                 }
                 if let Some(tui_state) = tui.as_mut() {
                     tui_state
@@ -4297,7 +4294,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                             in_flight.child.id(),
                             in_flight.started_at.elapsed().as_secs()
                         );
-                        if exec_running_ticks == 1 || exec_running_ticks % 3 == 0 {
+                        if exec_running_ticks == 1 || exec_running_ticks.is_multiple_of(3) {
                             logger.log(LogEvent::exec(
                                 &config,
                                 "exec-still-running",
@@ -4548,43 +4545,43 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                     break;
                 }
 
-                if let Some(delay_seconds) = plan.delay_seconds {
-                    if delay_seconds > 0 {
-                        if ui_mode == UiMode::Tui {
-                            loop_state = LoopState::Delay;
-                        }
-                        let detail = format!("delay {}s", delay_seconds);
-                        logger.log(LogEvent::delay_scheduled(
-                            &config,
-                            plan.rule_id.as_deref(),
-                            detail,
-                        ))?;
-                        if let Some(tui_state) = tui.as_mut() {
-                            tui_state.push_log(format!(
-                                "[{}] delay rule={} detail=\"delay {}s\"",
-                                timestamp_now(),
-                                plan.rule_id.as_deref().unwrap_or("<unnamed>"),
-                                delay_seconds
-                            ));
-                            tui_state.update(
-                                loop_state,
-                                &config,
-                                send_count,
-                                max_sends,
-                                plan.rule_id.as_deref(),
-                                effective_elapsed(run_started, held_total, hold_started),
-                                "",
-                            )?;
-                        }
-                        sleep_with_heartbeat(
-                            &fleet_registry,
-                            &config.target_label,
+                if let Some(delay_seconds) = plan.delay_seconds
+                    && delay_seconds > 0
+                {
+                    if ui_mode == UiMode::Tui {
+                        loop_state = LoopState::Delay;
+                    }
+                    let detail = format!("delay {}s", delay_seconds);
+                    logger.log(LogEvent::delay_scheduled(
+                        &config,
+                        plan.rule_id.as_deref(),
+                        detail,
+                    ))?;
+                    if let Some(tui_state) = tui.as_mut() {
+                        tui_state.push_log(format!(
+                            "[{}] delay rule={} detail=\"delay {}s\"",
+                            timestamp_now(),
+                            plan.rule_id.as_deref().unwrap_or("<unnamed>"),
+                            delay_seconds
+                        ));
+                        tui_state.update(
                             loop_state,
+                            &config,
                             send_count,
-                            config.poll,
-                            delay_seconds,
+                            max_sends,
+                            plan.rule_id.as_deref(),
+                            effective_elapsed(run_started, held_total, hold_started),
+                            "",
                         )?;
                     }
+                    sleep_with_heartbeat(
+                        &fleet_registry,
+                        &config.target_label,
+                        loop_state,
+                        send_count,
+                        config.poll,
+                        delay_seconds,
+                    )?;
                 }
 
                 let recipients = match config.fanout {
@@ -4765,20 +4762,19 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
             }
 
             if stop_after {
-                if ui_mode == UiMode::Tui {
-                    if let Some(tui_state) = tui.as_mut() {
-                        tui_state
-                            .push_log(format!("[{}] stopped reason=stop_rule", timestamp_now()));
-                        tui_state.update(
-                            LoopState::Stopped,
-                            &config,
-                            send_count,
-                            max_sends,
-                            active_rule.as_deref(),
-                            effective_elapsed(run_started, held_total, hold_started),
-                            "",
-                        )?;
-                    }
+                if ui_mode == UiMode::Tui
+                    && let Some(tui_state) = tui.as_mut()
+                {
+                    tui_state.push_log(format!("[{}] stopped reason=stop_rule", timestamp_now()));
+                    tui_state.update(
+                        LoopState::Stopped,
+                        &config,
+                        send_count,
+                        max_sends,
+                        active_rule.as_deref(),
+                        effective_elapsed(run_started, held_total, hold_started),
+                        "",
+                    )?;
                 }
                 if ui_mode == UiMode::Plain {
                     println!("loopmux: stopping due to stop rule");
@@ -4787,19 +4783,19 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                 break;
             }
             if config.once {
-                if ui_mode == UiMode::Tui {
-                    if let Some(tui_state) = tui.as_mut() {
-                        tui_state.push_log(format!("[{}] stopped reason=once", timestamp_now()));
-                        tui_state.update(
-                            LoopState::Stopped,
-                            &config,
-                            send_count,
-                            max_sends,
-                            active_rule.as_deref(),
-                            effective_elapsed(run_started, held_total, hold_started),
-                            "",
-                        )?;
-                    }
+                if ui_mode == UiMode::Tui
+                    && let Some(tui_state) = tui.as_mut()
+                {
+                    tui_state.push_log(format!("[{}] stopped reason=once", timestamp_now()));
+                    tui_state.update(
+                        LoopState::Stopped,
+                        &config,
+                        send_count,
+                        max_sends,
+                        active_rule.as_deref(),
+                        effective_elapsed(run_started, held_total, hold_started),
+                        "",
+                    )?;
                 }
                 if ui_mode == UiMode::Plain {
                     println!("loopmux: stopping after single send");
@@ -5009,14 +5005,14 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                 )?;
             }
             if open_fleet_manager {
-                if let Err(err) = run_fleet_manager_tui_embedded() {
-                    if let Some(tui_state) = tui.as_mut() {
-                        tui_state.push_log(format!(
-                            "[{}] fleet manager error=\"{}\"",
-                            timestamp_now(),
-                            truncate_text(&err.to_string(), 100, true)
-                        ));
-                    }
+                if let Err(err) = run_fleet_manager_tui_embedded()
+                    && let Some(tui_state) = tui.as_mut()
+                {
+                    tui_state.push_log(format!(
+                        "[{}] fleet manager error=\"{}\"",
+                        timestamp_now(),
+                        truncate_text(&err.to_string(), 100, true)
+                    ));
                 }
                 if let Some(tui_state) = tui.as_mut() {
                     tui_state
@@ -5284,25 +5280,25 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
     }
 
     let elapsed = format_std_duration(effective_elapsed(run_started, held_total, hold_started));
-    if ui_mode == UiMode::Tui {
-        if let Some(tui_state) = tui.as_mut() {
-            tui_state.push_log(format!(
-                "[{}] stopped reason=completed sends={} elapsed={}",
-                timestamp_now(),
-                send_count,
-                elapsed
-            ));
-            tui_state.update(
-                LoopState::Stopped,
-                &config,
-                send_count,
-                max_sends,
-                active_rule.as_deref(),
-                effective_elapsed(run_started, held_total, hold_started),
-                "",
-            )?;
-            std::thread::sleep(std::time::Duration::from_secs(3));
-        }
+    if ui_mode == UiMode::Tui
+        && let Some(tui_state) = tui.as_mut()
+    {
+        tui_state.push_log(format!(
+            "[{}] stopped reason=completed sends={} elapsed={}",
+            timestamp_now(),
+            send_count,
+            elapsed
+        ));
+        tui_state.update(
+            LoopState::Stopped,
+            &config,
+            send_count,
+            max_sends,
+            active_rule.as_deref(),
+            effective_elapsed(run_started, held_total, hold_started),
+            "",
+        )?;
+        std::thread::sleep(std::time::Duration::from_secs(3));
     }
     logger.log(LogEvent::stopped(&config, "completed", send_count))?;
     if let Some(mut tui_state) = tui {
@@ -5445,10 +5441,10 @@ fn select_rules<'a>(
 ) -> Result<Vec<RuleMatch<'a>>> {
     let mut candidates = Vec::new();
     for (index, rule) in rules.iter().enumerate() {
-        if let Some(active) = active_rule {
-            if rule.id.as_deref() != Some(active) {
-                continue;
-            }
+        if let Some(active) = active_rule
+            && rule.id.as_deref() != Some(active)
+        {
+            continue;
         }
         if !matches_rule(rule, output)? {
             continue;
@@ -5471,9 +5467,9 @@ fn select_rules<'a>(
             for candidate in &candidates[1..] {
                 let priority = candidate.rule.priority.unwrap_or(0);
                 let best_priority = best.rule.priority.unwrap_or(0);
-                if priority > best_priority {
-                    best = candidate;
-                } else if priority == best_priority && candidate.index < best.index {
+                if priority > best_priority
+                    || (priority == best_priority && candidate.index < best.index)
+                {
                     best = candidate;
                 }
             }
