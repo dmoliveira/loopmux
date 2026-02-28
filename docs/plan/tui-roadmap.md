@@ -395,23 +395,35 @@ Important decisions to remember:
 
 ## Epic E4 - ratatui feasibility and phased migration
 
-Status: `` not started
+Status: `` doing
 
 Goal: migrate only when hardening baseline is met and parity can be maintained.
 
 ### Task E4.T1 - Feasibility RFC
 
-Status: `` not started
+Status: `` done
 
 Subtasks:
 
-- `` E4.T1.S1 Compare manual renderer vs `ratatui` cost/benefit with evidence.
-- `` E4.T1.S2 Define compatibility and rollback strategy.
-- `` E4.T1.S3 Set migration entry criteria and stop conditions.
+- `` E4.T1.S1 Compare manual renderer vs `ratatui` cost/benefit with evidence.
+- `` E4.T1.S2 Define compatibility and rollback strategy.
+- `` E4.T1.S3 Set migration entry criteria and stop conditions.
+
+Implementation notes (2026-02-28):
+
+- Added RFC `docs/specs/ratatui-feasibility-rfc.md` with manual-renderer vs `ratatui` cost/benefit analysis and migration tradeoffs.
+- Defined compatibility and rollback strategy with phased adapter-based migration and explicit fallback rules.
+- Defined migration entry criteria and stop conditions tied to E0/E1/E3 validation posture.
+
+Closure update (2026-02-28):
+
+- Validation evidence: docs-only change validated with `git diff --check`.
+- Outcome: E4.T1 complete; E4.T2 remains pending.
 
 Important decisions to remember:
 
 - Migration starts only after E1 + E3 acceptance criteria are met.
+- Do not remove legacy renderer until parity/stability evidence passes at least one prove-out release window.
 
 ### Task E4.T2 - Incremental adapter implementation
 
@@ -458,3 +470,4 @@ When any task/subtask changes to `` done, update this file in the same PR:
 - `2026-02-28` `PLAN-018` E3.T1.S1 introduces compact/standard/wide layout golden contracts with ordered token assertions to stabilize status-bar composition.
 - `2026-02-28` `PLAN-019` E3.T1.S2 adds unicode/no-color snapshot contracts to preserve separator/ellipsis behavior and ANSI-free output guarantees.
 - `2026-02-28` `PLAN-020` E3.T1.S3 defines explicit snapshot-update rationale and diff-evidence policy so golden churn stays intentional.
+- `2026-02-28` `PLAN-021` E4.T1 defines ratatui feasibility, compatibility/rollback strategy, and migration entry/stop criteria in a dedicated RFC.
