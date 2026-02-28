@@ -5565,7 +5565,7 @@ fn should_skip_scan_by_hash(
     last_hash: &str,
     has_pending_confirm: bool,
 ) -> bool {
-    trigger_edge_enabled && hash == last_hash && !has_pending_confirm
+    trigger_edge_enabled && !last_hash.is_empty() && hash == last_hash && !has_pending_confirm
 }
 
 fn extract_trigger_preview(output: &str, max_lines: usize, use_unicode: bool) -> (usize, String) {
@@ -11038,6 +11038,14 @@ runs:
             std::time::Instant::now(),
         ));
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn skip_scan_by_hash_requires_initialized_last_hash() {
+        assert!(!should_skip_scan_by_hash(true, "", "", false));
+        assert!(should_skip_scan_by_hash(true, "abc", "abc", false));
+        assert!(!should_skip_scan_by_hash(true, "abc", "abc", true));
+        assert!(!should_skip_scan_by_hash(false, "abc", "abc", false));
     }
 
     #[test]
