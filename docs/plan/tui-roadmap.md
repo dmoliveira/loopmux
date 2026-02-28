@@ -196,19 +196,19 @@ Important decisions to remember:
 
 ## Epic E1 - Lifecycle hardening on crossterm
 
-Status: `` not started
+Status: `` doing
 
 Goal: make current architecture resilient before introducing `ratatui`.
 
 ### Task E1.T1 - Terminal lifecycle guard
 
-Status: `` doing
+Status: `` done
 
 Subtasks:
 
 - `` E1.T1.S1 Introduce RAII terminal guard for raw mode lifecycle.
 - `` E1.T1.S2 Add panic-safe restoration hook and idempotent shutdown logic.
-- `` E1.T1.S3 Add tests for restoration guarantees on error and panic simulation.
+- `` E1.T1.S3 Add tests for restoration guarantees on error and panic simulation.
 
 Implementation notes (2026-02-28):
 
@@ -216,10 +216,21 @@ Implementation notes (2026-02-28):
 - Installed a panic hook guard path that disables raw mode when panic occurs while TUI guard depth is active.
 - Migrated run/fleet raw-mode activation to the shared guard path; removed ad-hoc fleet enable/disable calls.
 
+Test notes (2026-02-28):
+
+- Added guard regression tests for nested acquire/release, idempotent release, acquire failure rollback, and panic-path restoration with no depth underflow.
+- Added test-only guarded raw-mode shims and state reset helpers to validate lifecycle behavior without requiring a live terminal.
+
+Closure update (2026-02-28):
+
+- Validation evidence: `cargo fmt --check` and `cargo test -q` (100 passed).
+- Outcome: E1.T1 is complete; next active E1 item is E1.T2 render I/O error policy.
+
 Important decisions to remember:
 
 - Guard implementation must not require global mutable state for correctness.
 - Nested/embedded TUI flows must remain safe under one shared guard model (depth-tracked acquisition/release).
+- Test-only global state is acceptable when isolated under `#[cfg(test)]` and serialized to avoid flaky races.
 
 ### Task E1.T2 - Render I/O error policy
 
@@ -355,3 +366,4 @@ When any task/subtask changes to `` done, update this file in the same PR:
 - `2026-02-28` `PLAN-005` E0.T2 sets explicit SLOs for terminal recovery, render failure handling, and fleet exit hygiene to measure hardening progress.
 - `2026-02-28` `PLAN-006` E0.T2 chooses in-process lightweight instrumentation (no external telemetry dependency) and PR-level evidence tables for lifecycle/render changes.
 - `2026-02-28` `PLAN-007` E1.T1 adopts depth-tracked RAII raw-mode guard plus panic-hook restoration to prevent terminal wedging on early exits and panic paths.
+- `2026-02-28` `PLAN-008` E1.T1.S3 validates guard lifecycle semantics via test-only raw-mode shims and panic regression coverage, including underflow prevention.
