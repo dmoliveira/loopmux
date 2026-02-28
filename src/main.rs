@@ -5597,6 +5597,24 @@ fn compact_timestamp(timestamp: &str) -> String {
     truncate_text(time, 12, false)
 }
 
+fn latest_stop_reason(logs: &[String]) -> Option<String> {
+    const MARKER: &str = "stopped reason=";
+    logs.iter().rev().find_map(|line| {
+        let idx = line.find(MARKER)?;
+        let rest = &line[idx + MARKER.len()..];
+        let token = rest
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_matches('"');
+        if token.is_empty() {
+            None
+        } else {
+            Some(token.to_string())
+        }
+    })
+}
+
 fn compact_sent_log(
     timestamp: &str,
     target: &str,
@@ -7004,6 +7022,12 @@ impl TuiState {
         };
         let footer_note_owned = if let Some(note) = self.footer_note.as_ref() {
             format!("{note} {view_note}")
+        } else if state == LoopState::Stopped {
+            if let Some(reason) = latest_stop_reason(&self.logs) {
+                format!("stop {reason} {view_note}")
+            } else {
+                view_note.to_string()
+            }
         } else {
             view_note.to_string()
         };
@@ -11098,6 +11122,25 @@ runs:
         assert!(!looks_like_compact_time_prefix(
             "[2026-02-17T00:12:34Z] sent"
         ));
+    }
+
+    #[test]
+    fn latest_stop_reason_prefers_most_recent_reason() {
+        let logs = vec![
+            "[t1] started target=ai:1.0".to_string(),
+            "[t2] stopped reason=manual".to_string(),
+            "[t3] stopped reason=once sends=1 elapsed=0s".to_string(),
+        ];
+        assert_eq!(latest_stop_reason(&logs).as_deref(), Some("once"));
+    }
+
+    #[test]
+    fn latest_stop_reason_ignores_missing_reason_token() {
+        let logs = vec![
+            "[t1] stopped reason=".to_string(),
+            "[t2] status target=ai:1.0".to_string(),
+        ];
+        assert!(latest_stop_reason(&logs).is_none());
     }
 
     #[test]
