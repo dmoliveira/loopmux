@@ -427,17 +427,29 @@ Important decisions to remember:
 
 ### Task E4.T2 - Incremental adapter implementation
 
-Status: `` not started
+Status: `` doing
 
 Subtasks:
 
-- `` E4.T2.S1 Introduce adapter interface for draw backend.
+- `` E4.T2.S1 Introduce adapter interface for draw backend.
 - `` E4.T2.S2 Port status/header/footer first with parity checks.
 - `` E4.T2.S3 Port list/detail panes and remove dual-path debt.
+
+Implementation notes (2026-02-28):
+
+- Added `StatusBarRenderer` adapter interface and `StatusBarRenderArgs` to isolate status-bar draw backend boundary.
+- Added legacy implementation `LegacyStatusBarRenderer` and wired `TuiState` to use adapter rendering with no behavior change.
+- Added parity regression test to assert adapter-rendered output equals direct legacy render output.
+
+Closure update (partial, 2026-02-28):
+
+- Validation evidence: `cargo fmt --check` and `cargo test -q` (121 passed).
+- Outcome: E4.T2.S1 complete; E4.T2.S2/S3 remain pending.
 
 Important decisions to remember:
 
 - Keep dual backend window short and time-boxed to avoid long-lived complexity.
+- Adapter seams must ship with parity assertions to prove no behavior change before backend swaps.
 
 ## Task closure protocol
 
@@ -471,3 +483,4 @@ When any task/subtask changes to `` done, update this file in the same PR:
 - `2026-02-28` `PLAN-019` E3.T1.S2 adds unicode/no-color snapshot contracts to preserve separator/ellipsis behavior and ANSI-free output guarantees.
 - `2026-02-28` `PLAN-020` E3.T1.S3 defines explicit snapshot-update rationale and diff-evidence policy so golden churn stays intentional.
 - `2026-02-28` `PLAN-021` E4.T1 defines ratatui feasibility, compatibility/rollback strategy, and migration entry/stop criteria in a dedicated RFC.
+- `2026-02-28` `PLAN-022` E4.T2.S1 introduces a legacy-backed status-bar adapter boundary with explicit parity tests prior to backend migration.

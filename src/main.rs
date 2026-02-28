@@ -6722,6 +6722,7 @@ struct TuiState {
     overlay_lines: Option<Vec<String>>,
     overlay_help: Option<String>,
     footer_note: Option<String>,
+    status_bar_renderer: Box<dyn StatusBarRenderer>,
     process_usage_provider: Box<dyn ProcessUsageProvider>,
     usage_sample: Option<ProcessUsageSample>,
     log_view: LogViewMode,
@@ -6734,6 +6735,46 @@ struct ProcessUsageSample {
 
 trait ProcessUsageProvider {
     fn sample(&self, pid: u32) -> Option<String>;
+}
+
+struct StatusBarRenderArgs<'a> {
+    state: LoopState,
+    layout: LayoutMode,
+    icon_mode: IconMode,
+    style: StyleConfig,
+    width: u16,
+    config: &'a ResolvedConfig,
+    current: u32,
+    total: u32,
+    rule_id: Option<&'a str>,
+    elapsed: &'a str,
+    remaining_duration: Option<&'a str>,
+    process_usage: Option<&'a str>,
+}
+
+trait StatusBarRenderer {
+    fn render(&self, args: StatusBarRenderArgs<'_>) -> String;
+}
+
+struct LegacyStatusBarRenderer;
+
+impl StatusBarRenderer for LegacyStatusBarRenderer {
+    fn render(&self, args: StatusBarRenderArgs<'_>) -> String {
+        render_status_bar(
+            args.state,
+            args.layout,
+            args.icon_mode,
+            args.style,
+            args.width,
+            args.config,
+            args.current,
+            args.total,
+            args.rule_id,
+            args.elapsed,
+            args.remaining_duration,
+            args.process_usage,
+        )
+    }
 }
 
 struct SystemProcessUsageProvider;
@@ -6768,6 +6809,7 @@ impl TuiState {
             overlay_lines: None,
             overlay_help: None,
             footer_note: None,
+            status_bar_renderer: Box::new(LegacyStatusBarRenderer),
             process_usage_provider: Box::new(SystemProcessUsageProvider),
             usage_sample: None,
             log_view: LogViewMode::Chronological,
@@ -6840,20 +6882,20 @@ impl TuiState {
 
         let layout = layout_mode(width);
         let process_usage = self.process_usage_summary();
-        let bar = render_status_bar(
+        let bar = self.status_bar_renderer.render(StatusBarRenderArgs {
             state,
             layout,
-            self.icon_mode,
-            self.style,
+            icon_mode: self.icon_mode,
+            style: self.style,
             width,
             config,
             current,
             total,
             rule_id,
-            &elapsed,
-            remaining_duration.as_deref(),
-            process_usage.as_deref(),
-        );
+            elapsed: &elapsed,
+            remaining_duration: remaining_duration.as_deref(),
+            process_usage: process_usage.as_deref(),
+        });
 
         let log_height = if width < 60 { 0 } else { self.max_logs };
         let overlay_lines = self.overlay_lines.as_ref();
@@ -10018,6 +10060,47 @@ runs:
             prompt_edit_max_chars: DEFAULT_PROMPT_EDIT_MAX_CHARS,
             duration: None,
         }
+    }
+
+    #[test]
+    fn legacy_status_bar_renderer_matches_direct_render() {
+        let config = status_bar_test_config();
+        let args = StatusBarRenderArgs {
+            state: LoopState::Running,
+            layout: LayoutMode::Standard,
+            icon_mode: IconMode::Ascii,
+            style: StyleConfig {
+                use_color: false,
+                use_bg: false,
+                use_unicode_ellipsis: true,
+                dim_logs: true,
+            },
+            width: 120,
+            config: &config,
+            current: 5,
+            total: 10,
+            rule_id: Some("Concluded"),
+            elapsed: "00:10",
+            remaining_duration: Some("1m20s"),
+            process_usage: Some("cpu 12.3% mem 42.0mb"),
+        };
+
+        let direct = render_status_bar(
+            args.state,
+            args.layout,
+            args.icon_mode,
+            args.style,
+            args.width,
+            args.config,
+            args.current,
+            args.total,
+            args.rule_id,
+            args.elapsed,
+            args.remaining_duration,
+            args.process_usage,
+        );
+        let via_adapter = LegacyStatusBarRenderer.render(args);
+        assert_eq!(via_adapter, direct);
     }
 
     fn assert_contains_in_order(line: &str, tokens: &[&str]) {
