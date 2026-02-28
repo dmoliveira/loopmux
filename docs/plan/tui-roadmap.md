@@ -260,18 +260,18 @@ Important decisions to remember:
 
 ## Epic E2 - Architecture split for determinism
 
-Status: `` doing
+Status: `` done
 
 Goal: separate model/update/draw/input to reduce coupling and increase testability.
 
 ### Task E2.T1 - Loop state model extraction
 
-Status: `` doing
+Status: `` done
 
 Subtasks:
 
 - `` E2.T1.S1 Extract pure state structs and transition functions.
-- `` E2.T1.S2 Isolate side effects behind trait boundaries.
+- `` E2.T1.S2 Isolate side effects behind trait boundaries.
 - `` E2.T1.S3 Add deterministic transition tests for key flows.
 
 Implementation notes (2026-02-28):
@@ -279,16 +279,18 @@ Implementation notes (2026-02-28):
 - Extracted hold-action transition seam into `plan_hold_action` and `apply_hold_transition` to centralize pause/resume/hold-toggle state logic.
 - Wired the seam across all three TUI interaction loops (holding, active, and wait loops) without changing external key behavior.
 - Added deterministic transition tests for hold plans and transition application semantics.
+- Isolated process-usage side effects behind `ProcessUsageProvider` trait with `SystemProcessUsageProvider` default wiring in `TuiState`.
 
-Closure update (partial, 2026-02-28):
+Closure update (2026-02-28):
 
 - Validation evidence: `cargo fmt --check` and `cargo test -q` (106 passed).
-- Outcome: E2.T1.S1/S3 complete; E2.T1.S2 remains pending.
+- Outcome: E2.T1 complete.
 
 Important decisions to remember:
 
 - Extract only proven seams first; avoid broad file split churn in one PR.
 - Transition seam extraction should keep side effects localized and make future trait-boundary isolation incremental.
+- Side-effect traits should default to production implementations and keep call sites free from environment-specific command plumbing.
 
 ### Task E2.T2 - Event loop rationalization
 
@@ -311,7 +313,7 @@ Implementation notes (2026-02-28):
 Closure update (2026-02-28):
 
 - Validation evidence: `cargo fmt --check` and `cargo test -q` (103 passed).
-- Outcome: E2.T2 is complete; E2.T1 remains pending.
+- Outcome: E2.T2 is complete; paired with E2.T1 completion, Epic E2 is now complete.
 
 Important decisions to remember:
 
@@ -412,3 +414,4 @@ When any task/subtask changes to `` done, update this file in the same PR:
 - `2026-02-28` `PLAN-011` E2.T2.S1 introduces explicit fleet loop phases and phase-aware error contexts to improve determinism and triage.
 - `2026-02-28` `PLAN-012` E2.T2.S3 adds deterministic resize/burst stress tests to lock in panic-free behavior and selection-wrap invariants.
 - `2026-02-28` `PLAN-013` E2.T1.S1/S3 establish a pure hold-transition planning seam plus deterministic transition tests to reduce duplicated control logic.
+- `2026-02-28` `PLAN-014` E2.T1.S2 isolates process-usage command execution behind `ProcessUsageProvider` trait boundary to reduce side-effect coupling in `TuiState`.
