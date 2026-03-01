@@ -5750,6 +5750,16 @@ fn fleet_heartbeat_drift_seconds(
     elapsed_seconds.saturating_sub(interval_seconds)
 }
 
+fn fleet_heartbeat_drift_severity(drift_seconds: u64) -> &'static str {
+    if drift_seconds == 0 {
+        "ok"
+    } else if drift_seconds <= 30 {
+        "warn"
+    } else {
+        "critical"
+    }
+}
+
 fn format_fleet_heartbeat_metric(
     state: LoopState,
     sends_total: u32,
@@ -5765,7 +5775,7 @@ fn format_fleet_heartbeat_metric(
         "stalled"
     };
     format!(
-        "fleet-heartbeat state={} activity={} progress={} sends_total={} sends_delta={} poll={}s window={}s drift={}s",
+        "fleet-heartbeat state={} activity={} progress={} sends_total={} sends_delta={} poll={}s window={}s drift={}s severity={}",
         fleet_state_label(state),
         activity,
         progress,
@@ -5773,7 +5783,8 @@ fn format_fleet_heartbeat_metric(
         sends_delta,
         poll_seconds,
         interval_seconds,
-        drift_seconds
+        drift_seconds,
+        fleet_heartbeat_drift_severity(drift_seconds)
     )
 }
 
@@ -11538,6 +11549,14 @@ runs:
     }
 
     #[test]
+    fn fleet_heartbeat_drift_severity_is_compact_and_stable() {
+        assert_eq!(fleet_heartbeat_drift_severity(0), "ok");
+        assert_eq!(fleet_heartbeat_drift_severity(10), "warn");
+        assert_eq!(fleet_heartbeat_drift_severity(30), "warn");
+        assert_eq!(fleet_heartbeat_drift_severity(31), "critical");
+    }
+
+    #[test]
     fn fleet_heartbeat_metric_marks_idle_and_active_modes() {
         let idle = format_fleet_heartbeat_metric(LoopState::Running, 10, 0, 5, 60, 0);
         assert!(idle.contains("state=running"));
@@ -11546,12 +11565,14 @@ runs:
         assert!(idle.contains("poll=5s"));
         assert!(idle.contains("window=60s"));
         assert!(idle.contains("drift=0s"));
+        assert!(idle.contains("severity=ok"));
         let active = format_fleet_heartbeat_metric(LoopState::Running, 12, 2, 5, 60, 20);
         assert!(active.contains("activity=active"));
         assert!(active.contains("progress=progressing"));
         assert!(active.contains("sends_total=12"));
         assert!(active.contains("sends_delta=2"));
         assert!(active.contains("drift=20s"));
+        assert!(active.contains("severity=warn"));
         let stopped = format_fleet_heartbeat_metric(LoopState::Stopped, 12, 0, 5, 60, 0);
         assert!(stopped.contains("state=stopped"));
         assert!(stopped.contains("activity=idle"));
@@ -11570,6 +11591,7 @@ runs:
             assert!(metric.contains("poll="));
             assert!(metric.contains("window="));
             assert!(metric.contains("drift="));
+            assert!(metric.contains("severity="));
         }
     }
 
