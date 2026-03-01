@@ -5636,7 +5636,15 @@ fn tui_frame_signature(
 }
 
 fn should_emit_periodic_count_log(total: u64, last_reported: u64, interval: u64) -> bool {
-    interval > 0 && total >= interval && total.saturating_sub(last_reported) >= interval
+    if interval == 0 || total < interval {
+        return false;
+    }
+    let effective_last_reported = if total < last_reported {
+        0
+    } else {
+        last_reported
+    };
+    total.saturating_sub(effective_last_reported) >= interval
 }
 
 fn compact_sent_log(
@@ -11226,6 +11234,21 @@ runs:
     }
 
     #[test]
+    fn tui_frame_signature_changes_when_status_bar_changes() {
+        let lines = vec!["line a".to_string()];
+        let a = tui_frame_signature(100, 20, "bar one", &lines, "footer", false);
+        let b = tui_frame_signature(100, 20, "bar two", &lines, "footer", false);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn tui_frame_signature_changes_when_log_lines_change() {
+        let a = tui_frame_signature(100, 20, "bar", &["line a".to_string()], "footer", false);
+        let b = tui_frame_signature(100, 20, "bar", &["line b".to_string()], "footer", false);
+        assert_ne!(a, b);
+    }
+
+    #[test]
     fn periodic_count_log_emits_on_interval_boundaries() {
         assert!(!should_emit_periodic_count_log(
             TUI_REDRAW_SKIP_LOG_INTERVAL - 1,
@@ -11252,6 +11275,12 @@ runs:
     #[test]
     fn periodic_count_log_never_emits_for_zero_interval() {
         assert!(!should_emit_periodic_count_log(100, 0, 0));
+    }
+
+    #[test]
+    fn periodic_count_log_recovers_after_counter_reset() {
+        assert!(!should_emit_periodic_count_log(10, 25, 25));
+        assert!(should_emit_periodic_count_log(25, 100, 25));
     }
 
     #[test]
