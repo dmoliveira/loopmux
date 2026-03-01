@@ -1791,6 +1791,7 @@ impl FleetRunRegistry {
                                 state,
                                 sends,
                                 sends_delta,
+                                poll_seconds,
                                 heartbeat_interval,
                             ),
                         });
@@ -5729,6 +5730,7 @@ fn format_fleet_heartbeat_metric(
     state: LoopState,
     sends_total: u32,
     sends_delta: u32,
+    poll_seconds: u64,
     interval_seconds: u64,
 ) -> String {
     let activity = if sends_delta > 0 { "active" } else { "idle" };
@@ -5738,12 +5740,13 @@ fn format_fleet_heartbeat_metric(
         "stalled"
     };
     format!(
-        "fleet-heartbeat state={} activity={} progress={} sends_total={} sends_delta={} window={}s",
+        "fleet-heartbeat state={} activity={} progress={} sends_total={} sends_delta={} poll={}s window={}s",
         fleet_state_label(state),
         activity,
         progress,
         sends_total,
         sends_delta,
+        poll_seconds,
         interval_seconds
     )
 }
@@ -11487,17 +11490,18 @@ runs:
 
     #[test]
     fn fleet_heartbeat_metric_marks_idle_and_active_modes() {
-        let idle = format_fleet_heartbeat_metric(LoopState::Running, 10, 0, 60);
+        let idle = format_fleet_heartbeat_metric(LoopState::Running, 10, 0, 5, 60);
         assert!(idle.contains("state=running"));
         assert!(idle.contains("activity=idle"));
         assert!(idle.contains("progress=stalled"));
+        assert!(idle.contains("poll=5s"));
         assert!(idle.contains("window=60s"));
-        let active = format_fleet_heartbeat_metric(LoopState::Running, 12, 2, 60);
+        let active = format_fleet_heartbeat_metric(LoopState::Running, 12, 2, 5, 60);
         assert!(active.contains("activity=active"));
         assert!(active.contains("progress=progressing"));
         assert!(active.contains("sends_total=12"));
         assert!(active.contains("sends_delta=2"));
-        let stopped = format_fleet_heartbeat_metric(LoopState::Stopped, 12, 0, 60);
+        let stopped = format_fleet_heartbeat_metric(LoopState::Stopped, 12, 0, 5, 60);
         assert!(stopped.contains("state=stopped"));
         assert!(stopped.contains("activity=idle"));
     }
