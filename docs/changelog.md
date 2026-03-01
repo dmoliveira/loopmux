@@ -116,3 +116,8 @@
 - Release published: `https://github.com/dmoliveira/loopmux/releases/tag/v0.1.42`.
 - Tag: `v0.1.42`.
 - Preflight and publish checks passed: `cargo fmt --check`, `cargo test -q` (144 passed), `cargo clippy -- -D warnings`, `make smoke-post-release`.
+
+### v0.1.43 Prep References
+- PR #163: Kick off v0.1.43 milestone and release scaffolds (`https://github.com/dmoliveira/loopmux/pull/163`)
+- PR #164: Add heartbeat drift context for overdue diagnostics (`https://github.com/dmoliveira/loopmux/pull/164`)
+- PR #165: Add drift edge-case regression coverage for heartbeat diagnostics (`https://github.com/dmoliveira/loopmux/pull/165`)
