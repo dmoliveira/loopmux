@@ -1784,6 +1784,11 @@ impl FleetRunRegistry {
                     }
                     if should_emit_heartbeat {
                         let sends_delta = sends.saturating_sub(heartbeat_sends_reported);
+                        let drift_seconds = fleet_heartbeat_drift_seconds(
+                            OffsetDateTime::now_utc(),
+                            existing.heartbeat_reported_at.as_deref(),
+                            heartbeat_interval,
+                        );
                         events.push(FleetRunEvent {
                             timestamp: now.clone(),
                             kind: "heartbeat".to_string(),
@@ -1793,6 +1798,7 @@ impl FleetRunRegistry {
                                 sends_delta,
                                 poll_seconds,
                                 heartbeat_interval,
+                                drift_seconds,
                             ),
                         });
                         heartbeat_sends_reported = sends;
@@ -5726,12 +5732,31 @@ fn should_emit_fleet_heartbeat(
     elapsed >= fleet_heartbeat_interval_seconds(poll_seconds) as i64
 }
 
+fn fleet_heartbeat_drift_seconds(
+    now: OffsetDateTime,
+    last_reported_at: Option<&str>,
+    interval_seconds: u64,
+) -> u64 {
+    let Some(last_reported_at) = last_reported_at else {
+        return 0;
+    };
+    let Ok(last_reported_at) = OffsetDateTime::parse(
+        last_reported_at,
+        &time::format_description::well_known::Rfc3339,
+    ) else {
+        return 0;
+    };
+    let elapsed_seconds = (now - last_reported_at).whole_seconds().max(0) as u64;
+    elapsed_seconds.saturating_sub(interval_seconds)
+}
+
 fn format_fleet_heartbeat_metric(
     state: LoopState,
     sends_total: u32,
     sends_delta: u32,
     poll_seconds: u64,
     interval_seconds: u64,
+    drift_seconds: u64,
 ) -> String {
     let activity = if sends_delta > 0 { "active" } else { "idle" };
     let progress = if sends_delta > 0 {
@@ -5740,14 +5765,15 @@ fn format_fleet_heartbeat_metric(
         "stalled"
     };
     format!(
-        "fleet-heartbeat state={} activity={} progress={} sends_total={} sends_delta={} poll={}s window={}s",
+        "fleet-heartbeat state={} activity={} progress={} sends_total={} sends_delta={} poll={}s window={}s drift={}s",
         fleet_state_label(state),
         activity,
         progress,
         sends_total,
         sends_delta,
         poll_seconds,
-        interval_seconds
+        interval_seconds,
+        drift_seconds
     )
 }
 
@@ -11489,19 +11515,39 @@ runs:
     }
 
     #[test]
+    fn fleet_heartbeat_drift_seconds_tracks_overdue_amount() {
+        let now = OffsetDateTime::parse(
+            "2026-03-01T00:01:20Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        assert_eq!(
+            fleet_heartbeat_drift_seconds(now, Some("2026-03-01T00:00:00Z"), 60),
+            20,
+        );
+        assert_eq!(
+            fleet_heartbeat_drift_seconds(now, Some("2026-03-01T00:00:50Z"), 60),
+            0,
+        );
+        assert_eq!(fleet_heartbeat_drift_seconds(now, Some("bad-ts"), 60), 0);
+    }
+
+    #[test]
     fn fleet_heartbeat_metric_marks_idle_and_active_modes() {
-        let idle = format_fleet_heartbeat_metric(LoopState::Running, 10, 0, 5, 60);
+        let idle = format_fleet_heartbeat_metric(LoopState::Running, 10, 0, 5, 60, 0);
         assert!(idle.contains("state=running"));
         assert!(idle.contains("activity=idle"));
         assert!(idle.contains("progress=stalled"));
         assert!(idle.contains("poll=5s"));
         assert!(idle.contains("window=60s"));
-        let active = format_fleet_heartbeat_metric(LoopState::Running, 12, 2, 5, 60);
+        assert!(idle.contains("drift=0s"));
+        let active = format_fleet_heartbeat_metric(LoopState::Running, 12, 2, 5, 60, 20);
         assert!(active.contains("activity=active"));
         assert!(active.contains("progress=progressing"));
         assert!(active.contains("sends_total=12"));
         assert!(active.contains("sends_delta=2"));
-        let stopped = format_fleet_heartbeat_metric(LoopState::Stopped, 12, 0, 5, 60);
+        assert!(active.contains("drift=20s"));
+        let stopped = format_fleet_heartbeat_metric(LoopState::Stopped, 12, 0, 5, 60, 0);
         assert!(stopped.contains("state=stopped"));
         assert!(stopped.contains("activity=idle"));
     }
@@ -11509,7 +11555,7 @@ runs:
     #[test]
     fn fleet_heartbeat_metric_contract_includes_required_keys_for_all_states() {
         for state in [LoopState::Running, LoopState::Holding, LoopState::Stopped] {
-            let metric = format_fleet_heartbeat_metric(state, 7, 1, 5, 60);
+            let metric = format_fleet_heartbeat_metric(state, 7, 1, 5, 60, 0);
             assert!(metric.contains("fleet-heartbeat"));
             assert!(metric.contains("state="));
             assert!(metric.contains("activity="));
@@ -11518,6 +11564,7 @@ runs:
             assert!(metric.contains("sends_delta="));
             assert!(metric.contains("poll="));
             assert!(metric.contains("window="));
+            assert!(metric.contains("drift="));
         }
     }
 
