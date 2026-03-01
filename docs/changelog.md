@@ -71,3 +71,8 @@
 - PR #138: Add v0.1.38 release runbook scaffold (`https://github.com/dmoliveira/loopmux/pull/138`)
 - PR #139: Fill v0.1.38 draft validation evidence (`https://github.com/dmoliveira/loopmux/pull/139`)
 - PR #140: Add v0.1.38 release command block to draft notes (`https://github.com/dmoliveira/loopmux/pull/140`)
+
+### v0.1.39 Prep References
+- PR #142: Kick off v0.1.39 milestone planning (`https://github.com/dmoliveira/loopmux/pull/142`)
+- PR #143: Refine redraw-skip telemetry signal quality (`https://github.com/dmoliveira/loopmux/pull/143`)
+- PR #144: Add stopped-state status bar regression defenses (`https://github.com/dmoliveira/loopmux/pull/144`)
