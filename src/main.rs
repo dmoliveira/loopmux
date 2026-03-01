@@ -5732,10 +5732,16 @@ fn format_fleet_heartbeat_metric(
     interval_seconds: u64,
 ) -> String {
     let activity = if sends_delta > 0 { "active" } else { "idle" };
+    let progress = if sends_delta > 0 {
+        "progressing"
+    } else {
+        "stalled"
+    };
     format!(
-        "fleet-heartbeat state={} activity={} sends_total={} sends_delta={} interval={}s",
+        "fleet-heartbeat state={} activity={} progress={} sends_total={} sends_delta={} window={}s",
         fleet_state_label(state),
         activity,
+        progress,
         sends_total,
         sends_delta,
         interval_seconds
@@ -11451,8 +11457,11 @@ runs:
         let idle = format_fleet_heartbeat_metric(LoopState::Running, 10, 0, 60);
         assert!(idle.contains("state=running"));
         assert!(idle.contains("activity=idle"));
+        assert!(idle.contains("progress=stalled"));
+        assert!(idle.contains("window=60s"));
         let active = format_fleet_heartbeat_metric(LoopState::Running, 12, 2, 60);
         assert!(active.contains("activity=active"));
+        assert!(active.contains("progress=progressing"));
         assert!(active.contains("sends_total=12"));
         assert!(active.contains("sends_delta=2"));
         let stopped = format_fleet_heartbeat_metric(LoopState::Stopped, 12, 0, 60);
