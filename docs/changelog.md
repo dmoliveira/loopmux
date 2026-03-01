@@ -93,3 +93,9 @@
 - Release published: `https://github.com/dmoliveira/loopmux/releases/tag/v0.1.40`.
 - Tag: `v0.1.40`.
 - Preflight and publish checks passed: `cargo fmt --check`, `cargo test -q` (141 passed), `cargo clippy -- -D warnings`, `make smoke-post-release`.
+
+### v0.1.41 Prep References
+- PR #152: Kick off v0.1.41 milestone and release scaffolds (`https://github.com/dmoliveira/loopmux/pull/152`)
+- PR #153: Clarify fleet heartbeat readability for stalled vs progressing loops (`https://github.com/dmoliveira/loopmux/pull/153`)
+- PR #154: Docs: capture future remote tmux discovery over SSH (`https://github.com/dmoliveira/loopmux/pull/154`)
+- PR #155: Add heartbeat cadence edge-case regression tests (`https://github.com/dmoliveira/loopmux/pull/155`)
