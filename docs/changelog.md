@@ -60,3 +60,14 @@
 - PR #134: Kick off v0.1.38 milestone planning (`https://github.com/dmoliveira/loopmux/pull/134`)
 - PR #135: Refine TUI redraw-skip telemetry cadence constant (`https://github.com/dmoliveira/loopmux/pull/135`)
 - PR #136: Add redraw-gating regression defenses for reset and signatures (`https://github.com/dmoliveira/loopmux/pull/136`)
+
+### v0.1.38 Release
+- Release published: `https://github.com/dmoliveira/loopmux/releases/tag/v0.1.38`.
+- Tag: `v0.1.38`.
+- Preflight and publish checks passed: `cargo fmt --check`, `cargo test -q` (134 passed), `cargo clippy -- -D warnings`, `make smoke-post-release`.
+
+### v0.1.38 Follow-Up References
+- PR #137: Polish v0.1.38 release docs flow (`https://github.com/dmoliveira/loopmux/pull/137`)
+- PR #138: Add v0.1.38 release runbook scaffold (`https://github.com/dmoliveira/loopmux/pull/138`)
+- PR #139: Fill v0.1.38 draft validation evidence (`https://github.com/dmoliveira/loopmux/pull/139`)
+- PR #140: Add v0.1.38 release command block to draft notes (`https://github.com/dmoliveira/loopmux/pull/140`)
