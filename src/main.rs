@@ -11455,6 +11455,9 @@ runs:
         assert!(active.contains("activity=active"));
         assert!(active.contains("sends_total=12"));
         assert!(active.contains("sends_delta=2"));
+        let stopped = format_fleet_heartbeat_metric(LoopState::Stopped, 12, 0, 60);
+        assert!(stopped.contains("state=stopped"));
+        assert!(stopped.contains("activity=idle"));
     }
 
     #[test]
@@ -11979,6 +11982,22 @@ runs:
         assert_eq!(plan.transition, HoldTransition::ExitHolding);
         assert!(plan.force_rescan);
         assert!(plan.break_wait);
+    }
+
+    #[test]
+    fn plan_hold_action_pause_while_holding_is_stable() {
+        let plan = plan_hold_action(TuiAction::Pause, true, true).unwrap();
+        assert_eq!(plan.transition, HoldTransition::Unchanged);
+        assert!(!plan.force_rescan);
+        assert!(!plan.break_wait);
+    }
+
+    #[test]
+    fn plan_hold_action_toggle_entering_hold_does_not_force_rescan() {
+        let plan = plan_hold_action(TuiAction::HoldToggle, false, true).unwrap();
+        assert_eq!(plan.transition, HoldTransition::EnterHolding);
+        assert!(!plan.force_rescan);
+        assert!(!plan.break_wait);
     }
 
     #[test]
