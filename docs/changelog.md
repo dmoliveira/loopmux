@@ -105,3 +105,8 @@
 - Release published: `https://github.com/dmoliveira/loopmux/releases/tag/v0.1.41`.
 - Tag: `v0.1.41`.
 - Preflight and publish checks passed: `cargo fmt --check`, `cargo test -q` (143 passed), `cargo clippy -- -D warnings`, `make smoke-post-release`.
+
+### v0.1.42 Prep References
+- PR #158: Kick off v0.1.42 milestone and release scaffolds (`https://github.com/dmoliveira/loopmux/pull/158`)
+- PR #159: Add poll interval context to heartbeat diagnostics (`https://github.com/dmoliveira/loopmux/pull/159`)
+- PR #160: Add heartbeat metric output contract regression (`https://github.com/dmoliveira/loopmux/pull/160`)
