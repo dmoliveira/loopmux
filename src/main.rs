@@ -24,6 +24,7 @@ use serde_yaml::Number;
 use time::OffsetDateTime;
 
 const LOOPMUX_VERSION: &str = env!("CARGO_PKG_VERSION");
+const TUI_REDRAW_SKIP_LOG_INTERVAL: u64 = 25;
 
 #[derive(Debug, Parser)]
 #[command(name = "loopmux")]
@@ -7090,7 +7091,7 @@ impl TuiState {
             if should_emit_periodic_count_log(
                 self.skipped_redraws,
                 self.skipped_redraws_reported,
-                25,
+                TUI_REDRAW_SKIP_LOG_INTERVAL,
             ) {
                 self.push_log(format!(
                     "[{}] tui-redraw-skip total={}",
@@ -11226,10 +11227,26 @@ runs:
 
     #[test]
     fn periodic_count_log_emits_on_interval_boundaries() {
-        assert!(!should_emit_periodic_count_log(24, 0, 25));
-        assert!(should_emit_periodic_count_log(25, 0, 25));
-        assert!(!should_emit_periodic_count_log(40, 25, 25));
-        assert!(should_emit_periodic_count_log(50, 25, 25));
+        assert!(!should_emit_periodic_count_log(
+            TUI_REDRAW_SKIP_LOG_INTERVAL - 1,
+            0,
+            TUI_REDRAW_SKIP_LOG_INTERVAL,
+        ));
+        assert!(should_emit_periodic_count_log(
+            TUI_REDRAW_SKIP_LOG_INTERVAL,
+            0,
+            TUI_REDRAW_SKIP_LOG_INTERVAL,
+        ));
+        assert!(!should_emit_periodic_count_log(
+            TUI_REDRAW_SKIP_LOG_INTERVAL + 15,
+            TUI_REDRAW_SKIP_LOG_INTERVAL,
+            TUI_REDRAW_SKIP_LOG_INTERVAL,
+        ));
+        assert!(should_emit_periodic_count_log(
+            TUI_REDRAW_SKIP_LOG_INTERVAL * 2,
+            TUI_REDRAW_SKIP_LOG_INTERVAL,
+            TUI_REDRAW_SKIP_LOG_INTERVAL,
+        ));
     }
 
     #[test]
