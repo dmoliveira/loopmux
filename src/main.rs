@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::hash::{Hash, Hasher};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Once;
@@ -5615,6 +5616,24 @@ fn latest_stop_reason(logs: &[String]) -> Option<String> {
     })
 }
 
+fn tui_frame_signature(
+    width: u16,
+    height: u16,
+    bar: &str,
+    display_lines: &[String],
+    footer: &str,
+    overlay_open: bool,
+) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    width.hash(&mut hasher);
+    height.hash(&mut hasher);
+    overlay_open.hash(&mut hasher);
+    bar.hash(&mut hasher);
+    display_lines.hash(&mut hasher);
+    footer.hash(&mut hasher);
+    hasher.finish()
+}
+
 fn compact_sent_log(
     timestamp: &str,
     target: &str,
@@ -6811,6 +6830,8 @@ struct TuiState {
     process_usage_provider: Box<dyn ProcessUsageProvider>,
     usage_sample: Option<ProcessUsageSample>,
     log_view: LogViewMode,
+    last_frame_signature: Option<u64>,
+    last_frame_at: Option<Instant>,
 }
 
 struct ProcessUsageSample {
@@ -6911,6 +6932,8 @@ impl TuiState {
             process_usage_provider: Box::new(SystemProcessUsageProvider),
             usage_sample: None,
             log_view: LogViewMode::Chronological,
+            last_frame_signature: None,
+            last_frame_at: None,
         })
     }
 
@@ -7038,6 +7061,20 @@ impl TuiState {
             note: Some(footer_note_owned.as_str()),
             overlay_help: self.overlay_help.as_deref(),
         });
+        let frame_signature = tui_frame_signature(
+            width,
+            height,
+            &bar,
+            &display_lines,
+            &footer,
+            overlay_lines.is_some(),
+        );
+        if self.last_frame_signature == Some(frame_signature)
+            && let Some(last_frame_at) = self.last_frame_at
+            && last_frame_at.elapsed() < Duration::from_millis(250)
+        {
+            return Ok(());
+        }
         render_with_retry("run-view", || {
             let mut out = std::io::stdout();
             out.queue(MoveTo(0, 0))?;
@@ -7062,6 +7099,8 @@ impl TuiState {
             out.flush()?;
             Ok(())
         })?;
+        self.last_frame_signature = Some(frame_signature);
+        self.last_frame_at = Some(Instant::now());
         Ok(())
     }
 
@@ -11141,6 +11180,22 @@ runs:
             "[t2] status target=ai:1.0".to_string(),
         ];
         assert!(latest_stop_reason(&logs).is_none());
+    }
+
+    #[test]
+    fn tui_frame_signature_changes_when_footer_changes() {
+        let lines = vec!["line a".to_string(), "line b".to_string()];
+        let a = tui_frame_signature(120, 30, "bar", &lines, "footer a", false);
+        let b = tui_frame_signature(120, 30, "bar", &lines, "footer b", false);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn tui_frame_signature_changes_when_overlay_visibility_changes() {
+        let lines = vec!["line a".to_string()];
+        let a = tui_frame_signature(100, 20, "bar", &lines, "footer", false);
+        let b = tui_frame_signature(100, 20, "bar", &lines, "footer", true);
+        assert_ne!(a, b);
     }
 
     #[test]
