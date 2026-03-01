@@ -25,6 +25,9 @@ use time::OffsetDateTime;
 
 const LOOPMUX_VERSION: &str = env!("CARGO_PKG_VERSION");
 const TUI_REDRAW_SKIP_LOG_INTERVAL: u64 = 25;
+const FLEET_HEARTBEAT_MIN_INTERVAL_SECONDS: u64 = 30;
+const FLEET_HEARTBEAT_MAX_INTERVAL_SECONDS: u64 = 300;
+const FLEET_HEARTBEAT_POLL_MULTIPLIER: u64 = 12;
 
 #[derive(Debug, Parser)]
 #[command(name = "loopmux")]
@@ -707,6 +710,10 @@ struct FleetRunRecord {
     version: String,
     #[serde(default)]
     events: Vec<FleetRunEvent>,
+    #[serde(default)]
+    heartbeat_sends_reported: u32,
+    #[serde(default)]
+    heartbeat_reported_at: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1726,6 +1733,8 @@ impl FleetRunRegistry {
             last_seen: now.clone(),
             version: LOOPMUX_VERSION.to_string(),
             events: Vec::new(),
+            heartbeat_sends_reported: sends,
+            heartbeat_reported_at: Some(now.clone()),
         };
 
         let mut record = if self.state_path.exists() {
@@ -1756,6 +1765,38 @@ impl FleetRunRegistry {
                             detail: format!("{} -> {}", existing.target, target),
                         });
                     }
+                    let heartbeat_interval = fleet_heartbeat_interval_seconds(poll_seconds);
+                    let should_emit_heartbeat = should_emit_fleet_heartbeat(
+                        OffsetDateTime::now_utc(),
+                        existing.heartbeat_reported_at.as_deref(),
+                        poll_seconds,
+                    );
+                    let mut heartbeat_sends_reported = if sends < existing.heartbeat_sends_reported
+                    {
+                        sends
+                    } else {
+                        existing.heartbeat_sends_reported
+                    };
+                    let mut heartbeat_reported_at = existing.heartbeat_reported_at.clone();
+                    if heartbeat_reported_at.is_none() {
+                        heartbeat_sends_reported = sends;
+                        heartbeat_reported_at = Some(now.clone());
+                    }
+                    if should_emit_heartbeat {
+                        let sends_delta = sends.saturating_sub(heartbeat_sends_reported);
+                        events.push(FleetRunEvent {
+                            timestamp: now.clone(),
+                            kind: "heartbeat".to_string(),
+                            detail: format_fleet_heartbeat_metric(
+                                state,
+                                sends,
+                                sends_delta,
+                                heartbeat_interval,
+                            ),
+                        });
+                        heartbeat_sends_reported = sends;
+                        heartbeat_reported_at = Some(now.clone());
+                    }
                     if events.len() > 24 {
                         let keep_from = events.len() - 24;
                         events.drain(0..keep_from);
@@ -1763,6 +1804,8 @@ impl FleetRunRegistry {
                     FleetRunRecord {
                         started_at: existing.started_at,
                         events,
+                        heartbeat_sends_reported,
+                        heartbeat_reported_at,
                         ..base_record
                     }
                 }
@@ -5651,6 +5694,51 @@ fn format_redraw_skip_metric(total: u64, since_last_report: u64, interval: u64) 
     format!(
         "tui-redraw-skip total={} delta={} interval={}",
         total, since_last_report, interval
+    )
+}
+
+fn fleet_heartbeat_interval_seconds(poll_seconds: u64) -> u64 {
+    poll_seconds
+        .max(1)
+        .saturating_mul(FLEET_HEARTBEAT_POLL_MULTIPLIER)
+        .clamp(
+            FLEET_HEARTBEAT_MIN_INTERVAL_SECONDS,
+            FLEET_HEARTBEAT_MAX_INTERVAL_SECONDS,
+        )
+}
+
+fn should_emit_fleet_heartbeat(
+    now: OffsetDateTime,
+    last_reported_at: Option<&str>,
+    poll_seconds: u64,
+) -> bool {
+    let Some(last_reported_at) = last_reported_at else {
+        return false;
+    };
+    let Ok(last_reported_at) = OffsetDateTime::parse(
+        last_reported_at,
+        &time::format_description::well_known::Rfc3339,
+    ) else {
+        return true;
+    };
+    let elapsed = (now - last_reported_at).whole_seconds();
+    elapsed >= fleet_heartbeat_interval_seconds(poll_seconds) as i64
+}
+
+fn format_fleet_heartbeat_metric(
+    state: LoopState,
+    sends_total: u32,
+    sends_delta: u32,
+    interval_seconds: u64,
+) -> String {
+    let activity = if sends_delta > 0 { "active" } else { "idle" };
+    format!(
+        "fleet-heartbeat state={} activity={} sends_total={} sends_delta={} interval={}s",
+        fleet_state_label(state),
+        activity,
+        sends_total,
+        sends_delta,
+        interval_seconds
     )
 }
 
@@ -11331,6 +11419,45 @@ runs:
     }
 
     #[test]
+    fn fleet_heartbeat_interval_scales_and_is_bounded() {
+        assert_eq!(fleet_heartbeat_interval_seconds(1), 30);
+        assert_eq!(fleet_heartbeat_interval_seconds(3), 36);
+        assert_eq!(fleet_heartbeat_interval_seconds(60), 300);
+    }
+
+    #[test]
+    fn fleet_heartbeat_emission_respects_interval_and_bad_timestamps() {
+        let now = OffsetDateTime::parse(
+            "2026-03-01T00:01:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        assert!(!should_emit_fleet_heartbeat(
+            now,
+            Some("2026-03-01T00:00:20Z"),
+            5,
+        ));
+        assert!(should_emit_fleet_heartbeat(
+            now,
+            Some("2026-03-01T00:00:00Z"),
+            5,
+        ));
+        assert!(!should_emit_fleet_heartbeat(now, None, 5));
+        assert!(should_emit_fleet_heartbeat(now, Some("not-a-ts"), 5));
+    }
+
+    #[test]
+    fn fleet_heartbeat_metric_marks_idle_and_active_modes() {
+        let idle = format_fleet_heartbeat_metric(LoopState::Running, 10, 0, 60);
+        assert!(idle.contains("state=running"));
+        assert!(idle.contains("activity=idle"));
+        let active = format_fleet_heartbeat_metric(LoopState::Running, 12, 2, 60);
+        assert!(active.contains("activity=active"));
+        assert!(active.contains("sends_total=12"));
+        assert!(active.contains("sends_delta=2"));
+    }
+
+    #[test]
     fn periodic_count_log_recovers_after_counter_reset() {
         assert!(!should_emit_periodic_count_log(10, 25, 25));
         assert!(should_emit_periodic_count_log(25, 100, 25));
@@ -11391,6 +11518,8 @@ runs:
             last_seen: "2026-02-17T00:00:00Z".to_string(),
             version: version.to_string(),
             events: Vec::new(),
+            heartbeat_sends_reported: sends,
+            heartbeat_reported_at: None,
         }
     }
 
