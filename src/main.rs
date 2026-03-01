@@ -6832,6 +6832,7 @@ struct TuiState {
     log_view: LogViewMode,
     last_frame_signature: Option<u64>,
     last_frame_at: Option<Instant>,
+    skipped_redraws: u64,
 }
 
 struct ProcessUsageSample {
@@ -6934,6 +6935,7 @@ impl TuiState {
             log_view: LogViewMode::Chronological,
             last_frame_signature: None,
             last_frame_at: None,
+            skipped_redraws: 0,
         })
     }
 
@@ -7054,6 +7056,11 @@ impl TuiState {
         } else {
             view_note.to_string()
         };
+        let footer_note_owned = if self.skipped_redraws > 0 {
+            format!("{footer_note_owned} skip {}", self.skipped_redraws)
+        } else {
+            footer_note_owned
+        };
         let footer = self.footer_renderer.render(FooterRenderArgs {
             style: self.style,
             width,
@@ -7073,6 +7080,7 @@ impl TuiState {
             && let Some(last_frame_at) = self.last_frame_at
             && last_frame_at.elapsed() < Duration::from_millis(250)
         {
+            self.skipped_redraws = self.skipped_redraws.saturating_add(1);
             return Ok(());
         }
         render_with_retry("run-view", || {
