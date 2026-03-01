@@ -10746,6 +10746,36 @@ runs:
     }
 
     #[test]
+    fn render_status_bar_stopped_shows_consistent_core_tokens() {
+        let config = status_bar_test_config();
+        for layout in [LayoutMode::Compact, LayoutMode::Standard, LayoutMode::Wide] {
+            let line = render_status_bar(&StatusBarRenderArgs {
+                state: LoopState::Stopped,
+                layout,
+                icon_mode: IconMode::Ascii,
+                style: StyleConfig {
+                    use_color: false,
+                    use_bg: false,
+                    use_unicode_ellipsis: true,
+                    dim_logs: true,
+                },
+                width: 200,
+                config: &config,
+                current: 3,
+                total: 10,
+                rule_id: Some("manual_stop"),
+                elapsed: "00:12",
+                remaining_duration: None,
+                process_usage: None,
+            });
+            assert!(line.contains("STOP"));
+            assert!(line.contains("iter 3/10"));
+            assert!(line.contains("trg manual_stop"));
+            assert!(!line.contains("rem "));
+        }
+    }
+
+    #[test]
     fn parse_process_usage_summary_parses_cpu_and_mem() {
         let summary = parse_process_usage_summary(" 12.5  20480\n").unwrap();
         assert_eq!(summary, "cpu 12.5% mem 20.0mb");
