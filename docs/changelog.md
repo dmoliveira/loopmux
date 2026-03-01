@@ -55,3 +55,8 @@
 - PR #130: Add v0.1.37 release command block to draft notes (`https://github.com/dmoliveira/loopmux/pull/130`)
 - PR #131: Prepare v0.1.37 release execution runbook (`https://github.com/dmoliveira/loopmux/pull/131`)
 - PR #132: Refresh v0.1.37 draft PR references (`https://github.com/dmoliveira/loopmux/pull/132`)
+
+### v0.1.38 Prep References
+- PR #134: Kick off v0.1.38 milestone planning (`https://github.com/dmoliveira/loopmux/pull/134`)
+- PR #135: Refine TUI redraw-skip telemetry cadence constant (`https://github.com/dmoliveira/loopmux/pull/135`)
+- PR #136: Add redraw-gating regression defenses for reset and signatures (`https://github.com/dmoliveira/loopmux/pull/136`)
