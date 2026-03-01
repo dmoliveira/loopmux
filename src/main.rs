@@ -11453,6 +11453,39 @@ runs:
     }
 
     #[test]
+    fn fleet_heartbeat_emission_does_not_trigger_for_future_timestamps() {
+        let now = OffsetDateTime::parse(
+            "2026-03-01T00:01:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        assert!(!should_emit_fleet_heartbeat(
+            now,
+            Some("2026-03-01T00:02:30Z"),
+            5,
+        ));
+    }
+
+    #[test]
+    fn fleet_heartbeat_emission_with_zero_poll_uses_minimum_interval() {
+        let now = OffsetDateTime::parse(
+            "2026-03-01T00:01:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        assert!(!should_emit_fleet_heartbeat(
+            now,
+            Some("2026-03-01T00:00:31Z"),
+            0,
+        ));
+        assert!(should_emit_fleet_heartbeat(
+            now,
+            Some("2026-03-01T00:00:30Z"),
+            0,
+        ));
+    }
+
+    #[test]
     fn fleet_heartbeat_metric_marks_idle_and_active_modes() {
         let idle = format_fleet_heartbeat_metric(LoopState::Running, 10, 0, 60);
         assert!(idle.contains("state=running"));
