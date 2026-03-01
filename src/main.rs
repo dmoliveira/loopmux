@@ -5634,6 +5634,10 @@ fn tui_frame_signature(
     hasher.finish()
 }
 
+fn should_emit_periodic_count_log(total: u64, last_reported: u64, interval: u64) -> bool {
+    interval > 0 && total >= interval && total.saturating_sub(last_reported) >= interval
+}
+
 fn compact_sent_log(
     timestamp: &str,
     target: &str,
@@ -6833,6 +6837,7 @@ struct TuiState {
     last_frame_signature: Option<u64>,
     last_frame_at: Option<Instant>,
     skipped_redraws: u64,
+    skipped_redraws_reported: u64,
 }
 
 struct ProcessUsageSample {
@@ -6936,6 +6941,7 @@ impl TuiState {
             last_frame_signature: None,
             last_frame_at: None,
             skipped_redraws: 0,
+            skipped_redraws_reported: 0,
         })
     }
 
@@ -7081,6 +7087,18 @@ impl TuiState {
             && last_frame_at.elapsed() < Duration::from_millis(250)
         {
             self.skipped_redraws = self.skipped_redraws.saturating_add(1);
+            if should_emit_periodic_count_log(
+                self.skipped_redraws,
+                self.skipped_redraws_reported,
+                25,
+            ) {
+                self.push_log(format!(
+                    "[{}] tui-redraw-skip total={}",
+                    timestamp_now(),
+                    self.skipped_redraws
+                ));
+                self.skipped_redraws_reported = self.skipped_redraws;
+            }
             return Ok(());
         }
         render_with_retry("run-view", || {
@@ -11204,6 +11222,19 @@ runs:
         let a = tui_frame_signature(100, 20, "bar", &lines, "footer", false);
         let b = tui_frame_signature(100, 20, "bar", &lines, "footer", true);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn periodic_count_log_emits_on_interval_boundaries() {
+        assert!(!should_emit_periodic_count_log(24, 0, 25));
+        assert!(should_emit_periodic_count_log(25, 0, 25));
+        assert!(!should_emit_periodic_count_log(40, 25, 25));
+        assert!(should_emit_periodic_count_log(50, 25, 25));
+    }
+
+    #[test]
+    fn periodic_count_log_never_emits_for_zero_interval() {
+        assert!(!should_emit_periodic_count_log(100, 0, 0));
     }
 
     #[test]
