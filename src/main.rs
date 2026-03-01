@@ -11529,6 +11529,11 @@ runs:
             fleet_heartbeat_drift_seconds(now, Some("2026-03-01T00:00:50Z"), 60),
             0,
         );
+        assert_eq!(
+            fleet_heartbeat_drift_seconds(now, Some("2026-03-01T00:02:20Z"), 60),
+            0,
+        );
+        assert_eq!(fleet_heartbeat_drift_seconds(now, None, 60), 0);
         assert_eq!(fleet_heartbeat_drift_seconds(now, Some("bad-ts"), 60), 0);
     }
 
