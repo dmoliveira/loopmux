@@ -99,3 +99,9 @@
 - PR #153: Clarify fleet heartbeat readability for stalled vs progressing loops (`https://github.com/dmoliveira/loopmux/pull/153`)
 - PR #154: Docs: capture future remote tmux discovery over SSH (`https://github.com/dmoliveira/loopmux/pull/154`)
 - PR #155: Add heartbeat cadence edge-case regression tests (`https://github.com/dmoliveira/loopmux/pull/155`)
+- PR #156: Refresh v0.1.41 draft notes and prep references (`https://github.com/dmoliveira/loopmux/pull/156`)
+
+### v0.1.41 Release
+- Release published: `https://github.com/dmoliveira/loopmux/releases/tag/v0.1.41`.
+- Tag: `v0.1.41`.
+- Preflight and publish checks passed: `cargo fmt --check`, `cargo test -q` (143 passed), `cargo clippy -- -D warnings`, `make smoke-post-release`.
