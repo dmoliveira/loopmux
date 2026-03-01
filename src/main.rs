@@ -5647,6 +5647,13 @@ fn should_emit_periodic_count_log(total: u64, last_reported: u64, interval: u64)
     total.saturating_sub(effective_last_reported) >= interval
 }
 
+fn format_redraw_skip_metric(total: u64, since_last_report: u64, interval: u64) -> String {
+    format!(
+        "tui-redraw-skip total={} delta={} interval={}",
+        total, since_last_report, interval
+    )
+}
+
 fn compact_sent_log(
     timestamp: &str,
     target: &str,
@@ -7101,10 +7108,17 @@ impl TuiState {
                 self.skipped_redraws_reported,
                 TUI_REDRAW_SKIP_LOG_INTERVAL,
             ) {
+                let skipped_since_report = self
+                    .skipped_redraws
+                    .saturating_sub(self.skipped_redraws_reported);
                 self.push_log(format!(
-                    "[{}] tui-redraw-skip total={}",
+                    "[{}] {}",
                     timestamp_now(),
-                    self.skipped_redraws
+                    format_redraw_skip_metric(
+                        self.skipped_redraws,
+                        skipped_since_report,
+                        TUI_REDRAW_SKIP_LOG_INTERVAL,
+                    )
                 ));
                 self.skipped_redraws_reported = self.skipped_redraws;
             }
@@ -11275,6 +11289,15 @@ runs:
     #[test]
     fn periodic_count_log_never_emits_for_zero_interval() {
         assert!(!should_emit_periodic_count_log(100, 0, 0));
+    }
+
+    #[test]
+    fn format_redraw_skip_metric_includes_total_delta_and_interval() {
+        let message = format_redraw_skip_metric(50, 25, 25);
+        assert!(message.contains("tui-redraw-skip"));
+        assert!(message.contains("total=50"));
+        assert!(message.contains("delta=25"));
+        assert!(message.contains("interval=25"));
     }
 
     #[test]
