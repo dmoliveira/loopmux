@@ -11507,6 +11507,21 @@ runs:
     }
 
     #[test]
+    fn fleet_heartbeat_metric_contract_includes_required_keys_for_all_states() {
+        for state in [LoopState::Running, LoopState::Holding, LoopState::Stopped] {
+            let metric = format_fleet_heartbeat_metric(state, 7, 1, 5, 60);
+            assert!(metric.contains("fleet-heartbeat"));
+            assert!(metric.contains("state="));
+            assert!(metric.contains("activity="));
+            assert!(metric.contains("progress="));
+            assert!(metric.contains("sends_total="));
+            assert!(metric.contains("sends_delta="));
+            assert!(metric.contains("poll="));
+            assert!(metric.contains("window="));
+        }
+    }
+
+    #[test]
     fn periodic_count_log_recovers_after_counter_reset() {
         assert!(!should_emit_periodic_count_log(10, 25, 25));
         assert!(should_emit_periodic_count_log(25, 100, 25));
