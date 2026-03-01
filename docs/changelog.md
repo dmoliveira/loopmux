@@ -43,3 +43,15 @@
 - PR #125: Surface skipped TUI redraw count in footer (`https://github.com/dmoliveira/loopmux/pull/125`)
 - PR #126: Emit periodic metric logs for skipped TUI redraws (`https://github.com/dmoliveira/loopmux/pull/126`)
 - PR #127: Scaffold v0.1.37 draft release notes (`https://github.com/dmoliveira/loopmux/pull/127`)
+
+### v0.1.37 Release
+- Release published: `https://github.com/dmoliveira/loopmux/releases/tag/v0.1.37`.
+- Tag: `v0.1.37`.
+- Preflight and publish checks passed: `cargo fmt --check`, `cargo test -q` (131 passed), `cargo clippy -- -D warnings`, `make smoke-post-release`.
+
+### v0.1.37 Follow-Up References
+- PR #128: Log v0.1.37 prep PR references in changelog (`https://github.com/dmoliveira/loopmux/pull/128`)
+- PR #129: Update v0.1.37 draft with current validation evidence (`https://github.com/dmoliveira/loopmux/pull/129`)
+- PR #130: Add v0.1.37 release command block to draft notes (`https://github.com/dmoliveira/loopmux/pull/130`)
+- PR #131: Prepare v0.1.37 release execution runbook (`https://github.com/dmoliveira/loopmux/pull/131`)
+- PR #132: Refresh v0.1.37 draft PR references (`https://github.com/dmoliveira/loopmux/pull/132`)
