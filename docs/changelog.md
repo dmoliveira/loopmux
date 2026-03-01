@@ -87,3 +87,9 @@
 - PR #147: Kick off v0.1.40 milestone and release scaffolds (`https://github.com/dmoliveira/loopmux/pull/147`)
 - PR #148: Add fleet heartbeat telemetry for active vs idle loop behavior (`https://github.com/dmoliveira/loopmux/pull/148`)
 - PR #149: Expand cadence and stop-state regression defenses (`https://github.com/dmoliveira/loopmux/pull/149`)
+- PR #150: Refresh v0.1.40 draft notes and prep references (`https://github.com/dmoliveira/loopmux/pull/150`)
+
+### v0.1.40 Release
+- Release published: `https://github.com/dmoliveira/loopmux/releases/tag/v0.1.40`.
+- Tag: `v0.1.40`.
+- Preflight and publish checks passed: `cargo fmt --check`, `cargo test -q` (141 passed), `cargo clippy -- -D warnings`, `make smoke-post-release`.
