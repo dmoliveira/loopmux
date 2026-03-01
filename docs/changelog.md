@@ -76,3 +76,9 @@
 - PR #142: Kick off v0.1.39 milestone planning (`https://github.com/dmoliveira/loopmux/pull/142`)
 - PR #143: Refine redraw-skip telemetry signal quality (`https://github.com/dmoliveira/loopmux/pull/143`)
 - PR #144: Add stopped-state status bar regression defenses (`https://github.com/dmoliveira/loopmux/pull/144`)
+- PR #145: Prepare v0.1.39 release docs continuity (`https://github.com/dmoliveira/loopmux/pull/145`)
+
+### v0.1.39 Release
+- Release published: `https://github.com/dmoliveira/loopmux/releases/tag/v0.1.39`.
+- Tag: `v0.1.39`.
+- Preflight and publish checks passed: `cargo fmt --check`, `cargo test -q` (136 passed), `cargo clippy -- -D warnings`, `make smoke-post-release`.
