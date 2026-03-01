@@ -35,3 +35,11 @@
 ### Consolidated Validation (v0.1.36 Prep)
 - Full sweep passed on `main`: `cargo fmt --check`, `cargo test -q` (127 passed), `cargo clippy -- -D warnings`, `make smoke-post-release`.
 - Smoke helper resolved target `loopmux-smoke:1.0` and captured `LOOPMUX_SMOKE_SENT`.
+
+## 2026-03-01
+
+### v0.1.37 Prep References
+- PR #124: Reduce TUI redraw churn for unchanged frames (`https://github.com/dmoliveira/loopmux/pull/124`)
+- PR #125: Surface skipped TUI redraw count in footer (`https://github.com/dmoliveira/loopmux/pull/125`)
+- PR #126: Emit periodic metric logs for skipped TUI redraws (`https://github.com/dmoliveira/loopmux/pull/126`)
+- PR #127: Scaffold v0.1.37 draft release notes (`https://github.com/dmoliveira/loopmux/pull/127`)
