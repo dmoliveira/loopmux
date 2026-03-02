@@ -956,14 +956,29 @@ fn run(args: RunArgs) -> Result<()> {
 
 fn runs(args: RunsArgs) -> Result<()> {
     let profile_filter = args.profile.as_deref();
-    match args.action.unwrap_or(RunsAction::Ls) {
+    let action = args.action.unwrap_or(RunsAction::Ls);
+    if let Some((target, command)) = runs_action_fleet_command(&action) {
+        return send_fleet_command(target, command);
+    }
+    match action {
         RunsAction::Ls => print_fleet_runs(profile_filter),
         RunsAction::Tui => run_fleet_manager_tui(profile_filter),
-        RunsAction::Stop { target } => send_fleet_command(&target, FleetControlCommand::Stop),
-        RunsAction::Hold { target } => send_fleet_command(&target, FleetControlCommand::Hold),
-        RunsAction::Resume { target } => send_fleet_command(&target, FleetControlCommand::Resume),
-        RunsAction::Next { target } => send_fleet_command(&target, FleetControlCommand::Next),
-        RunsAction::Renew { target } => send_fleet_command(&target, FleetControlCommand::Renew),
+        RunsAction::Stop { .. }
+        | RunsAction::Hold { .. }
+        | RunsAction::Resume { .. }
+        | RunsAction::Next { .. }
+        | RunsAction::Renew { .. } => unreachable!("handled by runs_action_fleet_command"),
+    }
+}
+
+fn runs_action_fleet_command(action: &RunsAction) -> Option<(&str, FleetControlCommand)> {
+    match action {
+        RunsAction::Stop { target } => Some((target.as_str(), FleetControlCommand::Stop)),
+        RunsAction::Hold { target } => Some((target.as_str(), FleetControlCommand::Hold)),
+        RunsAction::Resume { target } => Some((target.as_str(), FleetControlCommand::Resume)),
+        RunsAction::Next { target } => Some((target.as_str(), FleetControlCommand::Next)),
+        RunsAction::Renew { target } => Some((target.as_str(), FleetControlCommand::Renew)),
+        RunsAction::Ls | RunsAction::Tui => None,
     }
 }
 
@@ -12209,6 +12224,31 @@ runs:
             map_run_tui_key_action(KeyCode::Char('c'), KeyModifiers::NONE, true, false),
             Some(TuiAction::PromptEditorClearHistory)
         );
+    }
+
+    #[test]
+    fn runs_action_next_maps_to_next_fleet_command() {
+        let action = RunsAction::Next {
+            target: "run-123".to_string(),
+        };
+        let (target, command) =
+            runs_action_fleet_command(&action).expect("next action should map to a fleet command");
+        assert_eq!(target, "run-123");
+        assert!(matches!(command, FleetControlCommand::Next));
+    }
+
+    #[test]
+    fn cli_runs_next_command_path_maps_to_next_fleet_command() {
+        let cli = Cli::try_parse_from(["loopmux", "runs", "next", "planner-a"]).unwrap();
+        let command = cli.command.expect("command should parse");
+        let Command::Runs(runs_args) = command else {
+            panic!("expected runs command");
+        };
+        let action = runs_args.action.expect("runs action should parse");
+        let (target, fleet_command) = runs_action_fleet_command(&action)
+            .expect("runs next action should produce fleet command");
+        assert_eq!(target, "planner-a");
+        assert!(matches!(fleet_command, FleetControlCommand::Next));
     }
 
     #[test]
