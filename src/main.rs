@@ -9306,6 +9306,13 @@ fn format_exec_event_label(value: &str) -> String {
 mod tests {
     use super::*;
 
+    const TARGET_ALPHA: &str = "target-alpha";
+    const TARGET_BETA: &str = "target-beta";
+
+    fn edge_test_key(target: &str, index: usize) -> String {
+        format!("{target}|inline|{index}")
+    }
+
     fn rule_with(match_: Option<MatchCriteria>, exclude: Option<MatchCriteria>) -> Rule {
         Rule {
             id: None,
@@ -11254,37 +11261,43 @@ runs:
     #[test]
     fn trigger_edge_rearms_after_clear() {
         let mut active = HashSet::new();
-        active.insert("ai:7.0|inline|0".to_string());
+        let alpha_edge = edge_test_key(TARGET_ALPHA, 0);
+        let beta_edge = edge_test_key(TARGET_BETA, 0);
+        active.insert(alpha_edge.clone());
 
         let matched_now = HashSet::new();
-        refresh_trigger_edges_for_target(&mut active, "ai:7.0", &matched_now, false, true);
-        assert!(!active.contains("ai:7.0|inline|0"));
+        refresh_trigger_edges_for_target(&mut active, TARGET_ALPHA, &matched_now, false, true);
+        assert!(!active.contains(&alpha_edge));
 
-        active.insert("other:1.0|inline|0".to_string());
-        refresh_trigger_edges_for_target(&mut active, "ai:7.0", &matched_now, false, true);
-        assert!(active.contains("other:1.0|inline|0"));
+        active.insert(beta_edge.clone());
+        refresh_trigger_edges_for_target(&mut active, TARGET_ALPHA, &matched_now, false, true);
+        assert!(active.contains(&beta_edge));
     }
 
     #[test]
     fn trigger_edge_rearms_when_output_hash_changes() {
         let mut active = HashSet::new();
-        active.insert("ai:7.0|inline|0".to_string());
-        active.insert("other:1.0|inline|0".to_string());
+        let alpha_edge = edge_test_key(TARGET_ALPHA, 0);
+        let beta_edge = edge_test_key(TARGET_BETA, 0);
+        active.insert(alpha_edge.clone());
+        active.insert(beta_edge.clone());
 
-        let matched_now = HashSet::from(["ai:7.0|inline|0".to_string()]);
-        refresh_trigger_edges_for_target(&mut active, "ai:7.0", &matched_now, true, true);
+        let matched_now = HashSet::from([alpha_edge.clone()]);
+        refresh_trigger_edges_for_target(&mut active, TARGET_ALPHA, &matched_now, true, true);
 
-        assert!(!active.contains("ai:7.0|inline|0"));
-        assert!(active.contains("other:1.0|inline|0"));
+        assert!(!active.contains(&alpha_edge));
+        assert!(active.contains(&beta_edge));
     }
 
     #[test]
     fn edge_guard_allowance_respects_toggle() {
         let mut active = HashSet::new();
-        active.insert("ai:7.0|inline|0".to_string());
-        assert!(!edge_guard_allows(&active, "ai:7.0|inline|0", true));
-        assert!(edge_guard_allows(&active, "ai:7.0|inline|0", false));
-        assert!(edge_guard_allows(&active, "ai:7.0|inline|1", true));
+        let alpha_edge = edge_test_key(TARGET_ALPHA, 0);
+        let alpha_other_edge = edge_test_key(TARGET_ALPHA, 1);
+        active.insert(alpha_edge.clone());
+        assert!(!edge_guard_allows(&active, &alpha_edge, true));
+        assert!(edge_guard_allows(&active, &alpha_edge, false));
+        assert!(edge_guard_allows(&active, &alpha_other_edge, true));
     }
 
     #[test]
@@ -11460,11 +11473,11 @@ runs:
     fn pending_confirm_detected_per_target() {
         let mut pending = std::collections::HashMap::new();
         let now = std::time::Instant::now();
-        pending.insert("ai:7.0|inline|0".to_string(), now);
-        pending.insert("other:1.0|inline|0".to_string(), now);
-        assert!(has_pending_confirm_for_target(&pending, "ai:7.0"));
-        assert!(has_pending_confirm_for_target(&pending, "other:1.0"));
-        assert!(!has_pending_confirm_for_target(&pending, "ai:8.0"));
+        pending.insert(edge_test_key(TARGET_ALPHA, 0), now);
+        pending.insert(edge_test_key(TARGET_BETA, 0), now);
+        assert!(has_pending_confirm_for_target(&pending, TARGET_ALPHA));
+        assert!(has_pending_confirm_for_target(&pending, TARGET_BETA));
+        assert!(!has_pending_confirm_for_target(&pending, "target-gamma"));
     }
 
     #[test]
@@ -11541,25 +11554,26 @@ runs:
     #[test]
     fn confirm_window_elapsed_requires_persisted_match() {
         let mut pending = std::collections::HashMap::new();
+        let edge_key = edge_test_key(TARGET_ALPHA, 0);
         let now = std::time::Instant::now();
         assert!(!confirm_window_elapsed(
             5,
             None,
-            "ai:7.0|inline|0",
+            &edge_key,
             &mut pending,
             now
         ));
         assert!(!confirm_window_elapsed(
             5,
             Some(3),
-            "ai:7.0|inline|0",
+            &edge_key,
             &mut pending,
             now + std::time::Duration::from_secs(2),
         ));
         assert!(confirm_window_elapsed(
             5,
             Some(3),
-            "ai:7.0|inline|0",
+            &edge_key,
             &mut pending,
             now + std::time::Duration::from_secs(3),
         ));
@@ -11568,10 +11582,11 @@ runs:
     #[test]
     fn confirm_window_elapsed_zero_is_immediate() {
         let mut pending = std::collections::HashMap::new();
+        let edge_key = edge_test_key(TARGET_ALPHA, 0);
         assert!(confirm_window_elapsed(
             5,
             Some(0),
-            "ai:7.0|inline|0",
+            &edge_key,
             &mut pending,
             std::time::Instant::now(),
         ));
