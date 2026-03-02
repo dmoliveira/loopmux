@@ -127,3 +127,18 @@
 - Release published: `https://github.com/dmoliveira/loopmux/releases/tag/v0.1.43`.
 - Tag: `v0.1.43`.
 - Preflight and publish checks passed: `cargo fmt --check`, `cargo test -q` (145 passed), `cargo clippy -- -D warnings`, `make smoke-post-release`.
+
+## 2026-03-02
+
+### v0.1.44 References
+- PR #171: Fix next-state resets, add next-scan countdown, and cover runs-next mapping (`https://github.com/dmoliveira/loopmux/pull/171`)
+- PR #172: Bump version to 0.1.44 (`https://github.com/dmoliveira/loopmux/pull/172`)
+
+### v0.1.44 Release
+- Release published: `https://github.com/dmoliveira/loopmux/releases/tag/v0.1.44`.
+- Tag: `v0.1.44`.
+- Preflight and publish checks passed: `cargo fmt --check`, `cargo test -q` (153 passed).
+
+### Post-Release
+- Bumped package version to `0.1.45-dev` for next iteration cycle.
+- Updated Homebrew tap formula to `v0.1.44` and verified local install with `loopmux --version`.
