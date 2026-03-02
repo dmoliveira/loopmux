@@ -24,7 +24,6 @@ use serde_yaml::Number;
 use time::OffsetDateTime;
 
 const LOOPMUX_VERSION: &str = env!("CARGO_PKG_VERSION");
-const TUI_REDRAW_SKIP_LOG_INTERVAL: u64 = 25;
 const FLEET_HEARTBEAT_MIN_INTERVAL_SECONDS: u64 = 30;
 const FLEET_HEARTBEAT_MAX_INTERVAL_SECONDS: u64 = 300;
 const FLEET_HEARTBEAT_POLL_MULTIPLIER: u64 = 12;
@@ -5740,25 +5739,6 @@ fn tui_frame_signature(
     hasher.finish()
 }
 
-fn should_emit_periodic_count_log(total: u64, last_reported: u64, interval: u64) -> bool {
-    if interval == 0 || total < interval {
-        return false;
-    }
-    let effective_last_reported = if total < last_reported {
-        0
-    } else {
-        last_reported
-    };
-    total.saturating_sub(effective_last_reported) >= interval
-}
-
-fn format_redraw_skip_metric(total: u64, since_last_report: u64, interval: u64) -> String {
-    format!(
-        "tui-redraw-skip total={} delta={} interval={}",
-        total, since_last_report, interval
-    )
-}
-
 fn fleet_heartbeat_interval_seconds(poll_seconds: u64) -> u64 {
     poll_seconds
         .max(1)
@@ -7042,7 +7022,6 @@ struct TuiState {
     last_frame_signature: Option<u64>,
     last_frame_at: Option<Instant>,
     skipped_redraws: u64,
-    skipped_redraws_reported: u64,
 }
 
 struct ProcessUsageSample {
@@ -7147,7 +7126,6 @@ impl TuiState {
             last_frame_signature: None,
             last_frame_at: None,
             skipped_redraws: 0,
-            skipped_redraws_reported: 0,
         })
     }
 
@@ -7296,25 +7274,6 @@ impl TuiState {
             && last_frame_at.elapsed() < Duration::from_millis(250)
         {
             self.skipped_redraws = self.skipped_redraws.saturating_add(1);
-            if should_emit_periodic_count_log(
-                self.skipped_redraws,
-                self.skipped_redraws_reported,
-                TUI_REDRAW_SKIP_LOG_INTERVAL,
-            ) {
-                let skipped_since_report = self
-                    .skipped_redraws
-                    .saturating_sub(self.skipped_redraws_reported);
-                self.push_log(format!(
-                    "[{}] {}",
-                    timestamp_now(),
-                    format_redraw_skip_metric(
-                        self.skipped_redraws,
-                        skipped_since_report,
-                        TUI_REDRAW_SKIP_LOG_INTERVAL,
-                    )
-                ));
-                self.skipped_redraws_reported = self.skipped_redraws;
-            }
             return Ok(());
         }
         render_with_retry("run-view", || {
@@ -11704,44 +11663,6 @@ runs:
     }
 
     #[test]
-    fn periodic_count_log_emits_on_interval_boundaries() {
-        assert!(!should_emit_periodic_count_log(
-            TUI_REDRAW_SKIP_LOG_INTERVAL - 1,
-            0,
-            TUI_REDRAW_SKIP_LOG_INTERVAL,
-        ));
-        assert!(should_emit_periodic_count_log(
-            TUI_REDRAW_SKIP_LOG_INTERVAL,
-            0,
-            TUI_REDRAW_SKIP_LOG_INTERVAL,
-        ));
-        assert!(!should_emit_periodic_count_log(
-            TUI_REDRAW_SKIP_LOG_INTERVAL + 15,
-            TUI_REDRAW_SKIP_LOG_INTERVAL,
-            TUI_REDRAW_SKIP_LOG_INTERVAL,
-        ));
-        assert!(should_emit_periodic_count_log(
-            TUI_REDRAW_SKIP_LOG_INTERVAL * 2,
-            TUI_REDRAW_SKIP_LOG_INTERVAL,
-            TUI_REDRAW_SKIP_LOG_INTERVAL,
-        ));
-    }
-
-    #[test]
-    fn periodic_count_log_never_emits_for_zero_interval() {
-        assert!(!should_emit_periodic_count_log(100, 0, 0));
-    }
-
-    #[test]
-    fn format_redraw_skip_metric_includes_total_delta_and_interval() {
-        let message = format_redraw_skip_metric(50, 25, 25);
-        assert!(message.contains("tui-redraw-skip"));
-        assert!(message.contains("total=50"));
-        assert!(message.contains("delta=25"));
-        assert!(message.contains("interval=25"));
-    }
-
-    #[test]
     fn fleet_heartbeat_interval_scales_and_is_bounded() {
         assert_eq!(fleet_heartbeat_interval_seconds(1), 30);
         assert_eq!(fleet_heartbeat_interval_seconds(3), 36);
@@ -11877,12 +11798,6 @@ runs:
             assert!(metric.contains("drift="));
             assert!(metric.contains("severity="));
         }
-    }
-
-    #[test]
-    fn periodic_count_log_recovers_after_counter_reset() {
-        assert!(!should_emit_periodic_count_log(10, 25, 25));
-        assert!(should_emit_periodic_count_log(25, 100, 25));
     }
 
     #[test]
