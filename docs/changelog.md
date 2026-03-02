@@ -139,6 +139,17 @@
 - Tag: `v0.1.44`.
 - Preflight and publish checks passed: `cargo fmt --check`, `cargo test -q` (153 passed).
 
+### v0.1.45 References
+- PR #174: Fix trigger-edge stall when marker stays in tail window (`https://github.com/dmoliveira/loopmux/pull/174`)
+- PR #175: Use generic target IDs in trigger-edge coverage (`https://github.com/dmoliveira/loopmux/pull/175`)
+- PR #176: Keep redraw-skip signal in footer, not log stream (`https://github.com/dmoliveira/loopmux/pull/176`)
+- PR #177: Cover persistent-marker trigger-edge rearm contract (`https://github.com/dmoliveira/loopmux/pull/177`)
+
+### v0.1.45 Release
+- Release published: `https://github.com/dmoliveira/loopmux/releases/tag/v0.1.45`.
+- Tag: `v0.1.45`.
+- Preflight and publish checks passed: `cargo fmt --check`, `cargo test -q` (151 passed).
+
 ### Post-Release
 - Bumped package version to `0.1.45-dev` for next iteration cycle.
 - Updated Homebrew tap formula to `v0.1.44` and verified local install with `loopmux --version`.
