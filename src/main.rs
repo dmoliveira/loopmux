@@ -956,14 +956,29 @@ fn run(args: RunArgs) -> Result<()> {
 
 fn runs(args: RunsArgs) -> Result<()> {
     let profile_filter = args.profile.as_deref();
-    match args.action.unwrap_or(RunsAction::Ls) {
+    let action = args.action.unwrap_or(RunsAction::Ls);
+    if let Some((target, command)) = runs_action_fleet_command(&action) {
+        return send_fleet_command(target, command);
+    }
+    match action {
         RunsAction::Ls => print_fleet_runs(profile_filter),
         RunsAction::Tui => run_fleet_manager_tui(profile_filter),
-        RunsAction::Stop { target } => send_fleet_command(&target, FleetControlCommand::Stop),
-        RunsAction::Hold { target } => send_fleet_command(&target, FleetControlCommand::Hold),
-        RunsAction::Resume { target } => send_fleet_command(&target, FleetControlCommand::Resume),
-        RunsAction::Next { target } => send_fleet_command(&target, FleetControlCommand::Next),
-        RunsAction::Renew { target } => send_fleet_command(&target, FleetControlCommand::Renew),
+        RunsAction::Stop { .. }
+        | RunsAction::Hold { .. }
+        | RunsAction::Resume { .. }
+        | RunsAction::Next { .. }
+        | RunsAction::Renew { .. } => unreachable!("handled by runs_action_fleet_command"),
+    }
+}
+
+fn runs_action_fleet_command(action: &RunsAction) -> Option<(&str, FleetControlCommand)> {
+    match action {
+        RunsAction::Stop { target } => Some((target.as_str(), FleetControlCommand::Stop)),
+        RunsAction::Hold { target } => Some((target.as_str(), FleetControlCommand::Hold)),
+        RunsAction::Resume { target } => Some((target.as_str(), FleetControlCommand::Resume)),
+        RunsAction::Next { target } => Some((target.as_str(), FleetControlCommand::Next)),
+        RunsAction::Renew { target } => Some((target.as_str(), FleetControlCommand::Renew)),
+        RunsAction::Ls | RunsAction::Tui => None,
     }
 }
 
@@ -2503,6 +2518,7 @@ fn apply_external_control(command: FleetControlCommand, state: ExternalControlSt
             last_hash_by_target.clear();
             trigger_edge_active.clear();
             trigger_confirm_pending_since.clear();
+            *active_rule = None;
             active_rule_by_target.clear();
             backoff_state.clear();
             false
@@ -4034,6 +4050,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                     max_sends,
                     active_rule.as_deref(),
                     active_elapsed,
+                    None,
                 )?;
             }
             logger.log(LogEvent::stopped(&config, "duration", send_count))?;
@@ -4107,6 +4124,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                     max_sends,
                                     active_rule.as_deref(),
                                     effective_elapsed(run_started, held_total, hold_started),
+                                    None,
                                 )?;
                                 break;
                             }
@@ -4264,6 +4282,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                     max_sends,
                     active_rule.as_deref(),
                     effective_elapsed(run_started, held_total, hold_started),
+                    None,
                 )?;
             }
             if open_fleet_manager {
@@ -4435,6 +4454,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                     max_sends,
                     active_rule.as_deref(),
                     active_elapsed,
+                    None,
                 )?;
             }
 
@@ -4650,6 +4670,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                             max_sends,
                             plan.rule_id.as_deref(),
                             effective_elapsed(run_started, held_total, hold_started),
+                            None,
                         )?;
                     }
                     sleep_with_heartbeat(
@@ -4752,6 +4773,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                     max_sends,
                                     plan.rule_id.as_deref(),
                                     effective_elapsed(run_started, held_total, hold_started),
+                                    None,
                                 )?;
                             }
                         }
@@ -4802,6 +4824,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                 max_sends,
                                 plan.rule_id.as_deref(),
                                 effective_elapsed(run_started, held_total, hold_started),
+                                None,
                             )?;
                         }
                     } else {
@@ -4849,6 +4872,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                         max_sends,
                         active_rule.as_deref(),
                         effective_elapsed(run_started, held_total, hold_started),
+                        None,
                     )?;
                 }
                 if ui_mode == UiMode::Plain {
@@ -4869,6 +4893,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                         max_sends,
                         active_rule.as_deref(),
                         effective_elapsed(run_started, held_total, hold_started),
+                        None,
                     )?;
                 }
                 if ui_mode == UiMode::Plain {
@@ -4916,6 +4941,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                     max_sends,
                                     active_rule.as_deref(),
                                     effective_elapsed(run_started, held_total, hold_started),
+                                    None,
                                 )?;
                                 logger.log(LogEvent::stopped(&config, "manual", send_count))?;
                                 break;
@@ -5074,6 +5100,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                     max_sends,
                     active_rule.as_deref(),
                     effective_elapsed(run_started, held_total, hold_started),
+                    None,
                 )?;
             }
             if open_fleet_manager {
@@ -5279,6 +5306,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                     max_sends,
                                     active_rule.as_deref(),
                                     effective_elapsed(run_started, held_total, hold_started),
+                                    None,
                                 )?;
                                 should_exit_loop = true;
                                 break;
@@ -5308,6 +5336,8 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                         }
                     }
                     sync_tui_overlays(tui_state, &injection_filter, &prompt_editor);
+                    let next_scan_remaining =
+                        sleep_until.saturating_duration_since(std::time::Instant::now());
                     tui_state.update(
                         loop_state,
                         &config,
@@ -5315,6 +5345,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                         max_sends,
                         active_rule.as_deref(),
                         effective_elapsed(run_started, held_total, hold_started),
+                        Some(next_scan_remaining),
                     )?;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
@@ -5366,6 +5397,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
             max_sends,
             active_rule.as_deref(),
             effective_elapsed(run_started, held_total, hold_started),
+            None,
         )?;
         std::thread::sleep(std::time::Duration::from_secs(3));
     }
@@ -7027,6 +7059,7 @@ struct StatusBarRenderArgs<'a> {
     rule_id: Option<&'a str>,
     elapsed: &'a str,
     remaining_duration: Option<&'a str>,
+    next_scan_remaining: Option<&'a str>,
     process_usage: Option<&'a str>,
 }
 
@@ -7164,11 +7197,13 @@ impl TuiState {
         total: u32,
         rule_id: Option<&str>,
         active_elapsed: std::time::Duration,
+        next_scan_remaining: Option<std::time::Duration>,
     ) -> Result<()> {
         let elapsed = format_std_duration(active_elapsed);
         let remaining_duration = config
             .duration
             .map(|limit| format_std_duration(limit.saturating_sub(active_elapsed)));
+        let next_scan_remaining = next_scan_remaining.map(format_clock_countdown);
         let (width, height) = crossterm::terminal::size().unwrap_or((80, 24));
         self.width = width;
         self.height = height;
@@ -7188,6 +7223,7 @@ impl TuiState {
             rule_id,
             elapsed: &elapsed,
             remaining_duration: remaining_duration.as_deref(),
+            next_scan_remaining: next_scan_remaining.as_deref(),
             process_usage: process_usage.as_deref(),
         });
 
@@ -7790,6 +7826,9 @@ fn render_status_bar(args: &StatusBarRenderArgs<'_>) -> String {
     let mut right_parts = Vec::new();
     match layout {
         LayoutMode::Compact => {
+            if let Some(next_scan) = args.next_scan_remaining {
+                right_parts.push(format!("next {next_scan}"));
+            }
             if let Some(remaining) = remaining_duration {
                 right_parts.push(format!("rem {remaining}"));
             }
@@ -7802,6 +7841,9 @@ fn render_status_bar(args: &StatusBarRenderArgs<'_>) -> String {
             right_parts.push(config.target_label.clone());
         }
         LayoutMode::Standard => {
+            if let Some(next_scan) = args.next_scan_remaining {
+                right_parts.push(format!("next {next_scan}"));
+            }
             if let Some(remaining) = remaining_duration {
                 right_parts.push(format!("rem {remaining}"));
             }
@@ -7815,6 +7857,9 @@ fn render_status_bar(args: &StatusBarRenderArgs<'_>) -> String {
             right_parts.push(config.target_label.clone());
         }
         LayoutMode::Wide => {
+            if let Some(next_scan) = args.next_scan_remaining {
+                right_parts.push(format!("next {next_scan}"));
+            }
             if let Some(remaining) = remaining_duration {
                 right_parts.push(format!("rem {remaining}"));
             }
@@ -9196,6 +9241,13 @@ fn format_std_duration(duration: std::time::Duration) -> String {
     }
 }
 
+fn format_clock_countdown(duration: std::time::Duration) -> String {
+    let total_seconds = duration.as_secs();
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+    format!("{minutes:02}:{seconds:02}")
+}
+
 fn status_line(
     config: &ResolvedConfig,
     send_count: u32,
@@ -10463,6 +10515,7 @@ runs:
         assert!(last_hash_by_target.is_empty());
         assert!(trigger_edge_active.is_empty());
         assert!(trigger_confirm_pending_since.is_empty());
+        assert!(active_rule.is_none());
         assert!(active_rule_by_target.is_empty());
         assert!(backoff_state.is_empty());
     }
@@ -10547,6 +10600,7 @@ runs:
             rule_id: Some("Concluded"),
             elapsed: "00:10",
             remaining_duration: Some("1m20s"),
+            next_scan_remaining: None,
             process_usage: Some("cpu 12.3% mem 42.0mb"),
         };
 
@@ -10610,6 +10664,7 @@ runs:
             rule_id: Some("Concluded"),
             elapsed: "00:10",
             remaining_duration: Some("1m20s"),
+            next_scan_remaining: None,
             process_usage: Some("cpu 12.3% mem 42.0mb"),
         });
 
@@ -10651,6 +10706,7 @@ runs:
             rule_id: Some("Concluded"),
             elapsed: "00:10",
             remaining_duration: Some("1m20s"),
+            next_scan_remaining: None,
             process_usage: Some("cpu 12.3% mem 42.0mb"),
         });
 
@@ -10673,6 +10729,102 @@ runs:
     }
 
     #[test]
+    fn render_status_bar_includes_next_scan_countdown() {
+        let config = status_bar_test_config();
+        let line = render_status_bar(&StatusBarRenderArgs {
+            state: LoopState::Running,
+            layout: LayoutMode::Standard,
+            icon_mode: IconMode::Ascii,
+            style: StyleConfig {
+                use_color: false,
+                use_bg: false,
+                use_unicode_ellipsis: true,
+                dim_logs: true,
+            },
+            width: 160,
+            config: &config,
+            current: 5,
+            total: 10,
+            rule_id: Some("Concluded"),
+            elapsed: "00:10",
+            remaining_duration: Some("1m20s"),
+            next_scan_remaining: Some("00:04"),
+            process_usage: Some("cpu 12.3% mem 42.0mb"),
+        });
+
+        assert_contains_in_order(
+            &line,
+            &[
+                "RUN",
+                "iter 5/10",
+                "50%",
+                "next 00:04",
+                "rem 1m20s",
+                "run -",
+                "trg Concluded",
+                "last 00:10",
+            ],
+        );
+    }
+
+    #[test]
+    fn render_status_bar_includes_next_scan_countdown_compact() {
+        let config = status_bar_test_config();
+        let line = render_status_bar(&StatusBarRenderArgs {
+            state: LoopState::Running,
+            layout: LayoutMode::Compact,
+            icon_mode: IconMode::Ascii,
+            style: StyleConfig {
+                use_color: false,
+                use_bg: false,
+                use_unicode_ellipsis: false,
+                dim_logs: true,
+            },
+            width: 120,
+            config: &config,
+            current: 5,
+            total: 10,
+            rule_id: Some("Concluded"),
+            elapsed: "00:10",
+            remaining_duration: Some("1m20s"),
+            next_scan_remaining: Some("00:03"),
+            process_usage: Some("cpu 12.3% mem 42.0mb"),
+        });
+
+        assert_contains_in_order(&line, &["50%", "next 00:03", "rem 1m20s", "run -"]);
+    }
+
+    #[test]
+    fn render_status_bar_includes_next_scan_countdown_wide() {
+        let config = status_bar_test_config();
+        let line = render_status_bar(&StatusBarRenderArgs {
+            state: LoopState::Running,
+            layout: LayoutMode::Wide,
+            icon_mode: IconMode::Ascii,
+            style: StyleConfig {
+                use_color: false,
+                use_bg: false,
+                use_unicode_ellipsis: true,
+                dim_logs: true,
+            },
+            width: 200,
+            config: &config,
+            current: 5,
+            total: 10,
+            rule_id: Some("Concluded"),
+            elapsed: "00:10",
+            remaining_duration: Some("1m20s"),
+            next_scan_remaining: Some("00:03"),
+            process_usage: Some("cpu 12.3% mem 42.0mb"),
+        });
+
+        assert_contains_in_order(
+            &line,
+            &["50%", "next 00:03", "rem 1m20s", "run -", "target ai:5.0"],
+        );
+    }
+
+    #[test]
     fn render_status_bar_golden_wide_segments() {
         let config = status_bar_test_config();
         let line = render_status_bar(&StatusBarRenderArgs {
@@ -10692,6 +10844,7 @@ runs:
             rule_id: Some("Concluded"),
             elapsed: "00:10",
             remaining_duration: Some("1m20s"),
+            next_scan_remaining: None,
             process_usage: Some("cpu 12.3% mem 42.0mb"),
         });
 
@@ -10733,6 +10886,7 @@ runs:
             rule_id: Some("This is a very long trigger string that should truncate"),
             elapsed: "00:10",
             remaining_duration: Some("2m10s"),
+            next_scan_remaining: None,
             process_usage: Some("cpu 9.1% mem 22.4mb"),
         });
 
@@ -10762,6 +10916,7 @@ runs:
             rule_id: Some("Concluded"),
             elapsed: "00:12",
             remaining_duration: Some("45s"),
+            next_scan_remaining: None,
             process_usage: None,
         });
 
@@ -10828,6 +10983,7 @@ runs:
             rule_id: Some("Concluded"),
             elapsed: "00:10",
             remaining_duration: None,
+            next_scan_remaining: None,
             process_usage: None,
         });
         assert!(bar.contains("RUN"));
@@ -10892,6 +11048,7 @@ runs:
             rule_id: Some("This is a very long trigger string that should truncate"),
             elapsed: "00:10",
             remaining_duration: Some("1m20s"),
+            next_scan_remaining: None,
             process_usage: None,
         });
         assert!(bar.contains("trg"));
@@ -10956,6 +11113,7 @@ runs:
             rule_id: Some("exec:running"),
             elapsed: "00:05",
             remaining_duration: None,
+            next_scan_remaining: None,
             process_usage: Some("cpu 12.3% mem 42.0mb"),
         });
         assert!(bar.contains("evt exec:running"));
@@ -10983,6 +11141,7 @@ runs:
                 rule_id: Some("manual_stop"),
                 elapsed: "00:12",
                 remaining_duration: None,
+                next_scan_remaining: None,
                 process_usage: None,
             });
             assert!(line.contains("STOP"));
@@ -12065,6 +12224,31 @@ runs:
             map_run_tui_key_action(KeyCode::Char('c'), KeyModifiers::NONE, true, false),
             Some(TuiAction::PromptEditorClearHistory)
         );
+    }
+
+    #[test]
+    fn runs_action_next_maps_to_next_fleet_command() {
+        let action = RunsAction::Next {
+            target: "run-123".to_string(),
+        };
+        let (target, command) =
+            runs_action_fleet_command(&action).expect("next action should map to a fleet command");
+        assert_eq!(target, "run-123");
+        assert!(matches!(command, FleetControlCommand::Next));
+    }
+
+    #[test]
+    fn cli_runs_next_command_path_maps_to_next_fleet_command() {
+        let cli = Cli::try_parse_from(["loopmux", "runs", "next", "planner-a"]).unwrap();
+        let command = cli.command.expect("command should parse");
+        let Command::Runs(runs_args) = command else {
+            panic!("expected runs command");
+        };
+        let action = runs_args.action.expect("runs action should parse");
+        let (target, fleet_command) = runs_action_fleet_command(&action)
+            .expect("runs next action should produce fleet command");
+        assert_eq!(target, "planner-a");
+        assert!(matches!(fleet_command, FleetControlCommand::Next));
     }
 
     #[test]
