@@ -4527,6 +4527,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                     };
                 let hash = hash_output(&output);
                 let last_hash = last_hash_by_target.get(target).cloned().unwrap_or_default();
+                let hash_changed = !last_hash.is_empty() && hash != last_hash;
                 let has_pending_confirm =
                     has_pending_confirm_for_target(&trigger_confirm_pending_since, target);
                 if should_skip_scan_by_hash(
@@ -4551,6 +4552,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                     &mut trigger_edge_active,
                     target,
                     &matched_edge_keys,
+                    hash_changed,
                     config.trigger_edge,
                 );
                 refresh_trigger_confirm_for_target(
@@ -5604,12 +5606,17 @@ fn refresh_trigger_edges_for_target(
     active_edges: &mut HashSet<String>,
     target: &str,
     matched_keys: &HashSet<String>,
+    hash_changed: bool,
     enabled: bool,
 ) {
     if !enabled {
         return;
     }
     let prefix = format!("{target}|");
+    if hash_changed {
+        active_edges.retain(|key| !key.starts_with(&prefix));
+        return;
+    }
     active_edges.retain(|key| !key.starts_with(&prefix) || matched_keys.contains(key));
 }
 
@@ -11250,11 +11257,24 @@ runs:
         active.insert("ai:7.0|inline|0".to_string());
 
         let matched_now = HashSet::new();
-        refresh_trigger_edges_for_target(&mut active, "ai:7.0", &matched_now, true);
+        refresh_trigger_edges_for_target(&mut active, "ai:7.0", &matched_now, false, true);
         assert!(!active.contains("ai:7.0|inline|0"));
 
         active.insert("other:1.0|inline|0".to_string());
-        refresh_trigger_edges_for_target(&mut active, "ai:7.0", &matched_now, true);
+        refresh_trigger_edges_for_target(&mut active, "ai:7.0", &matched_now, false, true);
+        assert!(active.contains("other:1.0|inline|0"));
+    }
+
+    #[test]
+    fn trigger_edge_rearms_when_output_hash_changes() {
+        let mut active = HashSet::new();
+        active.insert("ai:7.0|inline|0".to_string());
+        active.insert("other:1.0|inline|0".to_string());
+
+        let matched_now = HashSet::from(["ai:7.0|inline|0".to_string()]);
+        refresh_trigger_edges_for_target(&mut active, "ai:7.0", &matched_now, true, true);
+
+        assert!(!active.contains("ai:7.0|inline|0"));
         assert!(active.contains("other:1.0|inline|0"));
     }
 
