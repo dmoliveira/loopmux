@@ -1,6 +1,11 @@
 # loopmux
 
+![loopmux hero banner](docs/assets/hero-banner.svg)
+
 [![Homebrew](https://img.shields.io/badge/homebrew-installable-2f9c5f)](https://github.com/dmoliveira/homebrew-tap)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/dmoliveira/loopmux?style=social)](https://github.com/dmoliveira/loopmux/stargazers)
+[![Support via GitHub Sponsors](https://img.shields.io/badge/support-github_sponsors-ea4aaa?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/dmoliveira)
 
 Loop prompts into tmux panes with triggers, delays, and branching rules. Built to automate iterative workflows for code assistants running in tmux (OpenCode, Codex, Claude Code).
 
@@ -14,6 +19,13 @@ loopmux watches tmux output and injects prompts when a trigger matches. You can 
 - Delay strategies: fixed, range, jitter, backoff
 - Mid-flight loop runner (tmux capture + send)
 - Structured logging (text or JSONL)
+
+## Support loopmux
+If loopmux saves you time, consider supporting maintenance and future releases:
+
+- Sponsor on GitHub: [github.com/sponsors/dmoliveira](https://github.com/sponsors/dmoliveira)
+- Star and share the repo: [github.com/dmoliveira/loopmux](https://github.com/dmoliveira/loopmux)
+- Open issues/feedback to guide roadmap priorities
 
 ## Supported Code Assistants
 loopmux is tmux-first and backend-agnostic. If your assistant runs in a tmux pane, loopmux can target it.
@@ -374,6 +386,7 @@ codex:1.0
 - Active-list popup controls: arrows move across sessions/windows/panes, `space`/`Enter` toggle enabled injection scope, `a` enable all known panes, `d` disable all known panes, `q`/`Esc` close popup.
 - TUI footer shows current active injection scope counts as `active X/Y` (enabled / known panes).
 - TUI status bar now includes local loopmux process usage (`cpu ...% mem ...mb`) for quick runtime monitoring.
+- While waiting between polls, TUI status shows countdown to next scan as `next mm:ss`.
 - TUI logs are sanitized before render: control/non-printable artifacts are removed and long whitespace runs are collapsed for cleaner readability.
 - Grouped log view folds repeated events by panel target with occurrence counts while preserving chronological mode as default.
 - When `--duration` is set, the TUI status bar shows remaining time (`rem ...`) and it freezes while HOLD is active.
