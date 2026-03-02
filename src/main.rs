@@ -11260,6 +11260,20 @@ runs:
     }
 
     #[test]
+    fn trigger_edge_contract_rearms_on_hash_change_with_persistent_marker() {
+        let alpha_edge = edge_test_key(TARGET_ALPHA, 0);
+
+        let mut active = HashSet::from([alpha_edge.clone()]);
+        let matched_now = HashSet::from([alpha_edge.clone()]);
+
+        refresh_trigger_edges_for_target(&mut active, TARGET_ALPHA, &matched_now, false, true);
+        assert!(!edge_guard_allows(&active, &alpha_edge, true));
+
+        refresh_trigger_edges_for_target(&mut active, TARGET_ALPHA, &matched_now, true, true);
+        assert!(edge_guard_allows(&active, &alpha_edge, true));
+    }
+
+    #[test]
     fn prompt_editor_enforces_max_chars() {
         let mut editor = PromptEditorState::new("seed".to_string(), 5);
         editor.current.clear();
