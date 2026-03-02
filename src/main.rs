@@ -2463,8 +2463,11 @@ struct ExternalControlState<'a> {
     held_total: &'a mut std::time::Duration,
     send_count: &'a mut u32,
     last_hash_by_target: &'a mut std::collections::HashMap<String, String>,
+    trigger_edge_active: &'a mut HashSet<String>,
+    trigger_confirm_pending_since: &'a mut std::collections::HashMap<String, std::time::Instant>,
     active_rule: &'a mut Option<String>,
     active_rule_by_target: &'a mut std::collections::HashMap<String, Option<String>>,
+    backoff_state: &'a mut std::collections::HashMap<String, BackoffState>,
 }
 
 fn apply_external_control(command: FleetControlCommand, state: ExternalControlState<'_>) -> bool {
@@ -2474,8 +2477,11 @@ fn apply_external_control(command: FleetControlCommand, state: ExternalControlSt
         held_total,
         send_count,
         last_hash_by_target,
+        trigger_edge_active,
+        trigger_confirm_pending_since,
         active_rule,
         active_rule_by_target,
+        backoff_state,
     } = state;
     match command {
         FleetControlCommand::Stop => true,
@@ -2495,13 +2501,20 @@ fn apply_external_control(command: FleetControlCommand, state: ExternalControlSt
         }
         FleetControlCommand::Next => {
             last_hash_by_target.clear();
+            trigger_edge_active.clear();
+            trigger_confirm_pending_since.clear();
+            active_rule_by_target.clear();
+            backoff_state.clear();
             false
         }
         FleetControlCommand::Renew => {
             *send_count = 0;
             last_hash_by_target.clear();
+            trigger_edge_active.clear();
+            trigger_confirm_pending_since.clear();
             *active_rule = None;
             active_rule_by_target.clear();
+            backoff_state.clear();
             false
         }
     }
@@ -4036,8 +4049,11 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                     held_total: &mut held_total,
                     send_count: &mut send_count,
                     last_hash_by_target: &mut last_hash_by_target,
+                    trigger_edge_active: &mut trigger_edge_active,
+                    trigger_confirm_pending_since: &mut trigger_confirm_pending_since,
                     active_rule: &mut active_rule,
                     active_rule_by_target: &mut active_rule_by_target,
+                    backoff_state: &mut backoff_state,
                 },
             );
             if let Some(tui_state) = tui.as_mut() {
@@ -10360,9 +10376,21 @@ runs:
         let mut send_count = 9;
         let mut last_hash_by_target = std::collections::HashMap::new();
         last_hash_by_target.insert("ai:1.0".to_string(), "abc".to_string());
+        let mut trigger_edge_active = HashSet::from(["ai:1.0|rule-a".to_string()]);
+        let mut trigger_confirm_pending_since = std::collections::HashMap::new();
+        trigger_confirm_pending_since
+            .insert("ai:1.0|rule-a".to_string(), std::time::Instant::now());
         let mut active_rule = Some("next".to_string());
         let mut active_rule_by_target = std::collections::HashMap::new();
         active_rule_by_target.insert("ai:1.0".to_string(), Some("next".to_string()));
+        let mut backoff_state = std::collections::HashMap::new();
+        backoff_state.insert(
+            "rule-a".to_string(),
+            BackoffState {
+                attempts: 1,
+                last_sent: None,
+            },
+        );
 
         let should_stop = apply_external_control(
             FleetControlCommand::Renew,
@@ -10372,16 +10400,71 @@ runs:
                 held_total: &mut held_total,
                 send_count: &mut send_count,
                 last_hash_by_target: &mut last_hash_by_target,
+                trigger_edge_active: &mut trigger_edge_active,
+                trigger_confirm_pending_since: &mut trigger_confirm_pending_since,
                 active_rule: &mut active_rule,
                 active_rule_by_target: &mut active_rule_by_target,
+                backoff_state: &mut backoff_state,
             },
         );
 
         assert!(!should_stop);
         assert_eq!(send_count, 0);
         assert!(last_hash_by_target.is_empty());
+        assert!(trigger_edge_active.is_empty());
+        assert!(trigger_confirm_pending_since.is_empty());
         assert!(active_rule.is_none());
         assert!(active_rule_by_target.is_empty());
+        assert!(backoff_state.is_empty());
+    }
+
+    #[test]
+    fn external_control_next_clears_trigger_and_backoff_state() {
+        let mut loop_state = LoopState::Running;
+        let mut hold_started = None;
+        let mut held_total = std::time::Duration::from_secs(0);
+        let mut send_count = 9;
+        let mut last_hash_by_target = std::collections::HashMap::new();
+        last_hash_by_target.insert("ai:1.0".to_string(), "abc".to_string());
+        let mut trigger_edge_active = HashSet::from(["ai:1.0|rule-a".to_string()]);
+        let mut trigger_confirm_pending_since = std::collections::HashMap::new();
+        trigger_confirm_pending_since
+            .insert("ai:1.0|rule-a".to_string(), std::time::Instant::now());
+        let mut active_rule = Some("next".to_string());
+        let mut active_rule_by_target = std::collections::HashMap::new();
+        active_rule_by_target.insert("ai:1.0".to_string(), Some("next".to_string()));
+        let mut backoff_state = std::collections::HashMap::new();
+        backoff_state.insert(
+            "rule-a".to_string(),
+            BackoffState {
+                attempts: 1,
+                last_sent: None,
+            },
+        );
+
+        let should_stop = apply_external_control(
+            FleetControlCommand::Next,
+            ExternalControlState {
+                loop_state: &mut loop_state,
+                hold_started: &mut hold_started,
+                held_total: &mut held_total,
+                send_count: &mut send_count,
+                last_hash_by_target: &mut last_hash_by_target,
+                trigger_edge_active: &mut trigger_edge_active,
+                trigger_confirm_pending_since: &mut trigger_confirm_pending_since,
+                active_rule: &mut active_rule,
+                active_rule_by_target: &mut active_rule_by_target,
+                backoff_state: &mut backoff_state,
+            },
+        );
+
+        assert!(!should_stop);
+        assert_eq!(send_count, 9);
+        assert!(last_hash_by_target.is_empty());
+        assert!(trigger_edge_active.is_empty());
+        assert!(trigger_confirm_pending_since.is_empty());
+        assert!(active_rule_by_target.is_empty());
+        assert!(backoff_state.is_empty());
     }
 
     #[test]
@@ -11576,6 +11659,13 @@ runs:
         let stopped = format_fleet_heartbeat_metric(LoopState::Stopped, 12, 0, 5, 60, 0);
         assert!(stopped.contains("state=stopped"));
         assert!(stopped.contains("activity=idle"));
+    }
+
+    #[test]
+    fn fleet_heartbeat_metric_marks_critical_severity_for_large_drift() {
+        let metric = format_fleet_heartbeat_metric(LoopState::Running, 20, 0, 5, 60, 61);
+        assert!(metric.contains("drift=61s"));
+        assert!(metric.contains("severity=critical"));
     }
 
     #[test]
