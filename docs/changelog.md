@@ -151,5 +151,5 @@
 - Preflight and publish checks passed: `cargo fmt --check`, `cargo test -q` (151 passed).
 
 ### Post-Release
-- Bumped package version to `0.1.45-dev` for next iteration cycle.
-- Updated Homebrew tap formula to `v0.1.44` and verified local install with `loopmux --version`.
+- Bumped package version to `0.1.46-dev` for next iteration cycle.
+- Updated Homebrew tap formula to `v0.1.45` and verified local install with `loopmux --version`.
