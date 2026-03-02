@@ -147,6 +147,9 @@ struct RunArgs {
     /// Disable trigger recheck immediately before sending.
     #[arg(long)]
     no_recheck_before_send: bool,
+    /// Emit per-scan trigger decision diagnostics.
+    #[arg(long)]
+    debug_trigger: bool,
     /// Fanout mode for matched panes.
     #[arg(long, default_value = "matched")]
     fanout: FanoutMode,
@@ -935,6 +938,7 @@ fn run(args: RunArgs) -> Result<()> {
             tui: args.tui,
             trigger_edge_override: args.no_trigger_edge.then_some(false),
             recheck_before_send_override: args.no_recheck_before_send.then_some(false),
+            debug_trigger: args.debug_trigger,
             profile_id: None,
         },
     )?;
@@ -1299,6 +1303,7 @@ fn validate_workspace_profile(profile: &ResolvedRunProfile) -> Result<ResolvedCo
             tui: false,
             trigger_edge_override: None,
             recheck_before_send_override: None,
+            debug_trigger: false,
             profile_id: Some(profile.id.clone()),
         },
     )
@@ -4535,6 +4540,18 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                     &last_hash,
                     has_pending_confirm,
                 ) {
+                    emit_trigger_debug(
+                        &mut logger,
+                        &config,
+                        target,
+                        "hash_skip",
+                        &format!(
+                            "hash={} last_hash={} pending_confirm={}",
+                            short_hash(&hash),
+                            short_hash(&last_hash),
+                            has_pending_confirm
+                        ),
+                    )?;
                     continue;
                 }
 
@@ -4561,6 +4578,16 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                 );
 
                 if rule_matches.is_empty() {
+                    emit_trigger_debug(
+                        &mut logger,
+                        &config,
+                        target,
+                        "no_match",
+                        &format!(
+                            "hash_changed={} pending_confirm={}",
+                            hash_changed, has_pending_confirm
+                        ),
+                    )?;
                     continue;
                 }
 
@@ -4570,6 +4597,16 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                 for rule_match in rule_matches {
                     let edge_key = trigger_edge_key(target, &rule_match);
                     if !edge_guard_allows(&trigger_edge_active, &edge_key, config.trigger_edge) {
+                        emit_trigger_debug(
+                            &mut logger,
+                            &config,
+                            target,
+                            "edge_blocked",
+                            &format!(
+                                "rule={}",
+                                rule_match.rule.id.as_deref().unwrap_or("<unnamed>")
+                            ),
+                        )?;
                         continue;
                     }
                     if !confirm_window_elapsed(
@@ -4579,6 +4616,20 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                         &mut trigger_confirm_pending_since,
                         std::time::Instant::now(),
                     ) {
+                        emit_trigger_debug(
+                            &mut logger,
+                            &config,
+                            target,
+                            "confirm_pending",
+                            &format!(
+                                "rule={} confirm_seconds={}",
+                                rule_match.rule.id.as_deref().unwrap_or("<unnamed>"),
+                                rule_match
+                                    .rule
+                                    .confirm_seconds
+                                    .unwrap_or(config.trigger_confirm_seconds)
+                            ),
+                        )?;
                         continue;
                     }
 
@@ -4623,6 +4674,17 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                         stop_after: rule_match.rule.next.as_deref() == Some("stop"),
                         delay_seconds,
                     });
+                    emit_trigger_debug(
+                        &mut logger,
+                        &config,
+                        target,
+                        "plan_ready",
+                        &format!(
+                            "rule={} delay={}",
+                            rule_match.rule.id.as_deref().unwrap_or("<unnamed>"),
+                            delay_seconds.unwrap_or(0)
+                        ),
+                    )?;
                 }
                 if config.trigger_edge {
                     last_hash_by_target.insert(target.clone(), hash);
@@ -4750,6 +4812,17 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                                     truncate_text(&detail, 120, log_use_unicode)
                                 ));
                             }
+                            emit_trigger_debug(
+                                &mut logger,
+                                &config,
+                                &target,
+                                "stale_recheck",
+                                &format!(
+                                    "rule={} preview_lines={}",
+                                    plan.rule_id.as_deref().unwrap_or("<unnamed>"),
+                                    recheck_preview_lines
+                                ),
+                            )?;
                             continue;
                         }
                     }
@@ -4839,6 +4912,13 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                         println!("{status}");
                     }
                     logger.log(LogEvent::status(&config, status))?;
+                    emit_trigger_debug(
+                        &mut logger,
+                        &config,
+                        &target,
+                        "sent",
+                        &format!("rule={}", plan.rule_id.as_deref().unwrap_or("<unnamed>")),
+                    )?;
                     logger.log(LogEvent::sent(
                         &config,
                         plan.rule_id.as_deref(),
@@ -5674,6 +5754,26 @@ fn should_skip_scan_by_hash(
     trigger_edge_enabled && !last_hash.is_empty() && hash == last_hash && !has_pending_confirm
 }
 
+fn short_hash(hash: &str) -> &str {
+    if hash.len() > 8 { &hash[..8] } else { hash }
+}
+
+fn emit_trigger_debug(
+    logger: &mut Logger,
+    config: &ResolvedConfig,
+    target: &str,
+    decision: &str,
+    detail: &str,
+) -> Result<()> {
+    if !config.debug_trigger {
+        return Ok(());
+    }
+    logger.log(LogEvent::status(
+        config,
+        format!("trigger-debug target={target} decision={decision} {detail}"),
+    ))
+}
+
 fn extract_trigger_preview(output: &str, max_lines: usize, use_unicode: bool) -> (usize, String) {
     let lines = output
         .lines()
@@ -6124,6 +6224,7 @@ fn validate(args: ValidateArgs) -> Result<()> {
             tui: false,
             trigger_edge_override: None,
             recheck_before_send_override: None,
+            debug_trigger: false,
             profile_id: None,
         },
     )?;
@@ -6374,6 +6475,7 @@ struct ResolvedConfig {
     log_preview_lines: usize,
     trigger_edge: bool,
     recheck_before_send: bool,
+    debug_trigger: bool,
     fanout: FanoutMode,
     duration: Option<Duration>,
     prompt_edit_max_chars: usize,
@@ -8295,6 +8397,7 @@ struct ResolveConfigArgs {
     tui: bool,
     trigger_edge_override: Option<bool>,
     recheck_before_send_override: Option<bool>,
+    debug_trigger: bool,
     profile_id: Option<String>,
 }
 
@@ -8310,6 +8413,7 @@ fn resolve_config(mut config: Config, args: ResolveConfigArgs) -> Result<Resolve
         tui,
         trigger_edge_override,
         recheck_before_send_override,
+        debug_trigger,
         profile_id,
     } = args;
     if let Some(targets) = target_override
@@ -8498,6 +8602,7 @@ fn resolve_config(mut config: Config, args: ResolveConfigArgs) -> Result<Resolve
         log_preview_lines,
         trigger_edge,
         recheck_before_send,
+        debug_trigger,
         fanout,
         duration,
         prompt_edit_max_chars,
@@ -8580,6 +8685,10 @@ fn print_validation(config: &ResolvedConfig) {
         } else {
             "no"
         }
+    );
+    println!(
+        "- debug_trigger: {}",
+        if config.debug_trigger { "yes" } else { "no" }
     );
     println!("- fanout: {}", fanout_label(config.fanout));
     if let Some(duration) = config.duration {
@@ -9771,6 +9880,7 @@ runs:
             log_preview_lines: None,
             no_trigger_edge: false,
             no_recheck_before_send: false,
+            debug_trigger: false,
             fanout: FanoutMode::Matched,
             duration: None,
             history_limit: None,
@@ -9809,6 +9919,7 @@ runs:
             log_preview_lines: None,
             no_trigger_edge: false,
             no_recheck_before_send: false,
+            debug_trigger: false,
             fanout: FanoutMode::Matched,
             duration: Some("30s".to_string()),
             history_limit: None,
@@ -9854,6 +9965,7 @@ runs:
             log_preview_lines: None,
             no_trigger_edge: false,
             no_recheck_before_send: false,
+            debug_trigger: false,
             fanout: FanoutMode::Matched,
             duration: None,
             history_limit: None,
@@ -9894,6 +10006,7 @@ runs:
             log_preview_lines: None,
             no_trigger_edge: false,
             no_recheck_before_send: false,
+            debug_trigger: false,
             fanout: FanoutMode::Matched,
             duration: None,
             history_limit: None,
@@ -9914,6 +10027,7 @@ runs:
                 tui: false,
                 trigger_edge_override: None,
                 recheck_before_send_override: None,
+                debug_trigger: false,
                 profile_id: None,
             },
         )
@@ -9964,6 +10078,7 @@ runs:
             log_preview_lines: None,
             no_trigger_edge: false,
             no_recheck_before_send: false,
+            debug_trigger: false,
             fanout: FanoutMode::Matched,
             duration: None,
             history_limit: None,
@@ -10007,6 +10122,7 @@ runs:
             log_preview_lines: None,
             no_trigger_edge: false,
             no_recheck_before_send: false,
+            debug_trigger: false,
             fanout: FanoutMode::Matched,
             duration: None,
             history_limit: None,
@@ -10050,6 +10166,7 @@ runs:
             log_preview_lines: None,
             no_trigger_edge: false,
             no_recheck_before_send: false,
+            debug_trigger: false,
             fanout: FanoutMode::Matched,
             duration: None,
             history_limit: None,
@@ -10070,6 +10187,7 @@ runs:
                 tui: false,
                 trigger_edge_override: None,
                 recheck_before_send_override: None,
+                debug_trigger: false,
                 profile_id: None,
             },
         )
@@ -10106,6 +10224,7 @@ runs:
             log_preview_lines: None,
             no_trigger_edge: false,
             no_recheck_before_send: false,
+            debug_trigger: false,
             fanout: FanoutMode::Matched,
             duration: None,
             history_limit: None,
@@ -10126,6 +10245,7 @@ runs:
                 tui: false,
                 trigger_edge_override: None,
                 recheck_before_send_override: None,
+                debug_trigger: false,
                 profile_id: None,
             },
         )
@@ -10183,6 +10303,7 @@ runs:
                 tui: false,
                 trigger_edge_override: None,
                 recheck_before_send_override: None,
+                debug_trigger: false,
                 profile_id: None,
             },
         )
@@ -10236,6 +10357,7 @@ runs:
                 tui: false,
                 trigger_edge_override: None,
                 recheck_before_send_override: None,
+                debug_trigger: false,
                 profile_id: Some("watcher".to_string()),
             },
         )
@@ -10547,6 +10669,7 @@ runs:
             log_preview_lines: 3,
             trigger_edge: true,
             recheck_before_send: true,
+            debug_trigger: false,
             fanout: FanoutMode::Matched,
             prompt_edit_max_chars: DEFAULT_PROMPT_EDIT_MAX_CHARS,
             duration: None,
@@ -10935,6 +11058,7 @@ runs:
             log_preview_lines: 3,
             trigger_edge: true,
             recheck_before_send: true,
+            debug_trigger: false,
             fanout: FanoutMode::Matched,
             prompt_edit_max_chars: DEFAULT_PROMPT_EDIT_MAX_CHARS,
             duration: None,
@@ -11000,6 +11124,7 @@ runs:
             log_preview_lines: 3,
             trigger_edge: true,
             recheck_before_send: true,
+            debug_trigger: false,
             fanout: FanoutMode::Matched,
             prompt_edit_max_chars: DEFAULT_PROMPT_EDIT_MAX_CHARS,
             duration: None,
@@ -11065,6 +11190,7 @@ runs:
             log_preview_lines: 3,
             trigger_edge: true,
             recheck_before_send: true,
+            debug_trigger: false,
             fanout: FanoutMode::Matched,
             prompt_edit_max_chars: DEFAULT_PROMPT_EDIT_MAX_CHARS,
             duration: None,
@@ -11198,6 +11324,7 @@ runs:
             log_preview_lines: 3,
             trigger_edge: true,
             recheck_before_send: true,
+            debug_trigger: false,
             fanout: FanoutMode::Matched,
             prompt_edit_max_chars: DEFAULT_PROMPT_EDIT_MAX_CHARS,
             duration: None,
