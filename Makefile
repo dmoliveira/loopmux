@@ -4,7 +4,7 @@ REPO ?=
 TAP_REPO ?=
 NO_BREW ?=0
 
-.PHONY: help release smoke-post-release
+.PHONY: help release smoke-post-release smoke-instagram-e2e
 
 help: ## Show available targets
 	@printf "$(PROJECT) release tooling\n\n"
@@ -22,3 +22,6 @@ release: ## Run full release flow (VERSION=x.y.z)
 
 smoke-post-release: ## Run tmux post-release smoke helper
 	@./scripts/tmux-post-release-smoke.sh
+
+smoke-instagram-e2e: ## Run persistent-marker Instagram trigger smoke helper
+	@./scripts/tmux-instagram-trigger-smoke.sh
