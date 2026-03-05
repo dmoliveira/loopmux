@@ -479,15 +479,15 @@ If behavior is still unclear, run with trigger diagnostics enabled:
 
 ```bash
 loopmux run -t ai:5.0 -n 20 \
-  --prompt "Continue iteration with the next instagram contact." \
-  --trigger "<NEXT-INSTA-CONTACT>" \
+  --prompt "Continue iteration with the next contact." \
+  --trigger "<NEXT-CONTACT>" \
   --trigger-exact-line \
   --poll 180 \
   --debug-trigger
 ```
 
 Look for `trigger-debug ... decision=<state>` logs to confirm why a scan did or did not inject.
-For an end-to-end repro of repeated `<NEXT-INSTA-CONTACT>` injections in tmux, run `make smoke-instagram-e2e`.
+For an end-to-end repro of repeated `<NEXT-CONTACT>` injections in tmux, run `make smoke-trigger-e2e`.
 
 ### File source gotchas
 - Use `--tail` for append-only logs and `--head` when the important marker stays near the top.

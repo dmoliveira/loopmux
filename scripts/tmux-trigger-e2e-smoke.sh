@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-session_name="${LOOPMUX_SMOKE_SESSION:-loopmux-insta-smoke}"
+session_name="${LOOPMUX_SMOKE_SESSION:-loopmux-trigger-smoke}"
 target="${LOOPMUX_SMOKE_TARGET:-}"
-token="${LOOPMUX_SMOKE_TOKEN:-<NEXT-INSTA-CONTACT>}"
-trigger_file="${LOOPMUX_SMOKE_TRIGGER_FILE:-/tmp/loopmux-insta-trigger.log}"
-log_file="${LOOPMUX_SMOKE_LOG:-/tmp/loopmux-instagram-smoke.log}"
-capture_file="${LOOPMUX_SMOKE_CAPTURE:-/tmp/loopmux-instagram-capture.log}"
-send_marker="${LOOPMUX_SMOKE_PROMPT:-LOOPMUX_INSTA_SMOKE_SEND}"
+token="${LOOPMUX_SMOKE_TOKEN:-<NEXT-CONTACT>}"
+trigger_file="${LOOPMUX_SMOKE_TRIGGER_FILE:-/tmp/loopmux-trigger-smoke-input.log}"
+log_file="${LOOPMUX_SMOKE_LOG:-/tmp/loopmux-trigger-smoke.log}"
+capture_file="${LOOPMUX_SMOKE_CAPTURE:-/tmp/loopmux-trigger-smoke-capture.log}"
+send_marker="${LOOPMUX_SMOKE_PROMPT:-LOOPMUX_TRIGGER_SMOKE_SEND}"
 iterations="${LOOPMUX_SMOKE_ITERATIONS:-3}"
 emit_count="${LOOPMUX_SMOKE_EMIT_COUNT:-6}"
 poll_seconds="${LOOPMUX_SMOKE_POLL:-1}"
@@ -55,10 +55,11 @@ CI=true cargo run -- run \
 	--trigger "${token}" \
 	--trigger-exact-line \
 	--trigger-confirm-seconds 0 \
+	--no-trigger-edge \
 	--no-recheck-before-send \
 	--poll "${poll_seconds}" \
 	--initial-poll 1 \
-	--name smoke-instagram-e2e \
+	--name smoke-trigger-e2e \
 	>"${log_file}" 2>&1
 
 wait "${emitter_pid}" || true
