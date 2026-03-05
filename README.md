@@ -487,6 +487,7 @@ loopmux run -t ai:5.0 -n 20 \
 ```
 
 Look for `trigger-debug ... decision=<state>` logs to confirm why a scan did or did not inject.
+For an end-to-end repro of repeated `<NEXT-INSTA-CONTACT>` injections in tmux, run `make smoke-instagram-e2e`.
 
 ### File source gotchas
 - Use `--tail` for append-only logs and `--head` when the important marker stays near the top.
