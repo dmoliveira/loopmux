@@ -153,3 +153,15 @@
 ### Post-Release
 - Bumped package version to `0.1.46-dev` for next iteration cycle.
 - Updated Homebrew tap formula to `v0.1.45` and verified local install with `loopmux --version`.
+
+## 2026-03-05
+
+### v0.1.46 References
+- PR #180: Add `--debug-trigger` scan diagnostics (`https://github.com/dmoliveira/loopmux/pull/180`)
+- PR #181: Add README troubleshooting guidance for `--debug-trigger` (`https://github.com/dmoliveira/loopmux/pull/181`)
+- PR #183: Remove Instagram-specific naming from the trigger e2e smoke helper (`https://github.com/dmoliveira/loopmux/pull/183`)
+
+### v0.1.46 Release
+- Release published: `https://github.com/dmoliveira/loopmux/releases/tag/v0.1.46`.
+- Tag: `v0.1.46`.
+- Preflight and publish checks passed: `cargo fmt --check`, `cargo test -q` (151 passed), `make smoke-trigger-e2e`.
