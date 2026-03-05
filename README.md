@@ -298,6 +298,7 @@ loopmux run -t ai:5.0 -n 5 \
 - `--log-preview-lines N`: number of captured lines shown in folded sent-log previews (default 3).
 - `--no-trigger-edge`: opt out of edge-guard (default guard is ON to avoid repeated queue injections while trigger stays true).
 - `--no-recheck-before-send`: skip the default pre-send trigger recheck (default is ON).
+- `--debug-trigger`: emit per-scan trigger decisions (`hash_skip`, `no_match`, `edge_blocked`, `confirm_pending`, `stale_recheck`, `plan_ready`, `sent`).
 - `--fanout matched|broadcast`: send to matched panes only (default) or broadcast to all panes in scope.
 - `--tui`: enable the interactive terminal UI.
 - `--history-limit N`: max history entries to keep/show in TUI picker (default 50).
@@ -473,6 +474,19 @@ By default, loopmux also requires matches to remain present for `5s` before send
 - For sentinel lines, prefer `--trigger-exact-line` and a unique token.
 - For expression mode, validate operator precedence (`&&` before `||`) and add parentheses when intent is ambiguous.
 - Use `multi_match` if you expect more than one rule to fire.
+
+If behavior is still unclear, run with trigger diagnostics enabled:
+
+```bash
+loopmux run -t ai:5.0 -n 20 \
+  --prompt "Continue iteration with the next instagram contact." \
+  --trigger "<NEXT-INSTA-CONTACT>" \
+  --trigger-exact-line \
+  --poll 180 \
+  --debug-trigger
+```
+
+Look for `trigger-debug ... decision=<state>` logs to confirm why a scan did or did not inject.
 
 ### File source gotchas
 - Use `--tail` for append-only logs and `--head` when the important marker stays near the top.
