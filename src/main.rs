@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::hash::{Hash, Hasher};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Once;
@@ -30,7 +29,11 @@ mod tui;
 use logging::{Logger, redacted_sent_detail};
 use source_inputs::{collect_source_inputs, dedupe_preserve_order};
 use template::{collect_template_placeholders, default_template, find_missing_vars};
-use tui::{detect_icon_mode, detect_style, layout_mode, resolve_ui_mode, supports_unicode};
+use tui::{
+    build_grouped_log_lines, detect_icon_mode, detect_style, layout_mode, render_footer,
+    render_footer_summary, resolve_ui_mode, sanitize_tui_log_line, supports_unicode,
+    tui_frame_signature,
+};
 
 const LOOPMUX_VERSION: &str = env!("CARGO_PKG_VERSION");
 const FLEET_HEARTBEAT_MIN_INTERVAL_SECONDS: u64 = 30;
@@ -5824,24 +5827,6 @@ fn latest_stop_reason(logs: &[String]) -> Option<String> {
     })
 }
 
-fn tui_frame_signature(
-    width: u16,
-    height: u16,
-    bar: &str,
-    display_lines: &[String],
-    footer: &str,
-    overlay_open: bool,
-) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    width.hash(&mut hasher);
-    height.hash(&mut hasher);
-    overlay_open.hash(&mut hasher);
-    bar.hash(&mut hasher);
-    display_lines.hash(&mut hasher);
-    footer.hash(&mut hasher);
-    hasher.finish()
-}
-
 fn fleet_heartbeat_interval_seconds(poll_seconds: u64) -> u64 {
     poll_seconds
         .max(1)
@@ -7373,54 +7358,6 @@ impl TuiState {
     }
 }
 
-fn render_footer(
-    style: StyleConfig,
-    width: u16,
-    summary: Option<&str>,
-    note: Option<&str>,
-    overlay_help: Option<&str>,
-) -> String {
-    let sep_text = if style.use_unicode_ellipsis {
-        " · "
-    } else {
-        " . "
-    };
-    let text = if let Some(summary) = summary {
-        format!("stopped{sep_text}{summary}{sep_text}q quit")
-    } else if let Some(help) = overlay_help {
-        help.to_string()
-    } else {
-        format!(
-            "h hold/resume (p/r){sep_text}l active-list{sep_text}g log-view{sep_text}f fleet{sep_text}R renew{sep_text}n next{sep_text}s/^C stop{sep_text}q quit"
-        )
-    };
-    let text = if let Some(note) = note {
-        format!("{text}{sep_text}{note}")
-    } else {
-        text
-    };
-    let line = pad_to_width(&text, width as usize);
-    if style.use_color {
-        let prefix = style_prefix(Some(240), style.use_bg.then_some(235), false);
-        format!("{prefix}{line}\x1B[0m")
-    } else {
-        line
-    }
-}
-
-fn render_footer_summary(
-    config: &ResolvedConfig,
-    current: u32,
-    total: u32,
-    elapsed: &str,
-) -> String {
-    if config.infinite || total == 0 || total == u32::MAX {
-        format!("sends {current} elapsed {elapsed}")
-    } else {
-        format!("iter {current}/{total} elapsed {elapsed}")
-    }
-}
-
 fn active_list_note(filter: &InjectionFilterState) -> Option<String> {
     let (active, total) = filter.active_counts();
     if total == 0 {
@@ -7897,140 +7834,6 @@ fn parse_process_usage_summary(ps_stdout: &str) -> Option<String> {
     let rss_kb = fields.next()?.parse::<u64>().ok()?;
     let mem_mb = rss_kb as f64 / 1024.0;
     Some(format!("cpu {:.1}% mem {:.1}mb", cpu, mem_mb))
-}
-
-fn sanitize_tui_log_line(line: &str) -> String {
-    let mut cleaned = String::new();
-    let mut chars = line.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' {
-            if matches!(chars.peek(), Some('[')) {
-                let _ = chars.next();
-                for next in chars.by_ref() {
-                    if ('@'..='~').contains(&next) {
-                        break;
-                    }
-                }
-            }
-            continue;
-        }
-        if ch == '\u{fffd}' {
-            continue;
-        }
-        if ch.is_control() {
-            cleaned.push(' ');
-            continue;
-        }
-        cleaned.push(ch);
-    }
-
-    let mut collapsed = String::new();
-    let mut space_run = 0usize;
-    for ch in cleaned.chars() {
-        if ch.is_whitespace() {
-            space_run += 1;
-            if space_run <= 2 {
-                collapsed.push(' ');
-            }
-        } else {
-            space_run = 0;
-            collapsed.push(ch);
-        }
-    }
-    collapsed.trim().to_string()
-}
-
-fn build_grouped_log_lines(logs: &[String], max_lines: usize, use_unicode: bool) -> Vec<String> {
-    if max_lines == 0 {
-        return Vec::new();
-    }
-
-    let mut groups: BTreeMap<String, (usize, usize, String)> = BTreeMap::new();
-    let mut misc: Option<(usize, usize, String)> = None;
-
-    for (idx, line) in logs.iter().enumerate() {
-        let key = extract_log_target(line);
-        if let Some(target) = key {
-            let entry = groups
-                .entry(target)
-                .or_insert_with(|| (0usize, idx, String::new()));
-            entry.0 = entry.0.saturating_add(1);
-            entry.1 = idx;
-            entry.2 = line.clone();
-        } else {
-            match misc.as_mut() {
-                Some(entry) => {
-                    entry.0 = entry.0.saturating_add(1);
-                    entry.1 = idx;
-                    entry.2 = line.clone();
-                }
-                None => {
-                    misc = Some((1usize, idx, line.clone()));
-                }
-            }
-        }
-    }
-
-    let mut items = groups
-        .into_iter()
-        .map(|(target, (count, last_idx, last_line))| (target, count, last_idx, last_line))
-        .collect::<Vec<_>>();
-    if let Some((count, last_idx, last_line)) = misc {
-        items.push(("misc".to_string(), count, last_idx, last_line));
-    }
-
-    items.sort_by(|a, b| b.2.cmp(&a.2));
-    if items.is_empty() {
-        return vec!["grouped view: no logs yet".to_string()];
-    }
-
-    items
-        .into_iter()
-        .take(max_lines)
-        .map(|(target, count, _idx, last_line)| {
-            let preview = truncate_text(&last_line, 74, use_unicode);
-            format!("{target} x{count} {preview}")
-        })
-        .collect()
-}
-
-fn extract_log_target(line: &str) -> Option<String> {
-    if let Some(pos) = line.find("target=") {
-        let value = &line[pos + 7..];
-        let token = value
-            .chars()
-            .take_while(|ch| !ch.is_whitespace() && *ch != '"' && *ch != ',' && *ch != ';')
-            .collect::<String>();
-        if looks_like_pane_target(&token) {
-            return Some(token);
-        }
-    }
-
-    for token in line.split_whitespace() {
-        let cleaned = token
-            .trim_matches(|ch: char| {
-                ch == '"' || ch == '\'' || ch == '[' || ch == ']' || ch == ',' || ch == ';'
-            })
-            .to_string();
-        if looks_like_pane_target(&cleaned) {
-            return Some(cleaned);
-        }
-    }
-    None
-}
-
-fn looks_like_pane_target(token: &str) -> bool {
-    let Some(colon) = token.find(':') else {
-        return false;
-    };
-    let Some(dot_rel) = token[colon + 1..].find('.') else {
-        return false;
-    };
-    let dot = colon + 1 + dot_rel;
-    let session = &token[..colon];
-    let window = &token[colon + 1..dot];
-    let pane = &token[dot + 1..];
-    !session.is_empty() && !window.is_empty() && !pane.is_empty()
 }
 
 fn state_label(state: LoopState, icon_mode: IconMode) -> (&'static str, &'static str) {
@@ -11087,7 +10890,7 @@ runs:
     #[test]
     fn extract_log_target_prefers_target_field() {
         let line = "[2026-02-24T20:51:12Z] sent target=ai:2.0 sends=4";
-        assert_eq!(extract_log_target(line).as_deref(), Some("ai:2.0"));
+        assert_eq!(tui::extract_log_target(line).as_deref(), Some("ai:2.0"));
     }
 
     #[test]
