@@ -94,3 +94,81 @@ fn sanitize_detail(detail: &str) -> String {
         .replace('\r', "\\r")
         .replace('\t', "\\t")
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::{LogEvent, LogFormatResolved, LoggingConfigResolved};
+
+    fn temp_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("loopmux-{name}-{}.log", std::process::id()))
+    }
+
+    #[test]
+    fn redacted_sent_detail_does_not_include_prompt_body() {
+        let prompt = "secret token 123";
+        let detail = redacted_sent_detail("ai:5.0", prompt);
+        assert!(detail.contains("target=ai:5.0"));
+        assert!(detail.contains("prompt_redacted"));
+        assert!(detail.contains("chars=16"));
+        assert!(!detail.contains(prompt));
+    }
+
+    #[test]
+    fn logger_text_output_keeps_redacted_sent_detail() {
+        let path = temp_path("text-redacted");
+        let _ = std::fs::remove_file(&path);
+        let mut logger = Logger::new(LoggingConfigResolved {
+            path: Some(path.clone()),
+            format: LogFormatResolved::Text,
+        })
+        .unwrap();
+
+        logger
+            .log(LogEvent {
+                event: "sent".to_string(),
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+                target: "ai:5.0".to_string(),
+                rule_id: Some("inline".to_string()),
+                detail: Some(redacted_sent_detail("ai:5.0", "my api key is abc123")),
+                sends: None,
+            })
+            .unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("prompt_redacted"));
+        assert!(!content.contains("my api key is abc123"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn logger_json_output_keeps_redacted_sent_detail() {
+        let path = temp_path("json-redacted");
+        let _ = std::fs::remove_file(&path);
+        let mut logger = Logger::new(LoggingConfigResolved {
+            path: Some(path.clone()),
+            format: LogFormatResolved::Jsonl,
+        })
+        .unwrap();
+
+        logger
+            .log(LogEvent {
+                event: "sent".to_string(),
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+                target: "ai:5.0".to_string(),
+                rule_id: Some("inline".to_string()),
+                detail: Some(redacted_sent_detail("ai:5.0", "password=hunter2")),
+                sends: None,
+            })
+            .unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("prompt_redacted"));
+        assert!(!content.contains("password=hunter2"));
+
+        let _ = std::fs::remove_file(path);
+    }
+}
