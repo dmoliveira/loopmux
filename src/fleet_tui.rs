@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 
 use crate::{
+    FleetSortMode, FleetStateFilter, FleetViewPreset, LOOPMUX_VERSION, PendingFleetAction,
     fleet::FleetControlCommand, fleet::FleetListedRun, fleet_command_label, truncate_text,
-    FleetSortMode, FleetStateFilter, FleetViewPreset, PendingFleetAction, LOOPMUX_VERSION,
 };
 
 pub(crate) struct FleetDetailRenderArgs<'a> {
