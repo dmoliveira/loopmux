@@ -83,6 +83,8 @@ loopmux run -t ai:5.0 -n 5 \
 - If that file does not exist yet, loopmux creates it automatically with a starter `continue-loop` event (`exact_line: <CONTINUE-LOOP>`).
 - Profiles in `runs:` (or `events:` alias) can be enabled/disabled and filtered by current directory.
 - Multiple matching profiles are started together (each as an independent run process).
+- `exec.command` runs through your shell, so only enable autostart profiles from trusted config files.
+- Sent-prompt log entries are redacted by default; logs keep target/rule/timing context without storing full prompt text.
 
 Example:
 
@@ -210,6 +212,11 @@ initial_poll: 5
 iterations: 3
 name: "gw-watch"
 ```
+
+Security note:
+- `exec.command` is executed via the local shell.
+- Treat imported configs and auto-start profiles like executable code.
+- Keep prompt logs enabled if useful, but expect sent prompt bodies to stay redacted.
 
 ### Example files
 - `examples/loopmux.example.yaml`
