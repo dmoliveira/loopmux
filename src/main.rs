@@ -19,9 +19,16 @@ use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use regex::Regex;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::json;
 use serde_yaml::Number;
 use time::OffsetDateTime;
+
+mod logging;
+mod source_inputs;
+mod template;
+
+use logging::{Logger, redacted_sent_detail};
+use source_inputs::{collect_source_inputs, dedupe_preserve_order};
+use template::{collect_template_placeholders, default_template, find_missing_vars};
 
 const LOOPMUX_VERSION: &str = env!("CARGO_PKG_VERSION");
 const FLEET_HEARTBEAT_MIN_INTERVAL_SECONDS: u64 = 30;
@@ -2610,10 +2617,7 @@ fn disable_raw_mode_guarded() -> std::io::Result<()> {
 fn enable_raw_mode_guarded() -> std::io::Result<()> {
     RAW_MODE_ENABLE_CALLS.fetch_add(1, Ordering::SeqCst);
     if RAW_MODE_FAIL_ENABLE.swap(false, Ordering::SeqCst) {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "simulated enable raw mode failure",
-        ))
+        Err(std::io::Error::other("simulated enable raw mode failure"))
     } else {
         Ok(())
     }
@@ -2623,10 +2627,7 @@ fn enable_raw_mode_guarded() -> std::io::Result<()> {
 fn disable_raw_mode_guarded() -> std::io::Result<()> {
     RAW_MODE_DISABLE_CALLS.fetch_add(1, Ordering::SeqCst);
     if RAW_MODE_FAIL_DISABLE.swap(false, Ordering::SeqCst) {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "simulated disable raw mode failure",
-        ))
+        Err(std::io::Error::other("simulated disable raw mode failure"))
     } else {
         Ok(())
     }
@@ -4923,7 +4924,7 @@ fn run_loop(config: ResolvedConfig, identity: RunIdentity) -> Result<()> {
                         &config,
                         plan.rule_id.as_deref(),
                         timestamp,
-                        &format!("target={target} prompt={}", plan.prompt),
+                        &redacted_sent_detail(&target, &plan.prompt),
                     ))?;
 
                     if !config.infinite && send_count >= max_sends {
@@ -6401,63 +6402,6 @@ fn resolve_run_config(args: &RunArgs) -> Result<Config> {
     })
 }
 
-fn read_list_file_entries(path: &PathBuf) -> Result<Vec<String>> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read list file: {}", path.display()))?;
-    let mut values = Vec::new();
-    for (idx, line) in content.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        values.push(trimmed.to_string());
-        if values.last().is_some_and(|value| value.is_empty()) {
-            bail!(
-                "invalid empty entry in {} at line {}",
-                path.display(),
-                idx + 1
-            );
-        }
-    }
-    Ok(values)
-}
-
-fn dedupe_preserve_order(values: Vec<String>) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut deduped = Vec::new();
-    for value in values {
-        if seen.insert(value.clone()) {
-            deduped.push(value);
-        }
-    }
-    deduped
-}
-
-fn collect_source_inputs(
-    targets: &[String],
-    targets_file: &[PathBuf],
-    files: &[PathBuf],
-    files_file: &[PathBuf],
-) -> Result<SourceInputs> {
-    let mut merged_targets = targets.to_vec();
-    for path in targets_file {
-        merged_targets.extend(read_list_file_entries(path)?);
-    }
-
-    let mut merged_files = files
-        .iter()
-        .map(|value| value.display().to_string())
-        .collect::<Vec<_>>();
-    for path in files_file {
-        merged_files.extend(read_list_file_entries(path)?);
-    }
-
-    Ok(SourceInputs {
-        tmux_targets: dedupe_preserve_order(merged_targets),
-        file_paths: dedupe_preserve_order(merged_files),
-    })
-}
-
 #[derive(Debug)]
 struct ResolvedConfig {
     profile_id: Option<String>,
@@ -7276,6 +7220,7 @@ impl TuiState {
         self.footer_note = note;
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn update(
         &mut self,
         state: LoopState,
@@ -9210,83 +9155,6 @@ impl LogEvent {
             detail: Some(detail),
             sends: None,
         }
-    }
-}
-
-struct Logger {
-    config: LoggingConfigResolved,
-    file: Option<std::fs::File>,
-}
-
-impl Logger {
-    fn new(config: LoggingConfigResolved) -> Result<Self> {
-        let file = if let Some(path) = &config.path {
-            Some(
-                std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)
-                    .with_context(|| format!("failed to open log file {}", path.display()))?,
-            )
-        } else {
-            None
-        };
-        Ok(Self { config, file })
-    }
-
-    fn log(&mut self, mut event: LogEvent) -> Result<()> {
-        let timestamp = OffsetDateTime::now_utc()
-            .format(&time::format_description::well_known::Rfc3339)
-            .unwrap_or_else(|_| "unknown".into());
-        if event.timestamp.is_empty() {
-            event.timestamp = timestamp;
-        }
-        match self.config.format {
-            LogFormatResolved::Text => self.log_text(&event),
-            LogFormatResolved::Jsonl => self.log_json(&event),
-        }
-    }
-
-    fn log_text(&mut self, event: &LogEvent) -> Result<()> {
-        let mut line = format!(
-            "[{}] {} target={}",
-            event.timestamp, event.event, event.target
-        );
-        if let Some(rule_id) = event.rule_id.as_ref() {
-            line.push_str(&format!(" rule={rule_id}"));
-        }
-        if let Some(detail) = event.detail.as_ref() {
-            let sanitized = detail.replace('"', "'");
-            line.push_str(&format!(" detail=\"{}\"", sanitized));
-        }
-        if let Some(sends) = event.sends {
-            line.push_str(&format!(" sends={sends}"));
-        }
-        line.push('\n');
-        self.write_line(&line)
-    }
-
-    fn log_json(&mut self, event: &LogEvent) -> Result<()> {
-        let value = json!({
-            "event": event.event,
-            "timestamp": event.timestamp,
-            "target": event.target,
-            "rule_id": event.rule_id,
-            "detail": event.detail,
-            "sends": event.sends,
-        });
-        let mut line = serde_json::to_string(&value).context("failed to serialize log JSON")?;
-        line.push('\n');
-        self.write_line(&line)
-    }
-
-    fn write_line(&mut self, line: &str) -> Result<()> {
-        if let Some(file) = &mut self.file {
-            file.write_all(line.as_bytes())?;
-        } else {
-            print!("{line}");
-        }
-        Ok(())
     }
 }
 
@@ -12027,7 +11895,7 @@ runs:
         );
 
         let hidden = fleet_manager_visible_runs(FleetVisibleArgs {
-            runs: &vec![active.clone(), stale.clone()],
+            runs: &[active.clone(), stale.clone()],
             profile_filter: None,
             show_stale: false,
             mismatch_only: false,
@@ -12040,7 +11908,7 @@ runs:
         assert_eq!(hidden[0].record.id, "run-1");
 
         let all = fleet_manager_visible_runs(FleetVisibleArgs {
-            runs: &vec![active, stale],
+            runs: &[active, stale],
             profile_filter: None,
             show_stale: true,
             mismatch_only: false,
@@ -12072,7 +11940,7 @@ runs:
             true,
         );
         let filtered = fleet_manager_visible_runs(FleetVisibleArgs {
-            runs: &vec![run_match, run_mismatch.clone()],
+            runs: &[run_match, run_mismatch.clone()],
             profile_filter: None,
             show_stale: true,
             mismatch_only: true,
@@ -12098,7 +11966,7 @@ runs:
             false,
         );
         let filtered = fleet_manager_visible_runs(FleetVisibleArgs {
-            runs: &vec![waiting, holding.clone()],
+            runs: &[waiting, holding.clone()],
             profile_filter: None,
             show_stale: true,
             mismatch_only: false,
@@ -12119,7 +11987,7 @@ runs:
             false,
         );
         let by_name = fleet_manager_visible_runs(FleetVisibleArgs {
-            runs: &vec![run.clone()],
+            runs: std::slice::from_ref(&run),
             profile_filter: None,
             show_stale: true,
             mismatch_only: false,
@@ -12131,7 +11999,7 @@ runs:
         assert_eq!(by_name.len(), 1);
 
         let by_target = fleet_manager_visible_runs(FleetVisibleArgs {
-            runs: &vec![run],
+            runs: &[run],
             profile_filter: None,
             show_stale: true,
             mismatch_only: false,
@@ -12595,123 +12463,4 @@ runs:
         assert_eq!(RAW_MODE_ENABLE_CALLS.load(Ordering::SeqCst), 1);
         assert_eq!(RAW_MODE_DISABLE_CALLS.load(Ordering::SeqCst), 1);
     }
-}
-
-fn collect_template_placeholders(
-    default_action: &Action,
-    rules: &Option<Vec<Rule>>,
-) -> Vec<String> {
-    let mut vars = HashSet::new();
-    collect_action_placeholders(default_action, &mut vars);
-    if let Some(rules) = rules {
-        for rule in rules {
-            if let Some(action) = &rule.action {
-                collect_action_placeholders(action, &mut vars);
-            }
-        }
-    }
-    let mut values: Vec<String> = vars.into_iter().collect();
-    values.sort();
-    values
-}
-
-fn collect_action_placeholders(action: &Action, vars: &mut HashSet<String>) {
-    collect_prompt_block_placeholders(action.pre.as_ref(), vars);
-    collect_prompt_block_placeholders(action.prompt.as_ref(), vars);
-    collect_prompt_block_placeholders(action.post.as_ref(), vars);
-}
-
-fn collect_prompt_block_placeholders(block: Option<&PromptBlock>, vars: &mut HashSet<String>) {
-    let Some(block) = block else {
-        return;
-    };
-    match block {
-        PromptBlock::Single(text) => extract_placeholders(text, vars),
-        PromptBlock::Multi(items) => {
-            for item in items {
-                extract_placeholders(item, vars);
-            }
-        }
-    }
-}
-
-fn extract_placeholders(text: &str, vars: &mut HashSet<String>) {
-    let mut remaining = text;
-    while let Some(start) = remaining.find("{{") {
-        if let Some(end) = remaining[start + 2..].find("}}") {
-            let raw = &remaining[start + 2..start + 2 + end];
-            let trimmed = raw.trim();
-            if !trimmed.is_empty() {
-                vars.insert(trimmed.to_string());
-            }
-            remaining = &remaining[start + 2 + end + 2..];
-        } else {
-            break;
-        }
-    }
-}
-
-fn find_missing_vars(required: &[String], available: &TemplateVars) -> Vec<String> {
-    let mut missing = Vec::new();
-    for key in required {
-        if !available.contains_key(key) {
-            missing.push(key.clone());
-        }
-    }
-    missing
-}
-
-fn default_template() -> String {
-    let template = r#"target: "ai:5.0"
-iterations: 10
-poll: 5
-initial_poll: 5
-trigger_confirm_seconds: 5
-log_preview_lines: 3
-trigger_edge: true
-recheck_before_send: true
-duration: 2h
-
-template_vars:
-  project: loopmux
-
-rule_eval: first_match
-
-default_action:
-  pre: "Keep context on UX simplification."
-  prompt: "Do the next iteration."
-  post: "Run lint/tests; fix failures."
-
-delay:
-  mode: range
-  min: 5
-  max: 120
-
-rules:
-  - id: continue-loop
-    match:
-      exact_line: "<CONTINUE-LOOP>"
-    action:
-      prompt: "Continue iteration in the wt flow e2e, remember to commit small advances."
-    next: success-path
-
-  - id: success-path
-    match:
-      regex: "(All tests passed|LGTM)"
-    exclude:
-      regex: "PROD"
-    action:
-      prompt: "Continue with next iteration."
-    next: review-path
-
-  - id: failure-path
-    match:
-      regex: "(FAIL|Error|Exception)"
-    action:
-      pre: "Fix the errors before proceeding."
-      prompt: "Repair and re-run tests."
-      post: "Summarize fixes."
-    next: success-path
-"#;
-    template.to_string()
 }
