@@ -20,6 +20,9 @@ loopmux watches tmux output and injects prompts when a trigger matches. You can 
 - Mid-flight loop runner (tmux capture + send)
 - Structured logging (text or JSONL)
 
+## Architecture
+- Module boundary note: `docs/module-boundaries.md`
+
 ## Support loopmux
 If loopmux saves you time, consider supporting maintenance and future releases:
 
