@@ -8,13 +8,15 @@ use crossterm::cursor::MoveTo;
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use crossterm::terminal::{Clear, ClearType};
 
+use crate::run_loop::{
+    RawModeGuard, copy_to_clipboard, fleet_stop_snippet, jump_to_tmux_target, render_with_retry,
+};
 use crate::{FleetControlCommand, FleetVisibleArgs};
 use crate::{
     FleetDetailRenderArgs, FleetListedRun, FleetPaneRenderer, FleetSortMode, FleetStateFilter,
-    FleetViewPreset, LegacyFleetPaneRenderer, PendingFleetAction, RawModeGuard,
-    dispatch_fleet_command, fit_line, fleet_bulk_confirmation, fleet_command_label,
-    fleet_header_line, fleet_manager_counts, fleet_manager_visible_runs, fleet_status_line,
-    jump_to_tmux_target, load_fleet_runs, pad_to_width, render_with_retry, truncate_text,
+    FleetViewPreset, LegacyFleetPaneRenderer, PendingFleetAction, dispatch_fleet_command, fit_line,
+    fleet_bulk_confirmation, fleet_command_label, fleet_header_line, fleet_manager_counts,
+    fleet_manager_visible_runs, fleet_status_line, load_fleet_runs, pad_to_width, truncate_text,
 };
 
 pub(crate) fn run_fleet_manager_tui(profile_filter: Option<&str>) -> Result<()> {
@@ -709,7 +711,7 @@ pub(crate) fn copy_selected_run_id(runs: &[FleetListedRun], selected: usize) -> 
     let Some(run) = runs.get(selected) else {
         return "no run selected".to_string();
     };
-    match crate::copy_to_clipboard(&run.record.id) {
+    match copy_to_clipboard(&run.record.id) {
         Ok(()) => format!("copied run id: {}", run.record.id),
         Err(err) => format!("copy failed: {err}"),
     }
@@ -719,8 +721,8 @@ pub(crate) fn copy_selected_run_command(runs: &[FleetListedRun], selected: usize
     let Some(run) = runs.get(selected) else {
         return "no run selected".to_string();
     };
-    let snippet = crate::fleet_stop_snippet(&run.record.id);
-    match crate::copy_to_clipboard(&snippet) {
+    let snippet = fleet_stop_snippet(&run.record.id);
+    match copy_to_clipboard(&snippet) {
         Ok(()) => format!("copied snippet: {}", snippet),
         Err(err) => format!("copy failed: {err}"),
     }
