@@ -4,9 +4,9 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::run_loop::load_run_history_from_path;
 use crate::{
-    DEFAULT_HISTORY_LIMIT, history_path, load_run_history_from_path, prompt_editor_history_path,
-    timestamp_now, truncate_text,
+    DEFAULT_HISTORY_LIMIT, history_path, prompt_editor_history_path, timestamp_now, truncate_text,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
