@@ -165,3 +165,7 @@
 - Release published: `https://github.com/dmoliveira/loopmux/releases/tag/v0.1.46`.
 - Tag: `v0.1.46`.
 - Preflight and publish checks passed: `cargo fmt --check`, `cargo test -q` (151 passed), `make smoke-trigger-e2e`.
+
+### Post-Release
+- Bumped package version to `0.1.47-dev` for next iteration cycle.
+- Updated Homebrew tap formula to `v0.1.46` and verified local install with `loopmux --version`.
