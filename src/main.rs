@@ -27,6 +27,7 @@ mod fleet_tui;
 mod logging;
 mod prompt_editor;
 mod run_loop;
+mod run_view_render;
 mod run_view_tui;
 mod source_inputs;
 mod template;
